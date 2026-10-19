@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ocean simulator</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #071018; color: #d5dde4; font: 14px/1.4 ui-sans-serif, system-ui, sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #panel {
+      position: fixed; top: 16px; left: 16px; width: 280px;
+      padding: 14px 14px 12px; background: rgba(7, 16, 24, 0.82);
+      border: 1px solid rgba(213, 221, 228, 0.25); border-radius: 10px;
+    }
+    h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+    p { margin: 0 0 10px; color: #b7c2cb; }
+    label { display: block; margin: 8px 0 2px; }
+    input[type="range"] { width: 100%; }
+    .row { display: flex; justify-content: space-between; gap: 8px; }
+    select, button { font: inherit; }
+    #gravity { font-size: 12px; color: #9aa7b2; }
+    #readout, #bands { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <canvas id="sea"></canvas>
+  <section id="panel">
+    <h1>Open ocean</h1>
+    <p>One sea, three spectral bands. Colours are placeholders.</p>
+    <label class="row"><span>Wind direction</span><span id="dir-val">90°</span></label>
+    <input id="dir" type="range" min="0" max="359" value="90">
+    <label class="row"><span>Wind speed</span><span id="spd-val">12 m/s</span></label>
+    <input id="spd" type="range" min="0" max="25" step="0.5" value="12">
+    <label class="row"><span>Choppiness</span><span id="chop-val">1.5</span></label>
+    <input id="chop" type="range" min="0" max="2.5" step="0.1" value="1.5">
+    <label class="row"><span>Size</span><span id="size-val">250 m</span></label>
+    <input id="size" type="range" min="100" max="1000" step="10" value="250">
+    <label class="row"><span>Gusts</span></label>
+    <select id="gust">
+      <option value="continuous" selected>Continuous</option>
+      <option value="gusty">Gusty</option>
+    </select>
+    <label class="row"><span>Depth</span><span id="depth-val">40 m</span></label>
+    <input id="depth" type="range" min="2" max="80" step="1" value="40">
+    <p id="gravity"></p>
+    <label><input id="flags" type="checkbox"> Show break flags</label>
+    <label><input id="pause" type="checkbox"> Pause the sea</label>
+    <p id="bands"></p>
+    <p id="readout"></p>
+    <p id="clock"></p>
+    <p id="camera"></p>
+    <p>Drag to look. Scroll to zoom.</p>
+  </section>
+  <script type="module" src="./src/main.js?v=27.2"></script>
+</body>
+</html>

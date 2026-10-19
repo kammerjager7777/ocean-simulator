@@ -1,0 +1,1 @@
+- 20:39 built-in sin/cos replaced by turns-reduced Taylor sinCos: 25 m/s dh 1.49 -> 0.007 mm. Renderer ES3 conversion exact: v27 ?physics=cpu vs v26 = 0 px. 'calm water' redefined (break slope within reach+3 < 0.75 breakSlope, no depth limit). Rerunning full parity + gusty.
