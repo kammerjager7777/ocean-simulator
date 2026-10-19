@@ -1,10 +1,10 @@
 import { GRAVITY_NOTE } from "./physics/gravity.js";
-import { scenario } from "./physics/scenario.js?v=27.2";
+import { scenario } from "./physics/scenario.js?v=28";
 import { createWind } from "./physics/wind.js";
-import { createSurface } from "./physics/surface.js?v=27.2";
-import { createView } from "./render/view.js?v=27.2";
-import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=27.2";
-import { createPerf } from "./perf.js?v=27.2";
+import { createSurface } from "./physics/surface.js?v=28";
+import { createView } from "./render/view.js?v=28";
+import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=28";
+import { createPerf } from "./perf.js?v=28";
 
 // ?chopSpectrum=pm (or =elfouhaily) picks the chop band's spectrum for A/B comparison.
 // It only changes that band's scenario setting; nothing else reads it.
@@ -37,6 +37,7 @@ if (physicsMode === "gpu") {
   }
 }
 if (!surface) surface = createSurface(scenario, wind);
+if (typeof window !== "undefined") window.__surface = surface;
 if (typeof window !== "undefined") { window.__physics = { mode: physicsMode, note: physicsNote }; window.__surface = surface; }
 const perf = params.get("perf") === "1" ? createPerf(view.gl, physicsMode) : null;
 
@@ -93,11 +94,14 @@ function readout(state) {
 if (surface.kind === "gpu") surface.onCounts = (s) => { if (s === state) readout(s); };
 
 const MAX_BACKLOG = 2;
+const noDraw = params.get("nodraw") === "1";
+// ?fixdt=<s> (headless measurement): fixed physics step, so sim time hits exact sample times
+const fixDt = Number(params.get("fixdt") || 0);
 function frame(now) {
   // Next frame first: an exception in this one must not stop the loop (v27.1; a stopped
   // loop is why a ?perf=1 run could end without its __perf line).
   requestAnimationFrame(frame);
-  const dt = Math.min(0.05, (now - last) / 1000);
+  const dt = fixDt > 0 ? fixDt : Math.min(0.05, (now - last) / 1000);
   const waitCard = surface.backlog && state && !pause.checked && surface.backlog() > MAX_BACKLOG;
   if (!waitCard) last = now;
   const t0 = performance.now();
@@ -118,7 +122,12 @@ function frame(now) {
   }
   if (perf) perf.endPhysics();
   const t1 = performance.now();
-  view.draw(state, flags.checked);
+  // ?nodraw=1 (headless capture): step the physics without drawing; draw only while paused
+  // or on the frame a capture harness holds at (window.__holdTargets). The physics never
+  // reads the drawing, and each step takes a fixed dt, so the state at a sim time is the
+  // same as when every frame is drawn.
+  const capT = window.__holdTargets;
+  if (!noDraw || pause.checked || (capT && capT.length && simTime >= capT[0] - 1e-6)) view.draw(state, flags.checked);
   const fine = state.chopPatch && state.chopPatch.modes
     ? ` · Fine chop on its own ${state.chopPatch.size} m patch (${state.chopPatch.longest.toFixed(1)} to ${state.chopPatch.shortest.toFixed(1)} m waves): ${state.chopPatch.significantHeight.toFixed(2)} m`
     : "";
@@ -142,7 +151,7 @@ if (physicsNote) {
 
 // ?parity=1: CPU-vs-GPU parity test on this page's context (tests only; see parity.js).
 if (params.get("parity") === "1") {
-  import("./physics/parity.js?v=27.2").then(({ runParity }) => runParity(view.gl, {
+  import("./physics/parity.js?v=28").then(({ runParity }) => runParity(view.gl, {
     speeds: (params.get("speeds") || "0,5,10,17.5,25").split(",").map(Number),
     seconds: Number(params.get("seconds") || 6),
     gust: params.get("gust") || "continuous",

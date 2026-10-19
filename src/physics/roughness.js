@@ -18,9 +18,12 @@ export function coxMunkMss(windSpeed) {
 
 // bands: the surface's band states (each with components {amplitude, k}); chopPatch,
 // finePatch: this step's patch states (rmsSlope); windSpeed: the chop band's lagged wind.
-export function slopeBudget(bands, chopPatch, finePatch, windSpeed) {
+// gridMss (optional): the resolved slope of the main sea when it is not the components'
+// sum (the GPU's FFT sea: its explicit long waves plus the lattice integral, fftSea.js).
+export function slopeBudget(bands, chopPatch, finePatch, windSpeed, gridMss) {
   let grid = 0;
-  for (const band of bands) for (const c of band.components) grid += (c.amplitude * c.k) ** 2 / 2;
+  if (gridMss !== undefined) grid = gridMss;
+  else for (const band of bands) for (const c of band.components) grid += (c.amplitude * c.k) ** 2 / 2;
   const coarse = chopPatch ? chopPatch.rmsSlope ** 2 : 0;
   const fine = finePatch ? finePatch.rmsSlope ** 2 : 0;
   const resolved = grid + coarse + fine;

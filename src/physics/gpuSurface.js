@@ -1,4 +1,7 @@
-// GPU physics (WebGL2): the same sea as surface.js, computed on the graphics card.
+// GPU physics (WebGL2), v28: the main sea is a spectral (FFT) sea on the card (fftSea.js);
+// the break test, foam and ages below run on its grid exactly as in v27.
+// (v27's header follows; pass 1 now reads the FFT fields and adds only the explicit long
+// waves the tile cannot hold.)
 //
 // What stays on the CPU (cheap, per wave component, never per point): the wind and its
 // per-band lag (wind.js), each band's retune (band.js: spectrum, amplitudes, the PM-level
@@ -15,11 +18,12 @@
 // The renderer reads the textures directly; nothing per point comes back to the CPU.
 // readFields() reads the whole field back, for parity tests only.
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, bandVariance } from "./band.js?v=27.2";
-import { createGpuChopPatch } from "./gpuPatch.js?v=27.2";
-import { initPassTimer, timed, passTimes } from "./passTimer.js?v=27.2";
-import { slopeBudget } from "./roughness.js?v=27.2";
-import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY } from "./surface.js?v=27.2";
+import { createBand, retuneBand, bandVariance } from "./band.js?v=28";
+import { createGpuChopPatch } from "./gpuPatch.js?v=28";
+import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=28";
+import { slopeBudget } from "./roughness.js?v=28";
+import { createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=28";
+import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=28";
 
 const TAU = Math.PI * 2;
 // Ages of samples that have never carried foam (surface.js uses Infinity).
@@ -44,7 +48,7 @@ void main() {
 // so the card steps exactly the same cells: along travel (s = -1..3), along the crest
 // (j = -1..5) and the join's fractional travel steps round(t * w j / s).
 const OFFSET_GLSL = `
-uniform ivec2 uOffT[5];   // along travel, s = -1..3 at [s + 1]
+uniform ivec2 uOffT[${FACE_MAX + 2}];   // along travel, s = -1..FACE_MAX at [s + 1]
 uniform ivec2 uOffC[7];   // along crest, j = -1..5 at [j + 1]
 uniform ivec2 uOffF[30];  // join gap, [pair(s, j) * 3 + w + 1]
 uniform vec2 uTravel;
@@ -77,18 +81,31 @@ uniform vec4 uW0[MAXC];  // amplitude, break amplitude, k, 1 for the chop band
 uniform vec4 uW1[MAXC];  // cos dir, sin dir, turns per cell in x and z (coarse part)
 uniform vec4 uW2[MAXC];  // turns per cell in x and z (fine part), phase at cell (0,0) in turns
 uniform float uChop;
+uniform sampler2D tT0;
+uniform sampler2D tT1;
+uniform sampler2D tT2;
+uniform sampler2D tT3;
+uniform sampler2D tT4;
 uniform float uBreakSlope;
 uniform float uDepthLimit;
 layout(location = 0) out vec4 oA; // height, shift x, shift z, Jacobian
 layout(location = 1) out vec4 oB; // normal xyz, steep
 layout(location = 2) out vec4 oC; // dh/dx, dh/dz, break height, break slope
+layout(location = 3) out vec4 oD; // v28 long-slope rule: explicit long-wave height, its dh/dx, dh/dz, unused
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   float fx = float(p.x);
   float fz = float(p.y);
-  float height = 0.0, dhdx = 0.0, dhdz = 0.0, shiftX = 0.0, shiftZ = 0.0;
-  float squeezeX = 0.0, squeezeZ = 0.0, squeezeXZ = 0.0, chopDx = 0.0, chopDz = 0.0;
-  float bh = 0.0, bdx = 0.0, bdz = 0.0;
+  // The FFT sea at this grid point, then the explicit long waves on top.
+  vec4 f0 = texelFetch(tT0, p, 0);
+  vec4 f1 = texelFetch(tT1, p, 0);
+  vec4 f2 = texelFetch(tT2, p, 0);
+  vec4 f3 = texelFetch(tT3, p, 0);
+  vec4 f4 = texelFetch(tT4, p, 0);
+  float height = f0.y, dhdx = f2.z, dhdz = f2.w, shiftX = f0.z, shiftZ = f1.x;
+  float squeezeX = f3.x, squeezeZ = f3.y, squeezeXZ = f3.z, chopDx = f1.z - f2.z, chopDz = f2.x - f2.w;
+  float bh = f3.w, bdx = f4.x, bdz = f4.y;
+  float xh = 0.0, xdx = 0.0, xdz = 0.0;
   for (int i = 0; i < MAXC; i += 1) {
     if (i >= uCount) break;
     vec4 a = uW0[i];
@@ -109,6 +126,7 @@ void main() {
     height += amplitude * s;
     float gx = slopeScale * cx * co;
     float gz = slopeScale * cz * co;
+    xh += amplitude * s; xdx += gx; xdz += gz;
     dhdx += gx;
     dhdz += gz;
     shiftX += amplitude * cx * co;
@@ -138,19 +156,34 @@ void main() {
   oA = vec4(height, uChop * shiftX, uChop * shiftZ, ny);
   oB = vec4(nx / len, ny / len, nz / len, steep);
   oC = vec4(dhdx, dhdz, bh, slope);
+  oD = vec4(xh, xdx, xdz, 0.0);
 }`;
 }
 
 // v27.2: sum of H over x - uR .. x + uR in each row (for LOCAL_FS's translucency mean).
 const ROWSUM_FS = HEADER + `
 uniform sampler2D tA;
+uniform sampler2D tC;
 uniform int uR;
-out vec4 o;
+uniform sampler2D tX;
+uniform int uShort; // v28 long-slope rule: the trough mean is of the short-wave height (H - explicit)
+uniform int uRB; // v28 foam fix: the break test's trough window (cells); .w is that row MEAN, clamped at the edges
+out vec4 o; // row sums over 2uR+1 cells: height, break height; row max of the steepest slope; .w row sum of height over 2uRB+1
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
-  float t = 0.0;
-  if (p.x >= uR && p.x < uN - uR) for (int dx = -uR; dx <= uR; dx += 1) t += texelFetch(tA, p + ivec2(dx, 0), 0).x;
-  o = vec4(t, 0.0, 0.0, 0.0);
+  float t = 0.0, tb = 0.0, st = 0.0, tw = 0.0;
+  // clamped at the tile edge: the mean over the cells that exist
+  { int x0 = max(p.x - uRB, 0), x1 = min(p.x + uRB, uN - 1);
+    for (int x = x0; x <= x1; x += 1) tw += texelFetch(tA, ivec2(x, p.y), 0).x - (uShort == 1 ? texelFetch(tX, ivec2(x, p.y), 0).x : 0.0);
+    tw /= float(x1 - x0 + 1); }
+  if (p.x >= uR && p.x < uN - uR) for (int dx = -uR; dx <= uR; dx += 1) {
+    ivec2 q = p + ivec2(dx, 0);
+    t += texelFetch(tA, q, 0).x;
+    vec4 c = texelFetch(tC, q, 0);
+    tb += c.z;
+    st = max(st, length(c.xy));
+  }
+  o = vec4(t, tb, st, tw);
 }`;
 
 const LOCAL_FS = HEADER + OFFSET_GLSL + `
@@ -158,18 +191,88 @@ uniform sampler2D tA;
 uniform sampler2D tB;
 uniform sampler2D tHX;
 uniform sampler2D tC;
+uniform sampler2D tX;
 uniform int uReach;
 uniform int uR;
 uniform float uSpacing;
 uniform vec4 uTransl; // skin, length, max thickness, unused
+uniform vec2 uOpt;    // smoothing on, lip gate on
+uniform vec2 uBrkMod; // M, k_L
+uniform float uBrkLg; // long-slope gain (diagnostic ?brkLg, default 1)
+uniform vec4 uBrk;   // v28 foam fix: mode (1 = total-height steepness rule), steepness threshold, trough window uRB (cells), curvature stencil (cells)
+uniform vec4 uWidth;  // v28 width test: sample distance (cells), thick-water Jacobian, Jacobian floor, unused
 out vec4 o; // breaks, lips, thins, travel-axis crest
 float H(ivec2 q) { return texelFetch(tA, q, 0).x; }
+// v28 long-slope rule (mode 2): the break test reads the short-wave height (total minus the
+// explicit long waves) and adds the long wave's local slope to the short wave's steepness.
+float HB(ivec2 q) { return texelFetch(tA, q, 0).x - (uBrk.x > 1.5 ? texelFetch(tX, q, 0).x : 0.0); }
+float HBS(ivec2 q) {
+  float t = 0.0;
+  for (int dz = -1; dz <= 1; dz += 1) for (int dx = -1; dx <= 1; dx += 1) t += HB(q + ivec2(dx, dz));
+  return t / 9.0;
+}
+float HS(ivec2 q) {
+  float t = 0.0;
+  for (int dz = -1; dz <= 1; dz += 1) for (int dx = -1; dx <= 1; dx += 1) t += H(q + ivec2(dx, dz));
+  return t / 9.0;
+}
+float HQ(ivec2 q) { return uWidth.w > 2.5 ? texelFetch(tC, q, 0).z : (uOpt.x > 0.5 ? HS(q) : H(q)); }
+// crest thickness at q by the same estimate (1e3 where not a crest or out of range)
+float thickAt(ivec2 q) {
+  if (q.x < 2 || q.y < 2 || q.x >= uN - 2 || q.y >= uN - 2) return 1e3;
+  float h = HQ(q);
+  float lap = (HQ(q - ivec2(1, 0)) + HQ(q + ivec2(1, 0)) + HQ(q - ivec2(0, 1)) + HQ(q + ivec2(0, 1)) - 4.0 * h) / (uSpacing * uSpacing);
+  float jac = max(texelFetch(tA, q, 0).w, uWidth.z);
+  float kappa = -lap / (jac * jac);
+  if (kappa <= 1e-6) return 1e3;
+  float slopeD = length(texelFetch(tC, q, 0).xy) / jac;
+  float depthBelow = (slopeD * slopeD) / (2.0 * kappa) + uTransl.x;
+  return 2.0 * sqrt((2.0 * depthBelow) / kappa);
+}
 float BH(ivec2 q) { return texelFetch(tC, q, 0).z; }
+// v28 lip-width rule: thin candidate = crest thinner than max thickness by the raw estimate
+// dominant travel direction (the wind's, which the FFT's dominant k follows)
+ivec2 tv(int s) { vec2 t = length(uTravel) > 1e-6 ? normalize(uTravel) : vec2(1.0, 0.0); return ivec2(round(t * float(s))); }
+bool candAt(ivec2 q) { return inside(q) && thickAt(q) < uTransl.z; }
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   ivec2 steps[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
   float brk = 0.0, lip = 0.0, thin = 0.0, crest = 0.0;
-  if (p.x >= 1 && p.y >= 1 && p.x < uN - 1 && p.y < uN - 1) {
+  int mB = int(uBrk.w) + 1;
+  if (uBrk.x > 0.5) {
+    // v28 foam fix (GAD): the break test on the total height (FFT + explicit waves). A crest
+    // (local max of the height) breaks when its own wave is steep: elevation above the local
+    // trough level (mean over the trough window) times the cell's dominant wavenumber, from
+    // the crest curvature of the 3x3-averaged height (for a wave a sin(kx): -h''/h = k^2 at
+    // the crest, so a k = sqrt(-h'' h)), reaches the steepness threshold.
+    if (p.x >= mB && p.y >= mB && p.x < uN - mB && p.y < uN - mB) {
+      float h = HB(p);
+      float drop = 0.0;
+      ivec2 d = ivec2(0);
+      for (int i = 0; i < 4; i += 1) {
+        float fall = h - HB(p + steps[i]);
+        if (fall > drop) { drop = fall; d = steps[i]; }
+      }
+      if (drop > 0.0 && h >= HB(p - d)) {
+        int RB = int(uBrk.z);
+        int z0 = max(p.y - RB, 0), z1 = min(p.y + RB, uN - 1);
+        float mean = 0.0;
+        for (int z = z0; z <= z1; z += 1) mean += texelFetch(tHX, ivec2(p.x, z), 0).w;
+        mean /= float(z1 - z0 + 1);
+        int TS = int(uBrk.w);
+        float hs = HBS(p);
+        float dd = float(TS) * uSpacing;
+        float lap = (HBS(p - ivec2(TS, 0)) + HBS(p + ivec2(TS, 0)) + HBS(p - ivec2(0, TS)) + HBS(p + ivec2(0, TS)) - 4.0 * hs) / (dd * dd);
+        float eta = hs - mean;
+        // mode 2: plus the long explicit wave's local slope under this crest
+        float longSlope = uBrk.x > 1.5 ? uBrkLg * length(texelFetch(tX, p, 0).yz) : 0.0;
+        // GAD 20:05 (a): short waves riding a long crest are steepened: x (1 + M a_L k_L), a_L the
+        // long-wave elevation here (crests only), k_L the peak wavenumber (uBrkMod = M, k_L).
+        float strain = uBrk.x > 1.5 ? 1.0 + uBrkMod.x * max(0.0, texelFetch(tX, p, 0).x * uBrkMod.y) : 1.0;
+        if (eta > 0.0 && lap < 0.0 && sqrt(-lap * eta) * strain + longSlope >= uBrk.y) brk = 0.25;
+      }
+    }
+  } else if (p.x >= 1 && p.y >= 1 && p.x < uN - 1 && p.y < uN - 1) {
     float h = BH(p);
     float drop = 0.0;
     ivec2 d = ivec2(0);
@@ -185,6 +288,8 @@ void main() {
       if (texelFetch(tB, q, 0).w > 0.5) { face = true; break; }
     }
     if (drop > 0.0 && h >= opposite && face) brk = 0.25;
+  }
+  if (p.x >= 1 && p.y >= 1 && p.x < uN - 1 && p.y < uN - 1) {
     float hl = H(p);
     float dropL = 0.0;
     ivec2 l = ivec2(0);
@@ -205,24 +310,74 @@ void main() {
     }
   }
   // Thin-crest transmission (see TRANSLUCENCY in surface.js).
-  if (p.x >= uR && p.y >= uR && p.x < uN - uR && p.y < uN - uR) {
-    float h = H(p);
-    float lap = (H(p - ivec2(1, 0)) + H(p + ivec2(1, 0)) + H(p - ivec2(0, 1)) + H(p + ivec2(0, 1)) - 4.0 * h) / (uSpacing * uSpacing);
-    float jac = max(texelFetch(tA, p, 0).w, 0.2);
+  // v28: the FFT heights carry chop down to one cell. Read raw, that chop's curvature and slope
+  // on a broad crest top make the whole face look thin (GAD slab, v28-5.20). Height, slope and
+  // curvature are all taken from the 3x3-averaged height over a TS-cell stencil, about the
+  // scale v27's grid resolved, so only a real lip is thin.
+  if (p.x >= uR + 3 && p.y >= uR + 3 && p.x < uN - uR - 3 && p.y < uN - uR - 3) {
+    const int TS = 2;
+    float h = HQ(p);
+    float hx0 = HQ(p - ivec2(TS, 0)), hx1 = HQ(p + ivec2(TS, 0));
+    float hz0 = HQ(p - ivec2(0, TS)), hz1 = HQ(p + ivec2(0, TS));
+    float d = float(TS) * uSpacing;
+    float lap = (hx0 + hx1 + hz0 + hz1 - 4.0 * h) / (d * d);
+    // FFT chop folds the crest band (J near 0); dividing by J^2 there turned a broad band into
+    // a 'lip' 25x too curved. The thickness estimate keeps J >= 0.6.
+    float jac = max(texelFetch(tA, p, 0).w, uWidth.z);
     float kappa = -lap / (jac * jac);
     if (kappa > 1e-6) {
-      // v27.2: the box mean from ROWSUM_FS's row sums (2uR + 1 fetches, was (2uR + 1)^2).
-      // Same terms; float association differs from surface.js (rows first) at rounding level.
-      float mean = 0.0;
-      for (int dz = -uR; dz <= uR; dz += 1) mean += texelFetch(tHX, p + ivec2(0, dz), 0).x;
+      float mean = 0.0, steepN = 0.0;
+      // v27.2 rowsum: 2uR + 1 fetches (was (2uR + 1)^2); the crest source's sum (break height
+      // in modes 3-4, else height) and the steepest slope come from the same rows.
+      for (int dz = -uR; dz <= uR; dz += 1) {
+        vec4 rs = texelFetch(tHX, p + ivec2(0, dz), 0);
+        mean += uWidth.w > 2.5 ? rs.y : rs.x;
+        steepN = max(steepN, rs.z);
+      }
       mean /= float((2 * uR + 1) * (2 * uR + 1));
-      if (h - mean > 0.0) {
-        float slopeD = length(texelFetch(tC, p, 0).xy) / jac;
+      // A lip stands on a steep face (as the crest glow does, slope 0.12-0.4); a broad,
+      // gently sloped crest face is not a lip and gets no transmission.
+      float lipGate = mix(1.0, smoothstep(0.12, 0.4, steepN), uOpt.y);
+      if (h - mean > 0.0 && lipGate > 0.0) {
+        float slopeD = length(vec2(hx1 - hx0, hz1 - hz0) / (2.0 * d)) / jac;
         float depthBelow = (slopeD * slopeD) / (2.0 * kappa) + uTransl.x;
         float thickness = 2.0 * sqrt((2.0 * depthBelow) / kappa);
         if (thickness < uTransl.z) {
           float cut = 1.0 - thickness / uTransl.z;
-          thin = exp(-thickness / uTransl.y) * cut * cut * (3.0 - 2.0 * cut);
+          thin = lipGate * exp(-thickness / uTransl.y) * cut * cut * (3.0 - 2.0 * cut);
+          // Width test: a lip is narrow, so the water just above and below it along the slope
+          // is thick (Jacobian near 1); a broad face is low-Jacobian across and fails.
+          vec2 gr = texelFetch(tC, p, 0).xy;
+          if (length(gr) > 1e-6) {
+            ivec2 o = ivec2(round(normalize(gr) * uWidth.x));
+            ivec2 qa = p + o, qb = p - o;
+            if (uWidth.w > 2.5 && uWidth.w < 3.5) {
+              // mode 3: v27 crest source (band-limited height), no width test
+            } else if (uWidth.w > 1.5) {
+              // mode 2 (FFT height) / mode 4 (band-limited height): lip-width rule
+              // mode 2: run of candidates along travel <= uWidth.x cells, and the cell on the
+              // crest's forward edge (Jacobian falling along travel)
+              int run = 1;
+              for (int s = 1; s <= 4; s += 1) { if (candAt(p + tv(s))) run += 1; else break; }
+              for (int s = 1; s <= 4; s += 1) { if (candAt(p + tv(-s))) run += 1; else break; }
+              ivec2 fa = p + tv(1), fb = p + tv(-1);
+              float jf = inside(fa) ? texelFetch(tA, fa, 0).w : 1.0;
+              float jb = inside(fb) ? texelFetch(tA, fb, 0).w : 1.0;
+              bool fwd = jf < jb - uWidth.y;
+              // crest continuity (uTransl.w > 0.5): a lip runs along the crest, so a candidate
+              // with no candidate beside it across travel is an isolated spot, not a lip
+              ivec2 pc = tv(1).yx * ivec2(-1, 1);
+              bool cont = uTransl.w < 0.5 || candAt(p + pc) || candAt(p - pc);
+              if (float(run) > uWidth.x + 0.5 || !fwd || !cont) thin = 0.0;
+            } else if (uWidth.w > 0.5) {
+              // thickness mode: the neighbours' own crest thickness must exceed ~2 m
+              thin *= smoothstep(uWidth.y - 0.5, uWidth.y + 0.5, min(thickAt(qa), thickAt(qb)));
+            } else {
+              float ja = inside(qa) ? texelFetch(tA, qa, 0).w : 1.0;
+              float jb = inside(qb) ? texelFetch(tA, qb, 0).w : 1.0;
+              thin *= smoothstep(uWidth.y - 0.1, uWidth.y + 0.1, min(ja, jb));
+            }
+          }
         }
       }
     }
@@ -276,7 +431,11 @@ void main() {
           // Never snap behind both ends of the gap: that would be the back of the crest.
           float offB = dot(vec2(c - p), uTravel);
           float offP = dot(vec2(c - partner), uTravel);
-          if (offB < -0.5 && offP < -0.5) continue;
+          // ...and only where the cell is ahead of an end it is within 4 cells of (CPU mirror).
+          ivec2 dB = c - p; ivec2 dP = c - partner;
+          bool okB = offB >= -0.5 && dB.x * dB.x + dB.y * dB.y <= 16;
+          bool okP = offP >= -0.5 && dP.x * dP.x + dP.y * dP.y <= 16;
+          if (!okB && !okP) continue;
           float hc = BH(c);
           if (best == 2 || hc > bestH) { best = m; bestH = hc; }
         }
@@ -299,7 +458,17 @@ uniform sampler2D tJP;
 uniform float uHalf;
 uniform float uSpacing;
 uniform float uNoAhead;
+uniform int uFace;      // face steps (faceStepsAt): 0.1 x peak wavelength in cells
+uniform int uJoinSteps; // joined gap cells: min(3, uFace)
 out vec4 o; // flag, grade, metres ahead of the crest it was painted from, 0
+// surface.js faceGrade: the 4-step shape (1, 0.5, 0.2, 0.06) stretched over F steps
+float faceGrade(int s, int F) {
+  float G[4] = float[4](1.0, 0.5, 0.2, 0.06);
+  float u = 3.0 * float(s) / float(max(F, 1));
+  int i = int(floor(u));
+  if (i >= 3) return G[3];
+  return G[i] + (G[i + 1] - G[i]) * (u - float(i));
+}
 float BH(ivec2 q) { return texelFetch(tC, q, 0).z; }
 float travelPos(ivec2 q) {
   vec2 sh = texelFetch(tA, q, 0).yz;
@@ -312,18 +481,18 @@ bool nearTo(ivec2 q, ivec2 a, ivec2 b) {
 }
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
-  float grades[4] = float[4](1.0, 0.5, 0.2, 0.06);
   float grade = 0.0;
   float key = 1e30;
   float crestPos = 0.0;
   float idxScale = 32.0;
   // Direct paint: a break s steps behind, with the face dropping all the way to here.
-  for (int s = 0; s <= 3; s += 1) {
+  for (int s = 0; s <= ${FACE_MAX}; s += 1) {
+    if (s > uFace) break;
     ivec2 b = p - offT(s);
     if (!inside(b) || !(texelFetch(tL, b, 0).x > 0.0)) continue;
     bool ok = true;
     float prev = BH(b);
-    for (int k = 1; k <= 3; k += 1) {
+    for (int k = 1; k <= ${FACE_MAX}; k += 1) {
       if (k > s) break;
       ivec2 f = b + offT(k);
       if (!inside(f)) { ok = false; break; }
@@ -332,7 +501,7 @@ void main() {
       prev = h;
     }
     if (!ok) continue;
-    float g = grades[s];
+    float g = faceGrade(s, uFace);
     float kk = float(b.y * uN + b.x) * idxScale + float(s);
     if (g > grade || (g == grade && kk < key)) { grade = g; key = kk; crestPos = travelPos(b); }
   }
@@ -341,11 +510,12 @@ void main() {
   // the joins that paint k steps ahead of g (grade depends on k alone), so this is the
   // same choice as the full loop, in 4 fetches.
   for (int k = 0; k <= 3; k += 1) {
+    if (k > uJoinSteps) break;
     ivec2 g = p - offT(k);
     if (!inside(g)) continue;
     float kk = texelFetch(tJP, g, 0)[k];
     if (kk >= 1e29) continue;
-    float gr = grades[k];
+    float gr = faceGrade(k, uFace);
     if (gr > grade || (gr == grade && kk < key)) { grade = gr; key = kk; crestPos = travelPos(g); }
   }
   if (grade > 0.0) o = vec4(1.0, grade, travelPos(p) - crestPos, 0.0);
@@ -440,6 +610,7 @@ const JOINPAINT_FS = HEADER + OFFSET_GLSL + `
 uniform sampler2D tC;
 uniform sampler2D tJ;
 uniform sampler2D tJM;
+uniform int uJoinSteps;
 out vec4 o;
 float BH(ivec2 q) { return texelFetch(tC, q, 0).z; }
 bool nearTo(ivec2 q, ivec2 a, ivec2 b) {
@@ -472,6 +643,7 @@ void main() {
             bool ok = true;
             float prev = BH(g);
             for (int k = 0; k <= 3; k += 1) {
+              if (k > uJoinSteps) break;
               if (k > 0) {
                 ivec2 f = g + offT(k);
                 if (!inside(f) || !nearTo(f, b, partner)) ok = false;
@@ -547,13 +719,15 @@ export function gpuPhysicsProblem(gl) {
   if (!gl.getExtension("EXT_color_buffer_float")) return "EXT_color_buffer_float is missing (float render targets)";
   if (gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS) < 6) return "too few vertex texture units";
   if (gl.getParameter(gl.MAX_DRAW_BUFFERS) < 3) return "too few draw buffers";
-  return null;
+  return fftSeaProblem(gl);
 }
 
 export function createGpuSurface(gl, scenario, wind) {
   const problem = gpuPhysicsProblem(gl);
   if (problem) throw new Error("GPU physics unavailable: " + problem);
-  const n = scenario.resolution;
+  // The physics grid is the FFT tile: N x N over scenario.size (spacing size / N).
+  const n = scenario.fft || 256;
+  const sea = createFftSea(gl, n);
   const bands = scenario.bands.map(createBand);
   const patches = bands.map((band) => (band.spec.patch ? createGpuChopPatch(gl, band.spec) : null));
   const finePatches = bands.map((band) => (band.spec.patch && band.spec.finePatch ? createGpuChopPatch(gl, band.spec, band.spec.finePatch) : null));
@@ -561,6 +735,9 @@ export function createGpuSurface(gl, scenario, wind) {
   const w0 = new Float32Array(maxC * 4);
   const w1 = new Float32Array(maxC * 4);
   const w2 = new Float32Array(maxC * 4);
+  // The same explicit waves for the renderer, by world position (phase at the origin).
+  const xw0 = new Float32Array(maxC * 4);
+  const xw1 = new Float32Array(maxC * 4);
 
   const programs = {
     wave: makeProgram(gl, waveFS(maxC), "wave"),
@@ -604,7 +781,7 @@ export function createGpuSurface(gl, scenario, wind) {
   const tex = {
     A: texture(n), B: texture(n), C: texture(n), L: texture(n), J: texture(n), P: texture(n),
     S: [texture(n, start), texture(n, start)],
-    F: texture(n), G: texture(n),
+    F: texture(n), G: texture(n), X: texture(n),
   };
   // Until the first step: no foam (fade 1, ahead NO_FOAM_AHEAD), flat water.
   const g0 = new Float32Array(n * n * 4);
@@ -646,7 +823,7 @@ export function createGpuSurface(gl, scenario, wind) {
   tex.HX = texture(n);
   tex.JP = texture(n);
   const fbs = {
-    wave: target([tex.A, tex.B, tex.C]),
+    wave: target([tex.A, tex.B, tex.C, tex.X]),
     rowsum: target([tex.HX]),
     local: target([tex.L]),
     join: target([tex.J]),
@@ -699,7 +876,6 @@ export function createGpuSurface(gl, scenario, wind) {
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
         if (inFlight.step > counts.step) {
           absorb(readback, inFlight.step);
-          // Panel-count lag: from the step being issued to its counts landing here.
           const t0 = issuedAt.get(inFlight.step);
           if (t0 !== undefined) lagLog.push(performance.now() - t0);
         }
@@ -714,10 +890,9 @@ export function createGpuSurface(gl, scenario, wind) {
     }
   }
   let wanted = null;
-  const issuedAt = new Map(); // step -> performance.now() when step() issued it
+  const issuedAt = new Map();
   const lagLog = [];
-  // ms lags of counts landed since the last call (perf.js)
-  function takeLags() { const out = lagLog.splice(0); return out; }
+  function takeLags() { return lagLog.splice(0); }
   function requestCounts(step) {
     if (inFlight.sync) { if (inFlight.step !== step) wanted = step; return; }
     wanted = null;
@@ -764,8 +939,14 @@ export function createGpuSurface(gl, scenario, wind) {
   let last = null;
 
   function step(time, dt, depth) {
+    timeEmpty();
     const winds = bands.map((band) => wind.sample(band.spec, time, dt));
-    bands.forEach((band, i) => retuneBand(band, winds[i], depth, GRAVITY, dt, scenario.size / Math.max(n - 1, 1)));
+    testLast.bands = bands; testLast.winds = winds; testLast.comps = [];
+    const L = scenario.size;
+    bands.forEach((band, i) => retuneBand(band, winds[i], depth, GRAVITY, dt, L / n));
+    const setup = bandSetup(bands, winds, depth, GRAVITY, L, n);
+    // The ripple patches start exactly where the grid's chop stops.
+    bands.forEach((band, i) => { if (band.spec.patch) band.heldOmegaEdge = setup[i].hi; });
     const depthTest = gl.isEnabled(gl.DEPTH_TEST);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
@@ -775,18 +956,30 @@ export function createGpuSurface(gl, scenario, wind) {
     const fineStates = finePatches.map((patch, i) => (patch ? patch.step(bands[i], winds[i], depth, GRAVITY, dt, patchStates[i].kCut) : null));
     const finePatch = fineStates.find((p) => p) || null;
     const chopIndex = bands.findIndex((band) => band.spec.patch);
-    const roughness = slopeBudget(bands, chopPatch, finePatch, chopIndex >= 0 ? winds[chopIndex].speed : wind.speed);
-
-    const half = scenario.size / 2;
-    const denom = Math.max(n - 1, 1);
-    const spacing = scenario.size / denom;
+    const half = L / 2;
+    const spacing = L / n;
+    const dk = TAU / L;
+    const lattice = latticeIntegrals(setup, depth, GRAVITY, L);
+    // Explicit long waves: the components the tile cannot hold, with energy share 1 - wFft.
+    let explicitMss = 0;
+    const explicitVar = bands.map(() => 0);
+    const share = (c) => Math.sqrt(Math.max(0, 1 - fftShare(c.k, dk)));
+    bands.forEach((band, i) => band.components.forEach((c) => {
+      const a = c.amplitude * share(c);
+      explicitMss += (a * c.k) ** 2 / 2;
+      explicitVar[i] += (a * a) / 2;
+    }));
+    const gridMss = explicitMss + lattice.reduce((sum, b) => sum + b.mss, 0);
+    const roughness = slopeBudget(bands, chopPatch, finePatch, chopIndex >= 0 ? winds[chopIndex].speed : wind.speed, gridMss);
+    const fft = sea.step(setup, depth, GRAVITY, L, dt);
     // The components, in double precision here, then as float32 uniforms. Waves with no
     // amplitude are left out (surface.js skips them too).
     let count = 0;
     for (const band of bands) {
       const isChop = band.spec.id === "chop" ? 1 : 0;
       for (const c of band.components) {
-        if (c.amplitude === 0) continue;
+        const sh = share(c);
+        if (c.amplitude === 0 || sh === 0) continue;
         const cx = Math.cos(c.direction);
         const cz = Math.sin(c.direction);
         const ax = (c.k * cx * spacing) / TAU;
@@ -796,7 +989,12 @@ export function createGpuSurface(gl, scenario, wind) {
         const azH = Math.round(az * 4096) / 4096;
         let b0 = (c.k * (-half * cx - half * cz) + c.phase) / TAU;
         b0 -= Math.floor(b0);
-        w0.set([c.amplitude, c.breakAmplitude, c.k, isChop], count * 4);
+        w0.set([c.amplitude * sh, c.breakAmplitude * sh, c.k, isChop], count * 4);
+        testLast.comps.push({ a: c.amplitude * sh, ba: c.breakAmplitude * sh, k: c.k, cx, cz, phase: c.phase, half, spacing });
+        xw0.set([c.amplitude * sh, c.k, cx, cz], count * 4);
+        let ph = c.phase / TAU;
+        ph -= Math.floor(ph);
+        xw1.set([ph, isChop, 0, 0], count * 4);
         w1.set([cx, cz, axH, azH], count * 4);
         w2.set([ax - axH, az - azH, b0, 0], count * 4);
         count += 1;
@@ -806,7 +1004,9 @@ export function createGpuSurface(gl, scenario, wind) {
     const crestX = -tz;
     const crestZ = tx;
     const offT = [];
-    for (let s = -1; s <= 3; s += 1) offT.push(round(tx * s), round(tz * s));
+    for (let s = -1; s <= FACE_MAX; s += 1) offT.push(round(tx * s), round(tz * s));
+    const face = faceStepsAt(scenario, wind.speed, spacing);
+    const joinSteps = Math.min(3, face);
     const offC = [];
     for (let j = -1; j <= 5; j += 1) offC.push(round(crestX * j), round(crestZ * j));
     const offF = [];
@@ -818,7 +1018,7 @@ export function createGpuSurface(gl, scenario, wind) {
       gl.uniform2f(u.uTravel, tx, tz);
     };
 
-    run(programs.wave, fbs.wave, n, {}, (u) => {
+    run(programs.wave, fbs.wave, n, { tT0: fft.T[0], tT1: fft.T[1], tT2: fft.T[2], tT3: fft.T[3], tT4: fft.T[4] }, (u) => {
       gl.uniform1i(u.uCount, count);
       gl.uniform4fv(u.uW0, w0);
       gl.uniform4fv(u.uW1, w1);
@@ -827,27 +1027,35 @@ export function createGpuSurface(gl, scenario, wind) {
       gl.uniform1f(u.uBreakSlope, scenario.breakSlope);
       gl.uniform1f(u.uDepthLimit, scenario.depthBreakRatio * depth);
     });
-    const reach = Math.max(1, round(scenario.crestReach / spacing));
+    const reach = Math.max(1, round(crestReachAt(scenario, wind.speed) / spacing));
     const r = Math.max(1, round(TRANSLUCENCY.meanRadius / spacing));
-    run(programs.rowsum, fbs.rowsum, n, { tA: tex.A }, (u) => gl.uniform1i(u.uR, r));
-    run(programs.local, fbs.local, n, { tA: tex.A, tB: tex.B, tC: tex.C, tHX: tex.HX }, (u) => {
+    const brk = breakRuleAt(scenario, wind.speed, spacing);
+    run(programs.rowsum, fbs.rowsum, n, { tA: tex.A, tC: tex.C, tX: tex.X }, (u) => { gl.uniform1i(u.uR, r); gl.uniform1i(u.uRB, brk.rb); gl.uniform1i(u.uShort, brk.mode > 1.5 ? 1 : 0); });
+    run(programs.local, fbs.local, n, { tA: tex.A, tB: tex.B, tC: tex.C, tHX: tex.HX, tX: tex.X }, (u) => {
       setOffsets(u);
       gl.uniform1i(u.uReach, reach);
       gl.uniform1i(u.uR, r);
+      gl.uniform4f(u.uBrk, brk.mode, brk.ak, brk.rb, brk.ts); gl.uniform1f(u.uBrkLg, brk.lg ?? 1); gl.uniform2f(u.uBrkMod, brk.M || 0, brk.kL || 0);
       gl.uniform1f(u.uSpacing, spacing);
-      gl.uniform4f(u.uTransl, TRANSLUCENCY.skin, TRANSLUCENCY.length, TRANSLUCENCY.maxThickness, 0);
+      gl.uniform4f(u.uTransl, TRANSLUCENCY.skin, TRANSLUCENCY.length, TRANSLUCENCY.maxThickness, Number(new URLSearchParams(typeof location !== "undefined" ? location.search : "").get("wgC") ?? 0));
+      { const q = new URLSearchParams(typeof location !== "undefined" ? location.search : ""); /* lip-width rule loosened with wind: at 25 m/s the lips are longer along travel and the
+        forward edge's Jacobian fall is shallower (run 3 -> 5 cells, edge tolerance 0 -> -0.1; GAD option B) */
+        const hw = Math.min(1, Math.max(0, (wind.speed - 17.5) / 7.5));
+        gl.uniform4f(u.uWidth, Number(q.get("wgD") ?? 3 + 2 * hw), Number(q.get("wgJ") ?? -0.1 * hw), Number(q.get("wgF") ?? 0.2), Number(q.get("wgM") ?? 4)); gl.uniform2f(u.uOpt, Number(q.get("wgS") ?? 0), Number(q.get("wgG") ?? 0)); }
     });
     run(programs.join, fbs.join, n, { tL: tex.L, tC: tex.C }, setOffsets);
     run(programs.jmask, fbs.jmaskX, n, { tJ: tex.J }, (u) => gl.uniform1i(u.uAxis, 0));
     run(programs.jmask, fbs.jmask, n, { tJ: tex.JX }, (u) => gl.uniform1i(u.uAxis, 1));
-    run(programs.joinpaint, fbs.joinpaint, n, { tC: tex.C, tJ: tex.J, tJM: tex.JM }, setOffsets);
+    run(programs.joinpaint, fbs.joinpaint, n, { tC: tex.C, tJ: tex.J, tJM: tex.JM }, (u) => { setOffsets(u); gl.uniform1i(u.uJoinSteps, joinSteps); });
     run(programs.paint, fbs.paint, n, { tA: tex.A, tC: tex.C, tL: tex.L, tJP: tex.JP }, (u) => {
       setOffsets(u);
       gl.uniform1f(u.uHalf, half);
       gl.uniform1f(u.uSpacing, spacing);
       gl.uniform1f(u.uNoAhead, NO_FOAM_AHEAD);
+      gl.uniform1i(u.uFace, face);
+      gl.uniform1i(u.uJoinSteps, joinSteps);
     });
-    const window = Math.max(scenario.foamFadeSeconds || 0, 1e-6);
+    const window = foamWindowAt(scenario, wind.speed);
     advanceAges(dt, window);
     run(programs.age, fbs.age[current], n, { tP: tex.P, tS: tex.S[current], tAges: ageTex }, (u) => {
       setOffsets(u);
@@ -870,7 +1078,10 @@ export function createGpuSurface(gl, scenario, wind) {
     if (stepFences.length > 64) gl.deleteSync(stepFences.shift().sync);
 
     last = {
-      gpu: { n, A: tex.A, B: tex.B, L: tex.L, F: tex.F, G: tex.G },
+      gpu: { n, A: tex.A, B: tex.B, L: tex.L, F: tex.F, G: tex.G,
+        fft: { R: fft.R, stats: fft.statsTex, levels: fft.levels, N: n, L, spacing, choppiness: scenario.choppiness,
+          explicitCount: count, explicit0: xw0.slice(0, Math.max(count, 1) * 4), explicit1: xw1.slice(0, Math.max(count, 1) * 4) } },
+      explicitWaves: count,
       ...countsView(),
       countsStep: counts.step,
       stepIndex,
@@ -878,16 +1089,18 @@ export function createGpuSurface(gl, scenario, wind) {
       travelX: tx,
       travelZ: tz,
       n,
-      size: scenario.size,
+      size: L,
       sampleCount: n * n,
       depth,
       chopPatch,
       finePatch,
       roughness,
-      bands: bands.map((band) => ({
+      bands: bands.map((band, i) => ({
         id: band.spec.id,
         label: band.spec.label,
-        significantHeight: 4 * Math.sqrt(bandVariance(band)),
+        significantHeight: 4 * Math.sqrt(explicitVar[i] + lattice[i].variance),
+        latticeVariance: lattice[i].variance,
+        explicitVariance: explicitVar[i],
         spectrum: band.spectrum ? band.spectrum.model : "pm",
       })),
     };
@@ -918,6 +1131,7 @@ export function createGpuSurface(gl, scenario, wind) {
   }
 
   // Whole fields, for parity tests only (never per frame).
+  const testLast = { bands: null, winds: null, comps: [] };
   function readFields() {
     const out = {};
     const read = (texture) => {
@@ -931,8 +1145,10 @@ export function createGpuSurface(gl, scenario, wind) {
       return data;
     };
     const channel = (data, c) => { const a = new Float32Array(n * n); for (let i = 0; i < n * n; i += 1) a[i] = data[i * 4 + c]; return a; };
+    const X = read(tex.X);
     const A = read(tex.A), B = read(tex.B), C = read(tex.C), L = read(tex.L), P = read(tex.P), F = read(tex.F), G = read(tex.G), S = read(tex.S[current]);
     Object.assign(out, {
+      xHeights: channel(X, 0), xSlopeX: channel(X, 1), xSlopeZ: channel(X, 2),
       heights: channel(A, 0), shiftX: channel(A, 1), shiftZ: channel(A, 2), jacobians: channel(A, 3),
       normalX: channel(B, 0), normalY: channel(B, 1), normalZ: channel(B, 2), steep: channel(B, 3),
       slopeX: channel(C, 0), slopeZ: channel(C, 1), breakHeights: channel(C, 2), breakSlope: channel(C, 3),
@@ -948,10 +1164,8 @@ export function createGpuSurface(gl, scenario, wind) {
     return out;
   }
 
+  const readSea = (which) => (which === "spectrum" ? sea.readSpectrum() : sea.read(which));
   const readPatches = () => ({ chop: patches.find((p) => p)?.read(), fine: finePatches.find((p) => p)?.read() });
-  // Steps the card has been given but not yet finished, as seen by the counts fence (the
-  // fence of step k signals once everything up to step k is done). poll() first, so a
-  // finished read is taken.
   // One fence per step (no readback): the oldest unsignalled one tells how far behind the
   // card is. Fences signal in order, so only the front of the queue is asked.
   const stepFences = [];
@@ -964,8 +1178,10 @@ export function createGpuSurface(gl, scenario, wind) {
     }
     return stepFences.length ? stepIndex - stepFences[0].step + 1 : 0;
   }
-  // debug (v27.2): share of texels within JOIN_REACH of a join record
+    // debug (v27.2): share of texels within JOIN_REACH of a join record
   const joinBlocks = () => { gl.bindFramebuffer(gl.FRAMEBUFFER, fbs.jmask.fb); const d = new Float32Array(n * n * 4); gl.readPixels(0, 0, n, n, gl.RGBA, gl.FLOAT, d); gl.bindFramebuffer(gl.FRAMEBUFFER, null); let c = 0; for (let i = 0; i < d.length; i += 4) c += d[i] > 0.5 ? 1 : 0; return c / (n * n); };
-  const api = { joinBlocks, passTimes, takeLags, backlog, readPatches, step, refresh, countsNow, readFields, kind: "gpu", onCounts: null };
+  // tests only (parity.js): this step's bands, winds and explicit components, in double precision
+  const testState = () => testLast;
+  const api = { testState, N: n, joinBlocks, passTimes, takeLags, backlog, readSea, readPatches, step, refresh, countsNow, readFields, kind: "gpu", onCounts: null };
   return api;
 }

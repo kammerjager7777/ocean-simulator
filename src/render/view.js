@@ -1,4 +1,6 @@
-import { LOBE_GLSL } from "../physics/roughness.js?v=27.2";
+import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=28";
+import { LOBE_GLSL } from "../physics/roughness.js?v=28";
+import { timed } from "../physics/passTimer.js?v=28";
 
 function perspective(fovy, aspect, near, far) {
   const f = 1 / Math.tan(fovy / 2);
@@ -179,7 +181,7 @@ const LIGHT_DEFS = "#define SUN_IRRADIANCE 0.25\n#define WATER_KNEE 0.4314\n#def
 // saturating softly at TRANSL_MAX, so it
 // never turns white and the body stays teal; glint and foam are drawn on top as before.
 const TRANSL_DEFS = "#define TRANSL_COLOR 0.22, 0.60, 0.50\n#define TRANSL_G 0.7\n#define TRANSL_SCATTER 80.0\n#define TRANSL_SKY 6.5\n#define TRANSL_TIP 0.8\n#define TRANSL_MAX 0.85\n";
-const LACE_DEFS = "#define LACE_HOLE_BASE 0.06\n#define LACE_HOLE_DENSE 0.08\n#define LACE_HOLE_SOFT 0.08\n#define LACE_CAP 0.62\n#define LACE_WARP 0.5\n#define LACE_EDGE 0.3\n#define LACE_RIDGE_LO 0.65\n#define LACE_RIDGE_HI 0.9\n#define LACE_MASK_LO 0.6\n#define LACE_SHIFT_X 2.5\n#define LACE_SHIFT_Y 1.5\n#define LACE_DASH 0.45\n#define LACE_SHOULDER 0.8\n#define LACE_FINE_LINE 0.35\n#define LACE_SH_LO 0.45\n#define LACE_SH_HI 0.65\n#define LACE_MASK_HI 0.95\n";
+const LACE_DEFS = "#define DIM_LACE 0.3\n#define DIM_DENSE 0.64\n#define LACE_HOLE_BASE 0.06\n#define LACE_HOLE_DENSE 0.08\n#define LACE_HOLE_SOFT 0.08\n#define LACE_CAP 0.62\n#define LACE_WARP 0.5\n#define LACE_EDGE 0.3\n#define LACE_RIDGE_LO 0.65\n#define LACE_RIDGE_HI 0.9\n#define LACE_MASK_LO 0.6\n#define LACE_SHIFT_X 2.5\n#define LACE_SHIFT_Y 1.5\n#define LACE_DASH 0.45\n#define LACE_SHOULDER 0.8\n#define LACE_FINE_LINE 0.35\n#define LACE_SH_LO 0.45\n#define LACE_SH_HI 0.65\n#define LACE_MASK_HI 0.95\n";
 
 // Sun glitter and sky reflection spread by the physical slope distribution (roughness.js).
 // The glint adds to the water and rolls off softly below foam brightness.
@@ -624,6 +626,14 @@ void main() {
   // shimmering. Fresh foam (oldness 0) is exactly the near or far band as before.
   float alphaFresh = mix(alphaFar, alphaNearFresh, nearWeight);
   float alpha = mix(alphaFresh, alphaOld, oldness);
+  // GAD (c): fading foam keeps a dim lace (alpha up to DIM_LACE, peak under 130), only
+  // inside the flag outline (edgeAt >= LACE_MASK_LO 0.6).
+  // GAD 06:27: no floor. The lace fades to 0 with age (fadeV) and its edge is broken up by
+  // world-space noise (edgeAt / gradeAt thresholds at ~1 m and 0.35 m, as in v25), so it never
+  // shows as a flat sheet with a cell outline; inside, sub-pixel lace is replaced by ~1 m noise.
+  float dimLace = DIM_LACE * fadeV * smoothstep(edgeAt - 0.08, edgeAt + 0.08, marked) * smoothstep(gradeAt - 0.1, gradeAt + 0.1, vFoam)
+                * mix(0.25 + 0.75 * holeN, lace, detailL);
+  alpha = max(alpha, dimLace);
   // Foam takes the fine chop's shading only where it darkens: never brighter than the
   // big grid's lighting alone would make it.
   vec3 foamColor = vec3(0.75, 0.81, 0.82) * (0.92 + 0.08 * min(lightFoam, lightBig));
@@ -655,6 +665,10 @@ void main() {
   float sunPart = TRANSL_MAX * (1.0 - exp(-translCover * translSun));
   transl = min(1.0 - (1.0 - transl * translCover) * (1.0 - sunPart), TRANSL_MAX);
   color += transl * (1.0 - reflShare) * max(vec3(TRANSL_COLOR) - color, 0.0) * (1.0 - smoothstep(0.0, 0.05, alpha));
+  // GAD 04:15 over-130: dense foam is dimmed, not cut: where alpha nears solid the foam
+  // colour drops to DIM_DENSE of itself (about 125 instead of 190), so the foam area and
+  // the lace (alpha <= DIM_LACE) are unchanged.
+  foamColor *= mix(1.0, DIM_DENSE, smoothstep(0.35, 0.8, alpha));
   color = mix(color, foamColor, alpha);
 
   // Break flags. Red: samples flagged now (outline at vFlag = 0.5, light red tint
@@ -731,11 +745,62 @@ export function createView(canvas) {
   // or read from the GPU physics textures.
   const cpuProgram = link(webgl2 ? toEs3(VERT, "vertex") : VERT);
   const gpuProgram = webgl2 ? link(VERT_GPU, gpuFragShader) : null;
+  // v28 FFT sea: its own vertex shader and mesh; the fragment shader is the GPU one with the
+  // lod-lost slope variance added to the sub-grid roughness (so it goes into every lobe).
+  const fftFragShader = webgl2 ? compile(gl, gl.FRAGMENT_SHADER, toEs3(fragBody
+    .replace("uniform float chopKept[8];\nuniform float fineKept[8];", "float chopKept[8];\nfloat fineKept[8];\nuniform highp sampler2D chopStats;\nuniform highp sampler2D fineStats;")
+    .replace("uniform float subMss;", "uniform float subMssU;\nvarying float vLodLost;\nfloat subMss;")
+    // GAD glow: the FFT sea's vThin is interpolated over 2.2 m triangles, so a lip's ramp
+    // (vThin 0.05-0.15) glowed around it; transmission now starts at the lip itself
+    // (vThin 0.14-0.18) with gain 4.2 so the tips keep v26's 94-102.
+    .replace("float transl = TRANSL_MAX * (1.0 - exp(-vThin * TRANSL_SKY));", "float thinE = min(1.0, 4.2 * vThin * smoothstep(0.14, 0.18, vThin)); float transl = TRANSL_MAX * (1.0 - exp(-thinE * TRANSL_SKY));")
+    .replace("float translSun = vThin * TRANSL_SCATTER * sunIn;", "float translSun = thinE * TRANSL_SCATTER * sunIn;")
+    .replace("vec3 nBig = normalize(vNormal);", "vec3 nBig = normalize(mix(normalize(vNormal), seaNormalPix(vSea.xy, vSea.z), clamp(vSea.w, 0.0, 1.0)));")
+    // GAD per-pixel foam (see foamPix in fftView.js): the foam varyings become globals set per pixel.
+    .replace("varying float vFoam;", "varying float vFoam;\nfloat fFoam; float rawFoam() { return vFoam; }\n#define vFoam fFoam\n")
+    .replace("varying float vFlag;", "varying float vFlag;\nfloat fFlag; float rawFlag() { return vFlag; }\n#define vFlag fFlag\n")
+    .replace("varying float vRecent;", "varying float vRecent;\nfloat fRecent; float rawRecent() { return vRecent; }\n#define vRecent fRecent\n")
+    .replace("varying float vFade;", "varying float vFade;\nfloat fFade; float rawFade() { return vFade; }\n#define vFade fFade\n")
+    .replace("varying float vAge;", "varying float vAge;\nfloat fAge; float rawAge() { return vAge; }\n#define vAge fAge\n")
+    .replace("varying float vAhead;", "varying float vAhead;\nfloat fAhead; float rawAhead() { return vAhead; }\n#define vAhead fAhead\n")
+    .replace("varying float vRun;", "varying float vRun;\nfloat fRun; float rawRun() { return vRun; }\n#define vRun fRun\n")
+    .replace("void main() {", "#define FOAM_PIX " + ((typeof location !== "undefined" && new URLSearchParams(location.search).get("foampix") === "0") ? "false" : "true") + "\n" + FRAG_FFT_NORMAL + `void main() {
+  if (FOAM_PIX) {
+    vec4 pf, pg; foamPix(vSea.xy, pf, pg);
+    float kp = clamp(vFoamKeep, 0.0, 1.0);
+    vFoam = pf.x * kp; vFade = pf.y * kp; vAge = pf.z; vAhead = pg.x; vRun = pg.y; vRecent = pg.z * kp; vFlag = pg.w * kp;
+  } else { vFoam = rawFoam(); vFlag = rawFlag(); vRecent = rawRecent(); vFade = rawFade(); vAge = rawAge(); vAhead = rawAhead(); vRun = rawRun(); }
+  subMss = subMssU + vLodLost;
+  {
+    float c0 = texelFetch(chopStats, ivec2(0, 0), 0).x;
+    float f0 = texelFetch(fineStats, ivec2(0, 0), 0).x;
+    for (int i = 0; i < 8; i += 1) {
+      chopKept[i] = texelFetch(chopStats, ivec2(i, 0), 0).x / (c0 > 0.0 ? c0 : 1.0);
+      fineKept[i] = texelFetch(fineStats, ivec2(i, 0), 0).x / (f0 > 0.0 ? f0 : 1.0);
+    }
+  }`), "fragment")) : null;
+  const fftProgram = webgl2 ? link(VERT_FFT, fftFragShader) : null;
   const vao = webgl2 ? gl.createVertexArray() : null;
   if (vao) gl.bindVertexArray(vao);
   gl.enable(gl.DEPTH_TEST);
   const cpuLocs = locate(cpuProgram);
   const gpuLocs = gpuProgram ? locate(gpuProgram) : null;
+  const fftLocs = fftProgram ? locate(fftProgram) : null;
+  if (fftLocs) {
+    for (const name of ["physA", "physB", "physL", "physF", "physG", "physN", "chopStats", "fineStats", "fftR0", "fftR1", "fftR2", "fftR3", "fftStats", "fftLevels", "fftL", "choppiness", "pixAngle", "lodBias", "minLod", "antiTile", "xCount", "x0", "x1"]) {
+      fftLocs[name] = gl.getUniformLocation(fftProgram, name);
+    }
+    fftLocs.subMss = gl.getUniformLocation(fftProgram, "subMssU");
+    fftLocs.meta = gl.getAttribLocation(fftProgram, "meta");
+  }
+  const fftMesh = { xz: gl.createBuffer(), meta: gl.createBuffer(), index: gl.createBuffer(), count: 0, key: "" };
+  const fftParams = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+  const lodBias = Number(fftParams.get("lodBias") || 1);
+  const minLod = Number(fftParams.get("minLod") || 0);
+  const antiTile = fftParams.get("antiTile") === "0" ? 0 : 1;
+  // ?top=1: straight down from high up, for the tiling map (review only).
+  const topView = fftParams.get("top") === "1";
+  const topHeight = Number(fftParams.get("topHeight") || 4200);
   if (gpuLocs) {
     gpuLocs.physA = gl.getUniformLocation(gpuProgram, "physA");
     gpuLocs.physB = gl.getUniformLocation(gpuProgram, "physB");
@@ -938,12 +1003,14 @@ export function createView(canvas) {
     gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
   }
 
+  const noCull = typeof location !== "undefined" && /[?&]nocull=1/.test(location.search);
   function draw(state, showFlags) {
     // The GPU physics shares this context: take back the program, vertex state, target
     // and depth test every frame.
     const fromTextures = !!(state.gpu && gpuProgram);
-    program = fromTextures ? gpuProgram : cpuProgram;
-    locs = fromTextures ? gpuLocs : cpuLocs;
+    const fft = fromTextures && state.gpu.fft && fftProgram ? state.gpu.fft : null;
+    program = fft ? fftProgram : fromTextures ? gpuProgram : cpuProgram;
+    locs = fft ? fftLocs : fromTextures ? gpuLocs : cpuLocs;
     gl.useProgram(program);
     if (vao) gl.bindVertexArray(vao);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -954,7 +1021,19 @@ export function createView(canvas) {
       canvas.width = width;
       canvas.height = height;
     }
-    if (builtFor !== state.n || builtSize !== state.size) {
+    if (fft && fftMesh.key !== `${fft.N}/${fft.L}`) {
+      const m = buildFftMesh(fft.N, fft.L);
+      gl.bindBuffer(gl.ARRAY_BUFFER, fftMesh.xz);
+      gl.bufferData(gl.ARRAY_BUFFER, m.xz, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, fftMesh.meta);
+      gl.bufferData(gl.ARRAY_BUFFER, m.meta, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, fftMesh.index);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.index, gl.STATIC_DRAW);
+      fftMesh.count = m.index.length;
+      fftMesh.chunks = m.chunks;
+      fftMesh.key = `${fft.N}/${fft.L}`;
+    }
+    if (!fft && (builtFor !== state.n || builtSize !== state.size)) {
       buildGrid(state.n, state.size);
       if (builtSize !== state.size) {
         camera.distance = Math.max(40, Math.min(1400, state.size * 0.62));
@@ -965,14 +1044,20 @@ export function createView(canvas) {
     gl.clearColor(0.58, 0.66, 0.70, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    const eye = [
+    if (fft && builtSize !== state.size) {
+      camera.distance = Math.max(40, Math.min(1400, state.size * 0.62));
+      builtSize = state.size;
+    }
+    const eye = topView ? [0, topHeight, 0] : [
       Math.cos(camera.pitch) * Math.sin(camera.yaw) * camera.distance,
       Math.sin(camera.pitch) * camera.distance,
       Math.cos(camera.pitch) * Math.cos(camera.yaw) * camera.distance,
     ];
-    const view = lookAt(eye, [0, 0, 0], [0, 1, 0]);
-    const proj = perspective(Math.PI / 4, canvas.width / canvas.height, 0.5, 2000);
-    gl.uniformMatrix4fv(locs.viewProj, false, multiply(proj, view));
+    const view = lookAt(eye, [0, 0, 0], topView ? [0, 0, -1] : [0, 1, 0]);
+    // v28: the FFT sea reaches past 2 km.
+    const proj = perspective(Math.PI / 4, canvas.width / canvas.height, fft ? 1 : 0.5, fft ? (topView ? topHeight + 200 : 4500) : 2000);
+    const vpMat = multiply(proj, view);
+    gl.uniformMatrix4fv(locs.viewProj, false, vpMat);
     gl.uniform3f(locs.lightDir, sun[0], sun[1], sun[2]);
     gl.uniform3f(locs.eye, eye[0], eye[1], eye[2]);
     gl.uniform1f(locs.depth, state.depth);
@@ -1022,6 +1107,46 @@ export function createView(canvas) {
     for (let i = 0; i < 16; i += 1) gl.disableVertexAttribArray(i);
     gl.enableVertexAttribArray(locs.xz);
     gl.vertexAttribPointer(locs.xz, 2, gl.FLOAT, false, 0, 0);
+    if (fft) {
+      const g = state.gpu;
+      gl.disableVertexAttribArray(locs.xz);
+      gl.bindBuffer(gl.ARRAY_BUFFER, fftMesh.xz);
+      gl.enableVertexAttribArray(locs.xz);
+      gl.vertexAttribPointer(locs.xz, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, fftMesh.meta);
+      gl.enableVertexAttribArray(locs.meta);
+      gl.vertexAttribPointer(locs.meta, 4, gl.FLOAT, false, 0, 0);
+      const units = [["physA", g.A], ["physB", g.B], ["physL", g.L], ["physF", g.F], ["physG", g.G],
+        ["fftR0", fft.R[0]], ["fftR1", fft.R[1]], ["fftR2", fft.R[2]], ["fftR3", fft.R[3]], ["fftStats", fft.stats]];
+      const unitOf = [2, 3, 4, 5, 6, 9, 10, 11, 12, 13];
+      units.forEach(([name, tex], i) => {
+        gl.activeTexture(gl.TEXTURE0 + unitOf[i]);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.uniform1i(locs[name], unitOf[i]);
+      });
+      gl.activeTexture(gl.TEXTURE0);
+      gl.uniform1i(locs.physN, fft.N);
+      gl.uniform1f(locs.fftLevels, fft.levels);
+      gl.uniform1f(locs.fftL, fft.L);
+      gl.uniform1f(locs.choppiness, fft.choppiness);
+      gl.uniform1f(locs.pixAngle, (Math.PI / 4) / canvas.height);
+      gl.uniform1f(locs.lodBias, lodBias);
+      gl.uniform1f(locs.minLod, minLod);
+      gl.uniform1f(locs.antiTile, antiTile);
+      const count = Math.min(fft.explicitCount, 64);
+      gl.uniform1i(locs.xCount, count);
+      if (count > 0) {
+        gl.uniform4fv(locs.x0, fft.explicit0.subarray(0, count * 4));
+        gl.uniform4fv(locs.x1, fft.explicit1.subarray(0, count * 4));
+      }
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, fftMesh.index);
+      // v28 perf: only the chunks that can reach the screen (?nocull=1 draws all, for checks)
+      const ranges = noCull ? [[0, fftMesh.count]] : visibleRanges(fftMesh.chunks, vpMat, 60);
+      fftMesh.drawn = ranges.reduce((a, r) => a + r[1], 0);
+      if (typeof window !== "undefined") window.__fftDrawn = [fftMesh.drawn / 3, fftMesh.count / 3];
+      timed("render:fftMesh", () => { for (const [first, count] of ranges) gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, first * 4); });
+      return;
+    }
     if (fromTextures) {
       const g = state.gpu;
       [["physA", g.A], ["physB", g.B], ["physL", g.L], ["physF", g.F], ["physG", g.G]].forEach(([name, tex], i) => {

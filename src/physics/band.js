@@ -1,4 +1,4 @@
-import { piersonMoskowitz, spectrumFor, wavenumber } from "./spectrum.js?v=27.2";
+import { piersonMoskowitz, spectrumFor, wavenumber } from "./spectrum.js?v=28";
 
 function unitPhase(n) {
   const x = Math.sin(n * 127.1) * 43758.5453;

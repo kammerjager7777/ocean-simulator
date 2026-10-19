@@ -1,7 +1,8 @@
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, sampleBand, bandVariance } from "./band.js?v=27.2";
-import { createChopPatch } from "./chopPatch.js?v=27.2";
-import { slopeBudget } from "./roughness.js?v=27.2";
+import { createBand, retuneBand, sampleBand, bandVariance } from "./band.js?v=28";
+import { createChopPatch } from "./chopPatch.js?v=28";
+import { slopeBudget } from "./roughness.js?v=28";
+import { fftShare, FFT_SPLIT } from "./fftSea.js?v=28";
 
 // Energy-weighted mean travel direction of every wave component, as a unit (x, z) vector.
 // A calm sea has no energy, so it falls back to the wind direction.
@@ -34,6 +35,67 @@ export const NO_FOAM_AHEAD = 3;
 // smooth face, metres below its crest and thick, passes none.
 export const TRANSLUCENCY = { skin: 0.05, length: 1.0, maxThickness: 2.0, meanRadius: 8 };
 
+// v28 break fix: the face reach (crest to steep face) follows the breaking waves' size.
+// A fixed 4 m reach (v26-v27) suits 17.5 m/s; at 25 m/s the crests are broad and the steep
+// face lies further below them, so almost no crest found its face (6 breaks at 25 vs 182 at
+// 17.5). Above 17.5 m/s the reach grows like the wind sea's wavelength (U^2); at or below
+// 17.5 m/s it is exactly the scenario's crestReach (unchanged).
+export function crestReachAt(scenario, speed) {
+  return scenario.crestReach * Math.max(1, (speed / 17.5) ** 2);
+}
+
+// v28 foam fix (GAD): break test on the total height against each wave's own steepness.
+// mode 1: a crest (local max of the height) breaks when a k >= ak, with a = elevation of the
+// 3x3-averaged height above the mean over the trough window and k the cell's dominant
+// wavenumber from the crest curvature (k^2 = -h''/a, curvature over +-ts cells).
+// The trough window is half of the wind sea's peak wavelength (PM: kp = 0.77 g / U^2),
+// 8-320 m; the curvature stencil round(window / 20 m), 2-4 cells. mode 0 = the v27 rule (break-band height + steep face within reach).
+export const BREAK_RULE = { M: 1, ak: 0.18, minWindow: 8, maxWindow: 320, windowFraction: 0.5 };
+// GAD 04:15: foam lives about as long as its breaker's period. The breaking crests of a
+// fully developed sea are about equally steep at every wind (Hs kp / 2 is wind-independent),
+// so they get sparser per area as the waves grow (~1 / lambda_p^2); bigger breakers leave
+// foam that lasts longer: foamFadeSeconds (2 s) up to 10 m/s, rising linearly to 3x (6 s)
+// at 25 m/s (GAD 06:27). ?foamLife=0 keeps the fixed window.
+export function foamWindowAt(scenario, speed) {
+  const q = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+  const base = Math.max(scenario.foamFadeSeconds || 0, 1e-6);
+  if (q.get("foamLife") === "0" || !(base > 1e-6)) return base;
+  // GAD 06:27: 2 s up to 10 m/s, linear to 6 s at 25 m/s (3x), held above 25.
+  return base * (1 + 2 * Math.min(1, Math.max(0, (speed - 10) / 15)));
+}
+// Michael 20:49: each break's foam runs forward down its front face for 0.1 x the full-spectrum
+// peak wavelength (PM: 2 pi U^2 / (0.77 g)), in cells; it still stops where the face stops
+// dropping. Clamped to 1..FACE_MAX (40 cells, ~66 m at 420/256). ?faceScale overrides 0.1.
+export const FACE_MAX = 40;
+export function faceStepsAt(scenario, speed, spacing) {
+  const q = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+  const lambdaP = speed > 0.05 ? (2 * Math.PI * speed * speed) / (0.77 * 9.81) : 0;
+  return Math.min(FACE_MAX, Math.max(1, Math.round((Number(q.get("faceScale") ?? 0.1) * lambdaP) / spacing)));
+}
+// Grade down the face: the old 4-step shape (1, 0.5, 0.2, 0.06) stretched over F steps.
+export function faceGrade(s, F) {
+  const G = [1, 0.5, 0.2, 0.06];
+  const u = (3 * s) / Math.max(F, 1);
+  const i = Math.floor(u);
+  if (i >= 3) return G[3];
+  return G[i] + (G[i + 1] - G[i]) * (u - i);
+}
+export function breakRuleAt(scenario, speed, spacing) {
+  const q = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+  const lambdaP = speed > 0.05 ? (2 * Math.PI * speed * speed) / (0.77 * 9.81) : 0;
+  const mode = Number(q.get("brk") ?? 2);
+  // GAD 20:05 (b): mode 2 tests the short field (the FFT tile's waves), so the window and
+  // stencil follow the short field's own dominant length: the peak wavelength, but never
+  // longer than the FFT cutoff (the middle of the explicit -> FFT hand-over, size / 4).
+  const lambdaCut = scenario.size / ((FFT_SPLIT[0] + FFT_SPLIT[1]) / 2);
+  const lambdaD = mode > 1.5 ? Math.min(lambdaP, lambdaCut) : lambdaP;
+  const win = Number(q.get("brkWin") ?? Math.min(BREAK_RULE.maxWindow, Math.max(BREAK_RULE.minWindow, lambdaD * Number(q.get("brkWf") ?? BREAK_RULE.windowFraction))));
+  // curvature stencil grows with the window (the dominant wave's scale): 2-4 cells
+  const ts = Number(q.get("brkTs") ?? Math.min(4, Math.max(1, Math.round(win / 20))));
+  // The scenario's break slope scales the threshold (0.2 = BREAK_RULE.ak; Infinity switches breaking off).
+  return { lg: Number(q.get("brkLg") ?? 1), M: Number(q.get("brkM") ?? BREAK_RULE.M), kL: lambdaP > 0 ? (2 * Math.PI) / lambdaP : 0, mode, ak: Number(q.get("brkAk") ?? BREAK_RULE.ak) * (scenario.breakSlope / 0.2), rb: Math.max(1, Math.round(win / spacing)), ts };
+}
+
 export function createSurface(scenario, wind) {
   const n = scenario.resolution;
   const heights = new Float32Array(n * n);
@@ -47,6 +109,12 @@ export function createSurface(scenario, wind) {
   const breakHeights = new Float32Array(n * n);
   const breakSlopeX = new Float32Array(n * n);
   const breakSlopeZ = new Float32Array(n * n);
+  // v28 long-slope rule: the explicit long waves alone (the part the GPU tile cannot hold,
+  // amplitude x sqrt(1 - fftShare)), their slope, and the short-wave height (total - long).
+  const xHeights = new Float32Array(n * n);
+  const xSlopeX = new Float32Array(n * n);
+  const xSlopeZ = new Float32Array(n * n);
+  const shortHeights = new Float32Array(n * n);
   const breaks = new Float32Array(n * n);
   const lips = new Float32Array(n * n);
   const freshFoam = new Float32Array(n * n);
@@ -110,6 +178,13 @@ export function createSurface(scenario, wind) {
     const denom = Math.max(n - 1, 1);
     const spacingGrid = scenario.size / denom;
     let breakingCount = 0;
+    const dkTile = (2 * Math.PI) / scenario.size;
+    const longComps = [];
+    for (const band of bands) for (const c of band.components) {
+      const sh = Math.sqrt(Math.max(0, 1 - fftShare(c.k, dkTile)));
+      if (c.amplitude === 0 || sh === 0) continue;
+      longComps.push({ a: c.amplitude * sh, k: c.k, cx: Math.cos(c.direction), cz: Math.sin(c.direction), phase: c.phase });
+    }
     let maxSlope = 0;
 
     for (let iz = 0; iz < n; iz += 1) {
@@ -169,6 +244,14 @@ export function createSurface(scenario, wind) {
         const slope = Math.hypot(bdx, bdz);
         const depthLimited = bh > 0 && bh >= scenario.depthBreakRatio * depth;
         heights[index] = height;
+        { let xh = 0, xdx = 0, xdz = 0;
+          for (const c of longComps) {
+            const ph = c.k * (x * c.cx + z * c.cz) + c.phase;
+            const sn = Math.sin(ph), cs = Math.cos(ph);
+            xh += c.a * sn; xdx += c.a * c.k * c.cx * cs; xdz += c.a * c.k * c.cz * cs;
+          }
+          xHeights[index] = xh; xSlopeX[index] = xdx; xSlopeZ[index] = xdz;
+          shortHeights[index] = height - xh; }
         slopeX[index] = dhdx;
         slopeZ[index] = dhdz;
         breakHeights[index] = bh;
@@ -224,12 +307,55 @@ export function createSurface(scenario, wind) {
     // Slope peaks on the face, not the crest. Look downhill a fixed distance in metres,
     // so a smaller patch does not hide the face by making each cell shorter.
     const spacing = scenario.size / denom;
-    const reach = Math.max(1, Math.round(scenario.crestReach / spacing));
+    const reach = Math.max(1, Math.round(crestReachAt(scenario, wind.speed) / spacing));
     const steps = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    // v28 foam fix: the total-height steepness rule (breakRuleAt; GPU LOCAL_FS does the same).
+    const rule = breakRuleAt(scenario, wind.speed, spacing);
+    let HS = null, troughMean = null;
+    const HB = rule.mode > 1.5 ? shortHeights : heights;
+    if (rule.mode > 0.5) {
+      HS = new Float32Array(n * n);
+      for (let iz = 1; iz < n - 1; iz += 1) for (let ix = 1; ix < n - 1; ix += 1) {
+        let t = 0;
+        for (let dz = -1; dz <= 1; dz += 1) for (let dx = -1; dx <= 1; dx += 1) t += HB[(iz + dz) * n + ix + dx];
+        HS[iz * n + ix] = t / 9;
+      }
+      // mean of the row means (each row clamped at the edge), rows clamped too: as the GPU
+      const rowMean = new Float32Array(n * n);
+      for (let iz = 0; iz < n; iz += 1) for (let ix = 0; ix < n; ix += 1) {
+        const x0 = Math.max(ix - rule.rb, 0), x1 = Math.min(ix + rule.rb, n - 1);
+        let t = 0;
+        for (let x = x0; x <= x1; x += 1) t += HB[iz * n + x];
+        rowMean[iz * n + ix] = t / (x1 - x0 + 1);
+      }
+      troughMean = new Float32Array(n * n);
+      for (let iz = 0; iz < n; iz += 1) for (let ix = 0; ix < n; ix += 1) {
+        const z0 = Math.max(iz - rule.rb, 0), z1 = Math.min(iz + rule.rb, n - 1);
+        let t = 0;
+        for (let z = z0; z <= z1; z += 1) t += rowMean[z * n + ix];
+        troughMean[iz * n + ix] = t / (z1 - z0 + 1);
+      }
+    }
+    const brkMargin = rule.ts + 1;
     for (let iz = 1; iz < n - 1; iz += 1) {
       for (let ix = 1; ix < n - 1; ix += 1) {
         const index = iz * n + ix;
-        // Breaking: on the break-test field.
+        if (rule.mode > 0.5) {
+          if (ix >= brkMargin && iz >= brkMargin && ix < n - brkMargin && iz < n - brkMargin) {
+            const h = HB[index];
+            let drop = 0, dx = 0, dz = 0;
+            for (const [sx, sz] of steps) {
+              const fall = h - HB[(iz + sz) * n + (ix + sx)];
+              if (fall > drop) { drop = fall; dx = sx; dz = sz; }
+            }
+            if (drop > 0 && h >= HB[(iz - dz) * n + (ix - dx)]) {
+              const t = rule.ts, d = t * spacing, hs = HS[index];
+              const lap = (HS[index - t] + HS[index + t] + HS[index - t * n] + HS[index + t * n] - 4 * hs) / (d * d);
+              const eta = hs - troughMean[index];
+              if (eta > 0 && lap < 0 && Math.sqrt(-lap * eta) * (rule.mode > 1.5 ? 1 + (rule.M || 0) * Math.max(0, xHeights[index] * (rule.kL || 0)) : 1) + (rule.mode > 1.5 ? (rule.lg ?? 1) * Math.hypot(xSlopeX[index], xSlopeZ[index]) : 0) >= rule.ak) { breaks[index] = 0.25; breakingCount += 1; }
+            }
+          }
+        } else {
         const h = breakHeights[index];
         let drop = 0;
         let dx = 0;
@@ -256,6 +382,7 @@ export function createSurface(scenario, wind) {
         if (drop > 0 && h >= opposite && face) {
           breaks[index] = 0.25;
           breakingCount += 1;
+        }
         }
         // Crest glow (lips, shading only): on the drawn surface, as before.
         const hl = heights[index];
@@ -296,13 +423,13 @@ export function createSurface(scenario, wind) {
     const [tx, tz] = travelDirection(bands, wind.direction);
     const crestX = -tz;
     const crestZ = tx;
-    const FACE_STEPS = 3;
+    const FACE_STEPS = faceStepsAt(scenario, wind.speed, scenario.size / denom);
+    const JOIN_STEPS = Math.min(3, FACE_STEPS); // joined gap cells: their own face as before (<= 3)
     const JOIN_GAP = 4;
     const MAX_FROM_BREAK = 4;
     // Graded foam down the front face: full at the break or crest, then falling fast,
     // so the visible band hugs the top of the face. Every painted sample stays above 0,
     // so the foam set and the flag set are still the same samples.
-    const FACE_GRADE = [1, 0.5, 0.2, 0.06];
     const inside = (x, z) => x >= 0 && z >= 0 && x < n && z < n;
     const along = (ix, iz, ux, uz, s) => [ix + Math.round(ux * s), iz + Math.round(uz * s)];
     // A crest along the travel axis: higher than the samples just behind and just ahead.
@@ -334,16 +461,16 @@ export function createSurface(scenario, wind) {
     }
     // Mark a crest sample and the samples ahead of it while the surface keeps dropping.
     // near() limits how far from a break the face may run.
-    function paintFace(ix, iz, near) {
+    function paintFace(ix, iz, near, steps = FACE_STEPS) {
       const crestPos = travelPos(iz * n + ix);
-      mark(iz * n + ix, FACE_GRADE[0], crestPos);
+      mark(iz * n + ix, faceGrade(0, FACE_STEPS), crestPos);
       let prev = breakHeights[iz * n + ix];
-      for (let s = 1; s <= FACE_STEPS; s += 1) {
+      for (let s = 1; s <= steps; s += 1) {
         const [fx, fz] = along(ix, iz, tx, tz, s);
         if (!inside(fx, fz) || !near(fx, fz)) break;
         const h = breakHeights[fz * n + fx];
         if (h >= prev) break;
-        mark(fz * n + fx, FACE_GRADE[s], crestPos);
+        mark(fz * n + fx, faceGrade(s, FACE_STEPS), crestPos);
         prev = h;
       }
     }
@@ -387,7 +514,11 @@ export function createSurface(scenario, wind) {
               // Never snap behind both ends of the gap: that would be the back of the crest.
               const offB = (sx - ix) * tx + (sz - iz) * tz;
               const offP = (sx - px) * tx + (sz - pz) * tz;
-              if (offB < -0.5 && offP < -0.5) continue;
+              // ...and only snap where the cell is ahead of an end it is near (within
+              // MAX_FROM_BREAK), so no fresh foam lands upwave of every break around it.
+              const nearB = (sx - ix) ** 2 + (sz - iz) ** 2 <= MAX_FROM_BREAK * MAX_FROM_BREAK;
+              const nearP = (sx - px) ** 2 + (sz - pz) ** 2 <= MAX_FROM_BREAK * MAX_FROM_BREAK;
+              if (!(offB >= -0.5 && nearB) && !(offP >= -0.5 && nearP)) continue;
               if (!best || breakHeights[sz * n + sx] > breakHeights[best[1] * n + best[0]]) best = [sx, sz];
             }
             if (!best) ok = false;
@@ -396,7 +527,7 @@ export function createSurface(scenario, wind) {
           if (!ok) break;
           const near = (x, z) =>
             Math.hypot(x - ix, z - iz) <= MAX_FROM_BREAK || Math.hypot(x - px, z - pz) <= MAX_FROM_BREAK;
-          for (const [gx, gz] of gap) if (near(gx, gz)) paintFace(gx, gz, near);
+          for (const [gx, gz] of gap) if (near(gx, gz)) paintFace(gx, gz, near, JOIN_STEPS);
           break;
         }
       }
@@ -439,7 +570,7 @@ export function createSurface(scenario, wind) {
     // and keeps this step's grade, distance ahead and lengthwise value. Older foam keeps
     // what it had and fades smoothly to 0 at the end of the window; it never moves and
     // never grows.
-    const window = Math.max(scenario.foamFadeSeconds || 0, 1e-6);
+    const window = foamWindowAt(scenario, wind.speed);
     const stepDt = Math.max(dt, 0);
     let lingerCount = 0;
     let recentCount = 0;
@@ -515,6 +646,8 @@ export function createSurface(scenario, wind) {
       n,
       size: scenario.size,
       breakingCount,
+      breakRule: rule, faceSteps: FACE_STEPS,
+      xHeights, xSlopeX, xSlopeZ,
       sampleCount: n * n,
       maxSlope,
       depth,

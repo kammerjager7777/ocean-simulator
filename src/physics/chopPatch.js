@@ -1,4 +1,4 @@
-import { shoal } from "./band.js?v=27.2";
+import { shoal } from "./band.js?v=28";
 
 // The short wind-chop band's own fine patch. The big grid (about 2.2 m spacing at
 // 420 m) cannot hold waves shorter than 2.4 cells, and the chop band's grid

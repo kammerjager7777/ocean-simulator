@@ -27,7 +27,7 @@ export function createPerf(gl, physicsMode) {
   const gpuMs = [];
   const lagMs = [];
   let passFn = null;
-  const PASS_TIMES = typeof location !== "undefined" && /[?&]passTimes=1/.test(location.search);
+  const PASS_TIMES = typeof location !== "undefined" && /[?&]passTimes=(1|finish)\b/.test(location.search);
   let heldFrames = 0;
   let simFirst = null;
   let simLast = null;

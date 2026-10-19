@@ -1,0 +1,1 @@
+- 06:30 nohup tile shares -> gad/r0627/tile_{a,b}.log

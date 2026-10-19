@@ -7,10 +7,12 @@
 //    decides it within EDGE of flipping), none in calm water (no CPU break within 6 cells);
 //  - foam matching the flags exactly on the card: fresh foam == flagged, foam only where
 //    flagged now or in the window, and the panel counts (reduction) == the fields.
-import { scenario as baseScenario } from "./scenario.js?v=27.2";
+import { scenario as baseScenario } from "./scenario.js?v=28";
 import { createWind } from "./wind.js";
-import { createSurface } from "./surface.js?v=27.2";
-import { createGpuSurface } from "./gpuSurface.js?v=27.2";
+import { createSurface, crestReachAt, breakRuleAt, foamWindowAt } from "./surface.js?v=28";
+import { createGpuSurface } from "./gpuSurface.js?v=28";
+import { createChopPatch } from "./chopPatch.js?v=28";
+import { GRAVITY } from "./gravity.js";
 
 const EDGE = 2e-3; // metres (heights) or slope units: an order above float32 noise here
 const HEIGHT_TOL = 1e-3;
@@ -22,7 +24,7 @@ function edgeMargin(cpu, sc, index) {
   const iz = (index - ix) / n;
   const at = (x, z) => bh[z * n + x];
   const spacing = sc.size / Math.max(n - 1, 1);
-  const reach = Math.max(1, Math.round(sc.crestReach / spacing));
+  const reach = Math.max(1, Math.round((sc.reachM ?? sc.crestReach) / spacing));
   const depthLimit = sc.depthBreakRatio * cpu.depth;
   const h = at(ix, iz);
   const steps = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -54,7 +56,7 @@ function calmAt(cpu, sc, index) {
   const ix = index % n;
   const iz = (index - ix) / n;
   const spacing = sc.size / Math.max(n - 1, 1);
-  const reach = Math.max(1, Math.round(sc.crestReach / spacing)) + 3;
+  const reach = Math.max(1, Math.round((sc.reachM ?? sc.crestReach) / spacing)) + 3;
   const depthLimit = sc.depthBreakRatio * cpu.depth;
   for (let dz = -reach; dz <= reach; dz += 1) for (let dx = -reach; dx <= reach; dx += 1) {
     const x = ix + dx, z = iz + dz;
@@ -162,7 +164,7 @@ function compare(cpu, gpuFields, gpuCounts, sc, history, time) {
         foamMisMax = Math.max(foamMisMax, cpu.foam[i], g.foam[i]);
         // Explained: this sample's flags disagreed within the foam window (the foam laid
         // then lingers), or it sits at the window's end (fade below 1e-6).
-        const flipped = time - history[i] <= sc.foamFadeSeconds + 1e-6;
+        const flipped = time - history[i] <= foamWindowAt(sc, sc.paritySpeed ?? 25) + 1e-6;
         if (!flipped && Math.max(cpu.foam[i], g.foam[i]) > 1e-6) foamUnexplained += 1;
       }
       foamDiffMax = Math.max(foamDiffMax, Math.abs(cpu.foam[i] - g.foam[i]));
@@ -183,7 +185,7 @@ function compare(cpu, gpuFields, gpuCounts, sc, history, time) {
     flagAgree: 1 - flagMismatch / N, flagMismatch, flagOffEdge, flagCalm, flagEdgeWorst, gradeMismatch, aheadMax,
     foamNotFlag, flagNotFoam, foamOutside, foamAgree: foamCells ? foamAgree / foamCells : 1,
     foamMisMax, foamDiffMax, ageDiffMax, foamUnexplained,
-    countsMatch,
+    countsMatch, countDetail: { panel: [gpuCounts.breakingCount, gpuCounts.freshCount, gpuCounts.foamCount, gpuCounts.lingerCount, gpuCounts.recentCount], fields: [gBreaks, gFlags, gFoam, gLinger, gRecent] },
   };
 }
 
@@ -236,62 +238,14 @@ function comparePatch(cpu, gpuState, gpuRead) {
   };
 }
 
-// v27.1: the panel's own path (pixel-pack buffer + fence, no countsNow): every state's
-// counts are those of step countsStep; compare them with the CPU's counts at that step.
-// Steps are paced like frames (a macrotask between them). Then hold (no steps, refresh()
-// as a paused page does) until the counts reach the last step.
-async function asyncCounts(gl, sc, speed, gust, dt, depth, seconds = 2) {
-  const cpu = createSurface(sc, createWind({ direction: Math.PI / 2, speed, gust }));
-  const gpu = createGpuSurface(gl, sc, createWind({ direction: Math.PI / 2, speed, gust }));
-  const keys = ["breakingCount", "freshCount", "foamCount", "lingerCount", "recentCount"];
-  const cpuAt = new Map();
-  const lags = [];
-  const lagMs = [];
-  const issued = new Map();
-  const frame = () => new Promise((r) => (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame(() => r()) : setTimeout(r, 16)));
-  let compared = 0, mismatch = 0, maxDiff = 0, gs = null, t = 0, step = 0;
-  const check = (state) => {
-    if (state.countsStep < 1) return;
-    const c = cpuAt.get(state.countsStep);
-    if (!c) return;
-    compared += 1;
-    const d = Math.max(...keys.map((k) => Math.abs(c[k] - state[k])));
-    if (d) mismatch += 1;
-    maxDiff = Math.max(maxDiff, d);
-  };
-  for (step = 1; step <= Math.round(seconds / dt); step += 1) {
-    t += dt;
-    const cs = cpu.step(t, dt, depth);
-    cpuAt.set(step, Object.fromEntries(keys.map((k) => [k, cs[k]])));
-    issued.set(step, performance.now());
-    gs = gpu.step(t, dt, depth);
-    lags.push(gs.stepIndex - gs.countsStep);
-    if (issued.has(gs.countsStep)) lagMs.push(performance.now() - issued.get(gs.countsStep));
-    check(gs);
-    await frame(); // paced like the app (one step per display frame)
-    while (gpu.backlog() > 2) await frame(); // and held back like the app (main.js MAX_BACKLOG)
-  }
-  const last = step - 1;
-  const t0 = performance.now();
-  while (gs.countsStep < last && performance.now() - t0 < 10000) {
-    await new Promise((r) => setTimeout(r, 16));
-    gpu.refresh(gs);
-  }
-  const heldCaughtUp = gs.countsStep === last;
-  check(gs);
-  lags.sort((a, b) => a - b);
-  lagMs.sort((a, b) => a - b);
-  // The break test may differ at a threshold edge (see the field parity): allow those.
-  return { compared, mismatch, maxDiff, edgeAllowance: Math.ceil(compared * 0.05), heldCaughtUp, lagMin: lags[0], lagMedian: lags[lags.length >> 1], lagMax: lags[lags.length - 1], lagMsMedian: Math.round(lagMs[lagMs.length >> 1]), lagMsMax: Math.round(lagMs[lagMs.length - 1]), steps: last };
-}
-
-export async function runParity(gl, { speeds = [0, 5, 10, 17.5, 25], seconds = 6, dt = 0.05, checkEvery = 0.05, gust = "continuous", size = 420, choppiness = 2.5, depth = 40 } = {}) {
+async function runParityCpuV27(gl, { speeds = [0, 5, 10, 17.5, 25], seconds = 6, dt = 0.05, checkEvery = 0.05, gust = "continuous", size = 420, choppiness = 2.5, depth = 40 } = {}) {
   const runs = [];
   const problems = [];
   for (const speed of speeds) {
     const sc = JSON.parse(JSON.stringify(baseScenario));
     sc.size = size;
     sc.choppiness = choppiness;
+    sc.reachM = crestReachAt(sc, speed); sc.paritySpeed = speed; // the face reach both surfaces use at this wind
     const cpuWind = createWind({ direction: Math.PI / 2, speed, gust });
     const gpuWind = createWind({ direction: Math.PI / 2, speed, gust });
     const cpu = createSurface(sc, cpuWind);
@@ -330,6 +284,7 @@ export async function runParity(gl, { speeds = [0, 5, 10, 17.5, 25], seconds = 6
       foamUnexplained: sum("foamUnexplained"), foamMisMax: worst("foamMisMax"), foamDiffMax: worst("foamDiffMax"), ageDiffMax: worst("ageDiffMax"),
       foamNotFlag: sum("foamNotFlag"), flagNotFoam: sum("flagNotFoam"), foamOutside: sum("foamOutside"), foamAgreeMin: worst("foamAgree", Math.min),
       countsMatch: checkpoints.every((c) => c.countsMatch),
+      countBad: checkpoints.filter((c) => !c.countsMatch).slice(0, 3).map((c) => ({ t: c.time, ...c.countDetail })), countBadN: checkpoints.filter((c) => !c.countsMatch).length,
       maxHsStepM: windJump,
       patch: ["chop", "fine"].map((which) => {
         const all = checkpoints.map((c) => c.patches[which]).filter(Boolean);
@@ -338,11 +293,7 @@ export async function runParity(gl, { speeds = [0, 5, 10, 17.5, 25], seconds = 6
       }),
       last: checkpoints[checkpoints.length - 1],
     };
-    r.async = await asyncCounts(gl, sc, speed, gust, dt, depth);
     const tag = `${speed} m/s`;
-    if (r.async.compared === 0) problems.push(`${tag}: async panel counts never landed`);
-    if (!r.async.heldCaughtUp) problems.push(`${tag}: held page did not reach its own step's counts`);
-    if (r.async.mismatch > r.async.edgeAllowance) problems.push(`${tag}: async panel counts differ from the CPU's at their step (${r.async.mismatch} of ${r.async.compared})`);
     if (!(r.maxHeightMm <= HEIGHT_TOL * 1000)) problems.push(`${tag}: heights differ by ${r.maxHeightMm.toFixed(3)} mm`);
     if (!(r.breakAgreeMin >= 0.995)) problems.push(`${tag}: break flags agree on ${(100 * r.breakAgreeMin).toFixed(3)}%`);
     if (!(r.flagAgreeMin >= 0.995)) problems.push(`${tag}: painted flags agree on ${(100 * r.flagAgreeMin).toFixed(3)}%`);
@@ -356,9 +307,244 @@ export async function runParity(gl, { speeds = [0, 5, 10, 17.5, 25], seconds = 6
       if (!(p.keptMax <= 1e-4) || !(p.rmsRel <= 1e-9) || !(p.varianceRel <= 1e-12) || !p.modesSame) problems.push(`${tag}: ${p.which} patch stats differ`);
     }
     if (!r.countsMatch) problems.push(`${tag}: panel counts differ from the fields`);
+    r.async = await asyncCounts(gl, sc, speed, gust, dt, depth);
+    if (r.async.compared === 0) problems.push(`${tag}: async panel counts never landed`);
+    if (!r.async.heldCaughtUp) problems.push(`${tag}: held page did not reach its own step's counts`);
+    if (r.async.mismatch) problems.push(`${tag}: async panel counts differ from the synchronous counts at their step (${r.async.mismatch} of ${r.async.compared})`);
     runs.push(r);
   }
   const summary = (problems.length ? "GPU parity FAILED: " + problems.join("; ") : "GPU parity ok") + " | " + runs.map((r) =>
-    `${r.speed} m/s: dh ${r.maxHeightMm.toFixed(4)} mm, breaks ${(100 * r.breakAgreeMin).toFixed(3)}% (${r.breakMismatch} mism, worst edge ${r.breakMismatch ? r.breakEdgeWorst.toExponential(1) : "-"}), flags ${(100 * r.flagAgreeMin).toFixed(3)}% (${r.flagMismatch}), last ${r.last.cpuBreaks}/${r.last.gpuBreaks}, async counts ${r.async.compared - r.async.mismatch}/${r.async.compared} = CPU (max diff ${r.async.maxDiff}), lag ${r.async.lagMin}-${r.async.lagMax} steps (median ${r.async.lagMedian}), held ${r.async.heldCaughtUp ? "caught up" : "STALE"}`).join("; ");
+    `${r.speed} m/s: dh ${r.maxHeightMm.toFixed(4)} mm, breaks ${(100 * r.breakAgreeMin).toFixed(3)}% (${r.breakMismatch} mism, worst edge ${r.breakMismatch ? r.breakEdgeWorst.toExponential(1) : "-"}), flags ${(100 * r.flagAgreeMin).toFixed(3)}% (${r.flagMismatch}), last ${r.last.cpuBreaks}/${r.last.gpuBreaks}`).join("; ");
+  return { ok: problems.length === 0, problems, runs, summary };
+}
+
+// ---------------------------------------------------------------------------------------
+// v28 parity. The GPU sea is now a spectral (FFT) sea, which the v26 CPU physics does not
+// have, so the old field-by-field CPU yardstick (runParityCpuV27, kept for reference) no
+// longer applies. Per checkpoint this checks, on the whole 256^2 GPU grid (scenario.fft):
+//  - the FFT against a CPU reference of the same FFT: the card's own spectrum (amplitude and
+//    phase per lattice wave, read back) summed directly at sample cells, in double
+//    precision, against the transformed height texture; plus the explicit long waves (the
+//    step's own components, double precision) against the height the wave pass wrote;
+//  - the break test at those cells: the break-slope and break-height fields (FFT part read
+//    from its textures, explicit part summed on the CPU) through the threshold, against the
+//    card's steep flag; any mismatch must sit within EDGE of the threshold;
+//  - foam exactly on the flags and the panel counts (reduction) == the fields, over 256^2;
+//  - the ripple patches against chopPatch.js built with the same band limits (the band
+//    objects the card stepped with, so the same held edge where the FFT hands over).
+const FFT_TOL = 2e-3; // metres: float32 FFT of a 5-15 m sea, about 1e-4 relative
+// v28 async-count parity (ported from v27.2): the panel counts arrive a few steps late, tagged
+// with countsStep. v28's GPU sea is not the CPU's, so the reference is a second GPU surface
+// stepped in lockstep whose counts are read synchronously (countsNow) at every step.
+async function asyncCounts(gl, sc, speed, gust, dt, depth, seconds = 2) {
+  const ref = createGpuSurface(gl, sc, createWind({ direction: Math.PI / 2, speed, gust }));
+  const gpu = createGpuSurface(gl, sc, createWind({ direction: Math.PI / 2, speed, gust }));
+  const keys = ["breakingCount", "freshCount", "foamCount", "lingerCount", "recentCount"];
+  const refAt = new Map(); const lags = [];
+  const frame = () => new Promise((r) => (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame(() => r()) : setTimeout(r, 16)));
+  let compared = 0, mismatch = 0, maxDiff = 0, gs = null, t = 0, step = 0;
+  const check = (state) => {
+    const c = state.countsStep >= 1 && refAt.get(state.countsStep);
+    if (!c) return;
+    compared += 1;
+    const d = Math.max(...keys.map((k) => Math.abs(c[k] - state[k])));
+    if (d) mismatch += 1;
+    maxDiff = Math.max(maxDiff, d);
+  };
+  for (step = 1; step <= Math.round(seconds / dt); step += 1) {
+    t += dt;
+    ref.step(t, dt, depth);
+    const rc = ref.countsNow();
+    refAt.set(step, Object.fromEntries(keys.map((k) => [k, rc[k]])));
+    gs = gpu.step(t, dt, depth);
+    lags.push(gs.stepIndex - gs.countsStep);
+    check(gs);
+    await frame();
+    while (gpu.backlog() > 2) await frame();
+  }
+  const last = step - 1, t0 = performance.now();
+  while (gs.countsStep < last && performance.now() - t0 < 10000) { await new Promise((r) => setTimeout(r, 16)); gpu.refresh(gs); }
+  const heldCaughtUp = gs.countsStep === last;
+  check(gs);
+  lags.sort((a, b) => a - b);
+  ref.dispose?.(); gpu.dispose?.();
+  return { compared, mismatch, maxDiff, heldCaughtUp, lagMin: lags[0], lagMedian: lags[lags.length >> 1], lagMax: lags[lags.length - 1], steps: last };
+}
+
+// v28 foam fix: the CPU break formula (surface.js mode 1) over a whole read-back height field,
+// against the GPU break flags. A mismatch is "on the edge" when the cell's steepness is within
+// AK_EDGE of the threshold, or its local-max test is a float tie (|fall| or |h - opposite| < 1e-5 m).
+export const AK_EDGE = 1e-3;
+export function breakFieldCheck(heightsIn, breaks, n, rule, spacing, long = null) {
+  // mode 2 (v28 long-slope rule): the short-wave height (total minus the explicit long waves,
+  // in float32 as the GPU) and the long wave's local slope added to the steepness.
+  const useLong = rule.mode > 1.5 && long && long.h;
+  let heights = heightsIn;
+  if (useLong) { heights = new Float32Array(n * n); for (let i = 0; i < n * n; i += 1) heights[i] = Math.fround(heightsIn[i] - long.h[i]); }
+  const HS = new Float32Array(n * n);
+  for (let iz = 1; iz < n - 1; iz += 1) for (let ix = 1; ix < n - 1; ix += 1) {
+    let t = 0;
+    for (let dz = -1; dz <= 1; dz += 1) for (let dx = -1; dx <= 1; dx += 1) t += heights[(iz + dz) * n + ix + dx];
+    HS[iz * n + ix] = t / 9;
+  }
+  const rowMean = new Float32Array(n * n), trough = new Float32Array(n * n);
+  for (let iz = 0; iz < n; iz += 1) for (let ix = 0; ix < n; ix += 1) {
+    const x0 = Math.max(ix - rule.rb, 0), x1 = Math.min(ix + rule.rb, n - 1);
+    let t = 0; for (let x = x0; x <= x1; x += 1) t += heights[iz * n + x];
+    rowMean[iz * n + ix] = t / (x1 - x0 + 1);
+  }
+  for (let iz = 0; iz < n; iz += 1) for (let ix = 0; ix < n; ix += 1) {
+    const z0 = Math.max(iz - rule.rb, 0), z1 = Math.min(iz + rule.rb, n - 1);
+    let t = 0; for (let z = z0; z <= z1; z += 1) t += rowMean[z * n + ix];
+    trough[iz * n + ix] = t / (z1 - z0 + 1);
+  }
+  const steps = [[1, 0], [-1, 0], [0, 1], [0, -1]], m = rule.ts + 1;
+  let cpu = 0, gpu = 0, mis = 0, onEdge = 0, offEdge = 0;
+  for (let iz = 0; iz < n; iz += 1) for (let ix = 0; ix < n; ix += 1) {
+    const i = iz * n + ix;
+    let b = false, near = Infinity;
+    if (ix >= m && iz >= m && ix < n - m && iz < n - m) {
+      const h = heights[i];
+      let drop = 0, dx = 0, dz = 0, minFall = Infinity;
+      for (const [sx, sz] of steps) { const fl = h - heights[(iz + sz) * n + ix + sx]; minFall = Math.min(minFall, Math.abs(fl)); if (fl > drop) { drop = fl; dx = sx; dz = sz; } }
+      const opp = h - heights[(iz - dz) * n + ix - dx];
+      const tie = minFall < 1e-5 || Math.abs(opp) < 1e-5;
+      const t = rule.ts, d = t * spacing, hs = HS[i];
+      const lap = (HS[i - t] + HS[i + t] + HS[i - t * n] + HS[i + t * n] - 4 * hs) / (d * d);
+      const eta = hs - trough[i];
+      const ak = eta > 0 && lap < 0 ? Math.sqrt(-lap * eta) * (useLong ? 1 + (rule.M || 0) * Math.max(0, long.h[i] * (rule.kL || 0)) : 1) + (useLong ? (rule.lg ?? 1) * Math.hypot(long.sx[i], long.sz[i]) : 0) : 0;
+      b = drop > 0 && opp >= 0 && ak >= rule.ak;
+      near = tie ? 0 : Math.abs(ak - rule.ak);
+    }
+    const g = breaks[i] > 0;
+    if (b) cpu += 1; if (g) gpu += 1;
+    if (b !== g) { mis += 1; if (near <= AK_EDGE) onEdge += 1; else offEdge += 1; }
+  }
+  return { cells: n * n, cpu, gpu, mis, onEdge, offEdge, onEdgePct: (100 * onEdge) / (n * n) };
+}
+
+export async function runParity(gl, { speeds = [0, 5, 10, 17.5, 25], seconds = 3, dt = 0.05, checkEvery = 0.5, gust = "continuous", size = 420, choppiness = 2.5, depth = 40, samples = 192 } = {}) {
+  const runs = [];
+  const problems = [];
+  for (const speed of speeds) {
+    const sc = JSON.parse(JSON.stringify(baseScenario));
+    sc.size = size;
+    sc.choppiness = choppiness; sc.paritySpeed = speed;
+    const gpu = createGpuSurface(gl, sc, createWind({ direction: Math.PI / 2, speed, gust }));
+    const N = gpu.N;
+    const chopSpec = sc.bands.find((b) => b.patch);
+    const cpuChop = chopSpec ? createChopPatch(chopSpec) : null;
+    const cpuFine = chopSpec && chopSpec.finePatch ? createChopPatch(chopSpec, chopSpec.finePatch) : null;
+    const steps = Math.round(seconds / dt);
+    const every = Math.max(1, Math.round(checkEvery / dt));
+    const cps = [];
+    let t = 0;
+    for (let s = 1; s <= steps; s += 1) {
+      t += dt;
+      const gs = gpu.step(t, dt, depth);
+      const ts = gpu.testState();
+      const ci = ts.bands.findIndex((b) => b.spec.patch);
+      const cc = cpuChop ? cpuChop.step(ts.bands[ci], ts.winds[ci], depth, GRAVITY, dt) : null;
+      const cf = cpuFine ? cpuFine.step(ts.bands[ci], ts.winds[ci], depth, GRAVITY, dt, cc.kCut) : null;
+      if (s % every !== 0) continue;
+      const g = gpu.readFields();
+      const counts = gpu.countsNow();
+      const spec = gpu.readSea("spectrum");
+      const T0 = gpu.readSea(0), T3 = gpu.readSea(3), T4 = gpu.readSea(4);
+      const c = { time: Math.round(t * 100) / 100 };
+      // FFT vs direct lattice sum, and the full height, at sample cells.
+      let seed = 12345 + s;
+      const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+      const modes = [];
+      for (let p = 0; p < N * N; p += 1) {
+        const re = spec[p * 4], im = spec[p * 4 + 1];
+        if (re === 0 && im === 0) continue;
+        const px = p % N, pz = (p - px) / N;
+        modes.push([px < N / 2 ? px : px - N, pz < N / 2 ? pz : pz - N, re, im]);
+      }
+      let fftMax = 0, hMax = 0, brkMis = 0, brkOff = 0, brkEdge = 0, steepN = 0;
+      const limit = sc.depthBreakRatio * depth;
+      for (let k = 0; k < samples; k += 1) {
+        const ix = Math.floor(rnd() * N), iz = Math.floor(rnd() * N), idx = iz * N + ix;
+        let h = 0;
+        for (const [lx, lz, re, im] of modes) {
+          const th = (2 * Math.PI * (lx * ix + lz * iz)) / N;
+          h += re * Math.sin(th) + im * Math.cos(th);
+        }
+        fftMax = Math.max(fftMax, Math.abs(h - T0[idx * 4 + 1]));
+        let hx = 0, bh = 0, bx = 0, bz = 0;
+        for (const q of ts.comps) {
+          const x = -q.half + ix * q.spacing, z = -q.half + iz * q.spacing;
+          const ph = q.k * (q.cx * x + q.cz * z) + q.phase;
+          const sn = Math.sin(ph), co = Math.cos(ph);
+          hx += q.a * sn; bh += q.ba * sn; bx += q.ba * q.k * q.cx * co; bz += q.ba * q.k * q.cz * co;
+        }
+        hMax = Math.max(hMax, Math.abs(T0[idx * 4 + 1] + hx - g.heights[idx]));
+        const slope = Math.hypot(T4[idx * 4] + bx, T4[idx * 4 + 1] + bz);
+        const bhT = T3[idx * 4 + 3] + bh;
+        const steep = slope >= sc.breakSlope || (bhT > 0 && bhT >= limit);
+        if (steep) steepN += 1;
+        if (steep !== g.steep[idx] > 0.5) {
+          brkMis += 1;
+          const m = Math.min(Math.abs(slope - sc.breakSlope), bhT > 0 ? Math.abs(bhT - limit) : Infinity);
+          brkEdge = Math.max(brkEdge, m);
+          if (m > EDGE) brkOff += 1;
+        }
+      }
+      Object.assign(c, { fftMaxMm: fftMax * 1000, heightMaxMm: hMax * 1000, brkMis, brkOff, brkEdge, steepN });
+      // v28 foam fix: the break rule itself, CPU formula over the full N^2 read-back heights
+      { const sp = sc.size / N; const fb = breakFieldCheck(g.heights, g.breaks, N, breakRuleAt(sc, speed, sp), sp, { h: g.xHeights, sx: g.xSlopeX, sz: g.xSlopeZ });
+        Object.assign(c, { fullMis: fb.mis, fullOff: fb.offEdge, fullEdgePct: fb.onEdgePct, fullBreaks: fb.gpu }); }
+      // Foam on flags, counts == fields, over the whole grid.
+      let foamNotFlag = 0, flagNotFoam = 0, foamOutside = 0, gB = 0, gF = 0, gFoam = 0, gL = 0, gR = 0;
+      for (let i = 0; i < N * N; i += 1) {
+        const flagged = g.flags[i] > 0;
+        if (g.freshFoam[i] > 0 && !flagged) foamNotFlag += 1;
+        if (flagged && !(g.freshFoam[i] > 0)) flagNotFoam += 1;
+        if (g.foam[i] > 0 && !flagged && !(g.recent[i] > 0)) foamOutside += 1;
+        if (g.breaks[i] > 0) gB += 1;
+        if (flagged) gF += 1;
+        if (g.foam[i] > 0) { gFoam += 1; if (!flagged) gL += 1; }
+        if (g.recent[i] > 0) gR += 1;
+      }
+      Object.assign(c, { foamNotFlag, flagNotFoam, foamOutside,
+        countsMatch: counts.breakingCount === gB && counts.freshCount === gF && counts.foamCount === gFoam && counts.lingerCount === gL && counts.recentCount === gR,
+        counts: [counts.breakingCount, counts.freshCount, counts.foamCount], fields: [gB, gF, gFoam] });
+      const rp = gpu.readPatches();
+      c.patches = { chop: comparePatch(cc, gs.chopPatch, rp.chop), fine: comparePatch(cf, gs.finePatch, rp.fine) };
+      cps.push(c);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const mx = (k) => Math.max(...cps.map((c) => c[k]));
+    const sm = (k) => cps.reduce((a, c) => a + c[k], 0);
+    const r = { speed, checkpoints: cps.length, N, fftMaxMm: mx("fftMaxMm"), heightMaxMm: mx("heightMaxMm"), brkMis: sm("brkMis"), brkOff: sm("brkOff"), brkEdge: mx("brkEdge"), steepSampled: sm("steepN"), fullMis: sm("fullMis"), fullOff: sm("fullOff"), fullEdgePct: mx("fullEdgePct"), fullBreaks: sm("fullBreaks"), samples: samples * cps.length,
+      foamNotFlag: sm("foamNotFlag"), flagNotFoam: sm("flagNotFoam"), foamOutside: sm("foamOutside"), countsMatch: cps.every((c) => c.countsMatch), last: cps[cps.length - 1],
+      patch: ["chop", "fine"].map((which) => {
+        const all = cps.map((c) => c.patches[which]).filter(Boolean);
+        const w = (key) => Math.max(...all.map((p) => p[key]));
+        return all.length ? { which, slopeMax: w("slopeMax"), byteMax: w("byteMax"), keptMax: w("keptMax"), rmsRel: w("rmsRel"), varianceRel: w("varianceRel"), modesSame: all.every((p) => p.modesSame) } : { which, none: true };
+      }) };
+    const tag = `${speed} m/s`;
+    if (!(r.fftMaxMm <= FFT_TOL * 1000)) problems.push(`${tag}: FFT vs direct sum ${r.fftMaxMm.toFixed(3)} mm`);
+    if (!(r.heightMaxMm <= HEIGHT_TOL * 1000)) problems.push(`${tag}: explicit waves on the FFT differ by ${r.heightMaxMm.toFixed(3)} mm`);
+    if (r.brkOff) problems.push(`${tag}: ${r.brkOff} break-test mismatches not at the threshold`);
+    if (r.fullOff) problems.push(`${tag}: ${r.fullOff} break-rule mismatches (full grid) off the threshold edge`);
+    if (r.fullEdgePct > 0.5) problems.push(`${tag}: break-rule mismatches on the edge ${r.fullEdgePct.toFixed(3)}% > 0.5%`);
+    if (r.foamNotFlag || r.flagNotFoam || r.foamOutside) problems.push(`${tag}: GPU foam off its flags (${r.foamNotFlag}/${r.flagNotFoam}/${r.foamOutside})`);
+    if (!r.countsMatch) problems.push(`${tag}: panel counts differ from the fields`);
+    for (const p of r.patch) {
+      if (p.none) continue;
+      if (!(p.slopeMax <= 1e-4)) problems.push(`${tag}: ${p.which} patch slopes differ by ${p.slopeMax.toExponential(2)}`);
+      if (!(p.byteMax <= 1)) problems.push(`${tag}: ${p.which} patch texture differs by ${p.byteMax} levels`);
+      if (!(p.keptMax <= 1e-4) || !(p.rmsRel <= 1e-6) || !(p.varianceRel <= 1e-9) || !p.modesSame) problems.push(`${tag}: ${p.which} patch stats differ`);
+    }
+    r.async = await asyncCounts(gl, sc, speed, gust, dt, depth);
+    if (r.async.compared === 0) problems.push(`${tag}: async panel counts never landed`);
+    if (!r.async.heldCaughtUp) problems.push(`${tag}: held page did not reach its own step's counts`);
+    if (r.async.mismatch) problems.push(`${tag}: async panel counts differ from the synchronous counts at their step (${r.async.mismatch} of ${r.async.compared})`);
+    runs.push(r);
+  }
+  const summary = (problems.length ? "GPU parity FAILED: " + problems.join("; ") : "GPU parity ok") + " | " + runs.map((r) =>
+    `${r.speed} m/s: FFT ${r.fftMaxMm.toFixed(4)} mm, heights ${r.heightMaxMm.toFixed(4)} mm, break test ${r.brkMis} mism (${r.brkOff} off edge) of ${r.samples} (${r.steepSampled} steep), break rule full grid ${r.fullMis} mism (${r.fullOff} off edge) over ${r.checkpoints} x ${r.N}^2 (${r.fullBreaks} breaks), counts ${r.countsMatch ? "=" : "!="} fields (${r.last.counts.join("/")}), async ${r.async.compared - r.async.mismatch}/${r.async.compared} (lag ${r.async.lagMin}-${r.async.lagMax}, held ${r.async.heldCaughtUp ? "caught up" : "STALE"}), chop patch ${r.patch[0].slopeMax?.toExponential(1)}`).join("; ");
   return { ok: problems.length === 0, problems, runs, summary };
 }
