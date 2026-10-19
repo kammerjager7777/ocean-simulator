@@ -22,7 +22,7 @@ import { createBand, retuneBand, bandVariance } from "./band.js?v=28";
 import { createGpuChopPatch } from "./gpuPatch.js?v=28";
 import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=28";
 import { slopeBudget } from "./roughness.js?v=28";
-import { createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=28";
+import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=28";
 import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=28";
 
 const TAU = Math.PI * 2;
@@ -728,6 +728,7 @@ export function createGpuSurface(gl, scenario, wind) {
   // The physics grid is the FFT tile: N x N over scenario.size (spacing size / N).
   const n = scenario.fft || 256;
   const sea = createFftSea(gl, n);
+  let seaAcc = 0;
   const bands = scenario.bands.map(createBand);
   const patches = bands.map((band) => (band.spec.patch ? createGpuChopPatch(gl, band.spec) : null));
   const finePatches = bands.map((band) => (band.spec.patch && band.spec.finePatch ? createGpuChopPatch(gl, band.spec, band.spec.finePatch) : null));
@@ -971,7 +972,14 @@ export function createGpuSurface(gl, scenario, wind) {
     }));
     const gridMss = explicitMss + lattice.reduce((sum, b) => sum + b.mss, 0);
     const roughness = slopeBudget(bands, chopPatch, finePatch, chopIndex >= 0 ? winds[chopIndex].speed : wind.speed, gridMss);
-    const fft = sea.step(setup, depth, GRAVITY, L, dt);
+    // GAD perf: the big (far) cascade's FFT runs at most SEA_RATE times a second; between runs its
+    // fields are extrapolated in time from the last two results (sea.step skip). The patches, the
+    // break test and the foam passes below still run every step. With steps of 1/SEA_RATE s or
+    // longer (fixdt 0.05 captures, 60 Hz displays) every step runs the FFT, exactly as before.
+    seaAcc += dt;
+    const skipSea = sea.rateCap && seaAcc < 0.75 / SEA_RATE && stepIndex > 0;
+    const fft = skipSea ? sea.step(setup, depth, GRAVITY, L, dt, true) : sea.step(setup, depth, GRAVITY, L, seaAcc);
+    if (!skipSea || fft.extrapolated !== true) seaAcc = 0;
     // The components, in double precision here, then as float32 uniforms. Waves with no
     // amplitude are left out (surface.js skips them too).
     let count = 0;

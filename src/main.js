@@ -93,7 +93,10 @@ function readout(state) {
 // GPU counts arrive a moment after their step: the panel takes them when they land.
 if (surface.kind === "gpu") surface.onCounts = (s) => { if (s === state) readout(s); };
 
-const MAX_BACKLOG = 2;
+// v28 perf (Mac, 120 Hz): a step's fence signals only once Chrome's GPU process has run that frame,
+// 2-3 display frames later at 120 Hz, so a backlog limit of 2 steps held frames on a card that was
+// keeping up. 6 steps (50 ms at 120 Hz, 100 ms at 60 Hz) still stops a slow card's queue growing.
+const MAX_BACKLOG = Number(params.get("maxbacklog") || 6);
 const noDraw = params.get("nodraw") === "1";
 // ?fixdt=<s> (headless measurement): fixed physics step, so sim time hits exact sample times
 const fixDt = Number(params.get("fixdt") || 0);

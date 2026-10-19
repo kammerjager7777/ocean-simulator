@@ -1,6 +1,11 @@
 import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=28";
 import { LOBE_GLSL } from "../physics/roughness.js?v=28";
 import { timed } from "../physics/passTimer.js?v=28";
+const FAR_HALVE_DEFAULT = 0; // 05:16 horizon bar: quarter-density far rings flattened the sun25 silhouette (?farhalve=1 to test)
+const CHUNK_DEFAULT = 1; // v28 chunk (Michael 09:23): only the one square tile of sea (size slider), no horizon rings (?chunk=0 for the full sea)
+const ONE_COPY_DEFAULT = 0; // GAD 01:08: onecopy=0 (all three FFT copies at every distance)
+const TILE_THIN_DEFAULT = 1; // GAD 01:08: tile mesh at half density past ~100 m (?tilethin=0 off)
+const TILE_THIN_D1 = 75; // = fftView.js TILE_THIN_D1
 
 function perspective(fovy, aspect, near, far) {
   const f = 1 / Math.tan(fovy / 2);
@@ -181,7 +186,7 @@ const LIGHT_DEFS = "#define SUN_IRRADIANCE 0.25\n#define WATER_KNEE 0.4314\n#def
 // saturating softly at TRANSL_MAX, so it
 // never turns white and the body stays teal; glint and foam are drawn on top as before.
 const TRANSL_DEFS = "#define TRANSL_COLOR 0.22, 0.60, 0.50\n#define TRANSL_G 0.7\n#define TRANSL_SCATTER 80.0\n#define TRANSL_SKY 6.5\n#define TRANSL_TIP 0.8\n#define TRANSL_MAX 0.85\n";
-const LACE_DEFS = "#define DIM_LACE 0.3\n#define DIM_DENSE 0.64\n#define LACE_HOLE_BASE 0.06\n#define LACE_HOLE_DENSE 0.08\n#define LACE_HOLE_SOFT 0.08\n#define LACE_CAP 0.62\n#define LACE_WARP 0.5\n#define LACE_EDGE 0.3\n#define LACE_RIDGE_LO 0.65\n#define LACE_RIDGE_HI 0.9\n#define LACE_MASK_LO 0.6\n#define LACE_SHIFT_X 2.5\n#define LACE_SHIFT_Y 1.5\n#define LACE_DASH 0.45\n#define LACE_SHOULDER 0.8\n#define LACE_FINE_LINE 0.35\n#define LACE_SH_LO 0.45\n#define LACE_SH_HI 0.65\n#define LACE_MASK_HI 0.95\n";
+const LACE_DEFS = "#define DIM_LACE 0.3\n#define DIM_DENSE 0.64\n#define LACE_HOLE_BASE 0.06\n#define LACE_HOLE_DENSE 0.08\n#define LACE_HOLE_SOFT 0.08\n#define LACE_CAP 0.62\n#define LACE_WARP 0.5\n#define LACE_EDGE 0.3\n#define LACE_RIDGE_LO 0.65\n#define LACE_RIDGE_HI 0.9\n#define LACE_MASK_LO 0.6\n#define LACE_SHIFT_X 2.5\n#define LACE_SHIFT_Y 1.5\n#define LACE_DASH 0.45\n#define LACE_SHOULDER 0.8\n#define LACE_FINE_LINE 0.35\n#define LACE_SH_LO 0.45\n#define LACE_SH_HI 0.65\n#define LACE_MASK_HI 0.95\n" + `#define LACE_GRAIN ${Number(new URLSearchParams(globalThis.location?.search ?? "").get("lacegrain") ?? 0.8).toFixed(3)}\n`;
 
 // Sun glitter and sky reflection spread by the physical slope distribution (roughness.js).
 // The glint adds to the water and rolls off softly below foam brightness.
@@ -238,6 +243,7 @@ float hash(vec2 p) {
   q += dot(q, q.yzx + 33.33);
   return fract((q.x + q.y) * q.z);
 }
+float detailL0(vec2 qw) { return 1.0 - smoothstep(0.5, 1.0, max(qw.x / 1.6, qw.y / 0.12)); }
 float valueNoise(vec2 p) {
   vec2 i = floor(p);
   vec2 f = fract(p);
@@ -473,12 +479,57 @@ void main() {
   vec2 t = normalize(travel);
   vec2 q = vec2(dot(vWorld.xz, t), dot(vWorld.xz, vec2(-t.y, t.x)));
   float dist = length(eye - vWorld);
+#ifdef HAS_DERIV
+  vec2 qw = fwidth(q);
+#else
+  vec2 qw = vec2(dist * 0.0012, dist * 0.0012);
+#endif
+  vec2 gM = vec2(0.0);
+  vec2 gF = vec2(0.0);
+#ifdef HAS_DERIV
+  vec2 qdx = dFdx(q);
+  vec2 qdy = dFdy(q);
+  float qdet = qdx.x * qdy.y - qdx.y * qdy.x;
+  if (abs(qdet) > 1e-10) {
+    float mdx = dFdx(marked), mdy = dFdy(marked), fdx = dFdx(vFoam), fdy = dFdy(vFoam);
+    gM = vec2(qdy.y * mdx - qdx.y * mdy, qdx.x * mdy - qdy.x * mdx) / qdet;
+    gF = vec2(qdy.y * fdx - qdx.y * fdy, qdx.x * fdy - qdy.x * fdx) / qdet;
+  }
+#endif
+  vec2 warpQ = vec2(LACE_SHIFT_X * (valueNoise(q * vec2(1.0 / 0.9, 1.0 / 0.6) + 261.0) - 0.5 + 0.5 * (valueNoise(q * vec2(1.0 / 0.35, 1.0 / 0.3) + 263.0) - 0.5)),
+                    LACE_SHIFT_Y * (valueNoise(q * vec2(1.0 / 0.8, 1.0 / 0.5) + 267.0) - 0.5 + 0.5 * (valueNoise(q * vec2(1.0 / 0.3, 1.0 / 0.3) + 269.0) - 0.5)));
+  // 01:08 GAD (cell-shaped streaks): the foam edge is perturbed with world noise before every
+  // threshold, as v25 did up close, but now wherever the ~1 m edge noise is resolved
+  // (detailE), not only where the 0.12 m lace is (detailL), so mid-range foam no longer
+  // traces the cells in straight parallel edges. ?lacegrain=0 restores the old edges.
+  float detailE = LACE_GRAIN > 0.0 ? 1.0 - smoothstep(0.5, 1.0, max(qw.x / 1.0, qw.y / 0.7)) : 0.0;
+  float detailW = max(detailL0(qw), detailE);
+  float markedW = marked + dot(gM, warpQ) * detailW;
+  float foamW = vFoam + dot(gF, warpQ) * detailW;
+  // Warped flag mask and grade for the fresh band too; never past the flag outline (0.5).
+#ifdef HAS_DERIV
+  float fpG = max(max(length(dFdx(vWorld)), length(dFdy(vWorld))), 1e-4);
+#else
+  float fpG = 0.02;
+#endif
+  float lg2 = log2(fpG * 2.5);
+  float oG = floor(lg2);
+  float nS = smoothstep(0.25, 0.75, mix(valueNoise(q / exp2(oG) + 307.0), valueNoise(q / exp2(oG + 1.0) + 311.0), lg2 - oG));
+  // Pixel-scale edge jitter (~2.5 px world noise): added to every foam threshold below, so
+  // even where perspective squeezes the ~1 m edge noise into a few rows, no thresholded edge
+  // runs straight for more than a few pixels.
+  float edgeJ = LACE_GRAIN > 0.0 ? 0.16 * (nS - 0.5) : 0.0;
+  if (LACE_GRAIN > 0.0) {
+    flagMask = smoothstep(0.55, 0.9, markedW) * smoothstep(0.5, 0.55, marked);
+    band = smoothstep(0.15, 0.95, foamW);
+    amount = band * flagMask;
+  }
   float fine = 1.0 - smoothstep(25.0, 70.0, dist);
   float grain = valueNoise(q * vec2(1.0 / 0.9, 1.0 / 2.6));
   grain = mix(grain, 0.6 * grain + 0.4 * valueNoise(q * vec2(1.0 / 0.35, 1.0 / 0.9) + 17.0), fine);
   // Noise only removes foam: alpha never exceeds amount, and the core near the crest
   // (amount close to 1) stays solid while the edges and ends break up.
-  float alphaFar = amount * clamp((amount - 0.6 * grain - fadeCut) / 0.3, 0.0, 1.0) * fadeStrength;
+  float alphaFar = amount * clamp((amount - 0.6 * grain - fadeCut + edgeJ) / 0.3, 0.0, 1.0) * fadeStrength;
 
   // Up close a grid cell is metres wide, so the per-sample grade would paint a slab.
   // Near the camera the band is measured in metres ahead of the crest it came from
@@ -495,7 +546,7 @@ void main() {
   float amountNear = flagMask * smoothstep(0.1, 0.6, vFoam) * lipFade * lengthTaper;
   // Tearing only removes: holes open where the band is already thin, so the lower
   // edge and the ends break up while the lip itself stays whole.
-  float alphaNearFresh = amountNear * smoothstep(0.0, 0.3, amountNear - 0.5 * tear - fadeCut) * fadeStrength;
+  float alphaNearFresh = amountNear * smoothstep(0.0, 0.3, amountNear - 0.5 * tear - fadeCut + edgeJ) * fadeStrength;
 
   // Aged foam up close. Once the crest has moved on, every sample it swept over was
   // laid as a crest (grade 1, 0 m ahead, full run), so drawing it as a lip band filled
@@ -507,20 +558,23 @@ void main() {
   // keeps exactly the lip band above; the switch to streaks happens outside it.
   float oldness = smoothstep(0.0, 0.12, vAge) * (1.0 - smoothstep(0.25, 0.5, vFlag));
   float fadeV = clamp(vFade, 0.0, 1.0);
-#ifdef HAS_DERIV
-  vec2 qw = fwidth(q);
-#else
-  vec2 qw = vec2(dist * 0.0012, dist * 0.0012);
-#endif
   // 1 where a streak octave is several pixels wide, 0 where it is under a pixel.
   float detailC = 1.0 - smoothstep(0.5, 1.0, max(qw.x / 2.8, qw.y / 0.45));
   float detailF = 1.0 - smoothstep(0.5, 1.0, max(qw.x / 0.9, qw.y / 0.18));
-  float streak = 0.65 * mix(0.5, valueNoise(q * vec2(1.0 / 2.8, 1.0 / 0.45) + 53.0), detailC)
-               + 0.35 * mix(0.5, valueNoise(q * vec2(1.0 / 0.9, 1.0 / 0.18) + 71.0), detailF);
+  // 01:08 GAD: the streaks (2.8 m x 0.45 m noise, thresholded) came out as straight, hard,
+  // parallel strips at mid range; their across-crest coordinate now wanders with ~1 m and
+  // ~0.4 m world noise (about +-0.3 m), so no strip edge runs straight.
+  vec2 qS = q + (LACE_GRAIN > 0.0 ? vec2(0.3 * (valueNoise(q * vec2(1.0 / 1.5, 1.0 / 1.0) + 413.0) - 0.5),
+      0.7 * (valueNoise(q * vec2(1.0 / 0.7, 1.0 / 0.6) + 401.0) - 0.5) + 0.3 * (valueNoise(q * vec2(1.0 / 0.35, 1.0 / 0.3) + 409.0) - 0.5)) : vec2(0.0));
+  // with the grain on the long streak octave is less stretched (1.8 m instead of 2.8 m)
+  float streakLen = LACE_GRAIN > 0.0 ? 1.8 : 2.8;
+  float streak = 0.65 * mix(0.5, valueNoise(qS * vec2(1.0 / streakLen, 1.0 / 0.45) + 53.0), detailC)
+               + 0.35 * mix(0.5, valueNoise(qS * vec2(1.0 / 0.9, 1.0 / 0.18) + 71.0), detailF);
   float oldAmount = smoothstep(0.6, 1.0, marked) * smoothstep(0.1, 0.6, vFoam);
   float cover = 0.3 + 0.55 * (1.0 - fadeV);
   float strengthOld = mix(0.6, 0.8, fadeV);
-  float alphaSharp = smoothstep(cover, cover + 0.18, streak * oldAmount);
+  float sharpW = LACE_GRAIN > 0.0 ? 0.3 : 0.18; // softer streak edges with the grain on (GAD: no hard straight edges)
+  float alphaSharp = smoothstep(cover, cover + sharpW, streak * oldAmount + edgeJ);
   // Expected cover of a sub-pixel streak pattern (noise spread about 0.2 to 0.8).
   float alphaShare = clamp((0.8 * oldAmount - cover - 0.09) / max(0.6 * oldAmount, 1e-3), 0.0, 1.0);
   // Close to the camera the streak noise's widths (0.45 m and 0.18 m) are 10 to 30 px,
@@ -535,9 +589,12 @@ void main() {
   float detailL = 1.0 - smoothstep(0.5, 1.0, max(qw.x / 1.6, qw.y / 0.12));
   float yJ = q.y + LACE_WARP * (valueNoise(q * vec2(1.0 / 1.4, 1.0 / 0.7) + 201.0) + 0.5 * valueNoise(q * vec2(1.0 / 0.6, 1.0 / 0.4) + 205.0));
   float widthSel = valueNoise(q * vec2(1.0 / 1.6, 1.0 / 0.7) + 211.0);
-  float laceThin = valueNoise(vec2(q.x / 1.7, yJ / 0.08) + 217.0);
-  float laceMid = valueNoise(vec2(q.x / 2.3, yJ / 0.16) + 219.0);
-  float laceWide = valueNoise(vec2(q.x / 3.2, yJ / 0.3) + 221.0);
+  // 02:xx GAD straight-edge bar: with the grain on the lace lines are about half as long
+  // (thin 0.9 m instead of 1.7 m) so no ridge runs straight past ~20 px near the camera.
+  float laceLenK = LACE_GRAIN > 0.0 ? 0.53 : 1.0;
+  float laceThin = valueNoise(vec2(q.x / (1.7 * laceLenK), yJ / 0.08) + 217.0);
+  float laceMid = valueNoise(vec2(q.x / (2.3 * laceLenK), yJ / 0.16) + 219.0);
+  float laceWide = valueNoise(vec2(q.x / (3.2 * laceLenK), yJ / 0.3) + 221.0);
   float laceLine = mix(mix(laceThin, laceMid, smoothstep(0.2, 0.5, widthSel)), laceWide, smoothstep(0.5, 0.8, widthSel));
   // Each streak is the mid contour of its noise: a ridge, brightest in its core and soft to
   // both sides, so lines stay thin and separate instead of filling between dark gaps.
@@ -560,22 +617,6 @@ void main() {
   // their value a displacement w away is the value here plus gradient . w, with the
   // gradient in metres solved from the screen derivatives. Where the cell ramp is steep
   // this moves the edge by up to the full displacement, so it no longer traces the cell.
-  vec2 gM = vec2(0.0);
-  vec2 gF = vec2(0.0);
-#ifdef HAS_DERIV
-  vec2 qdx = dFdx(q);
-  vec2 qdy = dFdy(q);
-  float qdet = qdx.x * qdy.y - qdx.y * qdy.x;
-  if (abs(qdet) > 1e-10) {
-    float mdx = dFdx(marked), mdy = dFdy(marked), fdx = dFdx(vFoam), fdy = dFdy(vFoam);
-    gM = vec2(qdy.y * mdx - qdx.y * mdy, qdx.x * mdy - qdy.x * mdx) / qdet;
-    gF = vec2(qdy.y * fdx - qdx.y * fdy, qdx.x * fdy - qdy.x * fdx) / qdet;
-  }
-#endif
-  vec2 warpQ = vec2(LACE_SHIFT_X * (valueNoise(q * vec2(1.0 / 0.9, 1.0 / 0.6) + 261.0) - 0.5 + 0.5 * (valueNoise(q * vec2(1.0 / 0.35, 1.0 / 0.3) + 263.0) - 0.5)),
-                    LACE_SHIFT_Y * (valueNoise(q * vec2(1.0 / 0.8, 1.0 / 0.5) + 267.0) - 0.5 + 0.5 * (valueNoise(q * vec2(1.0 / 0.3, 1.0 / 0.3) + 269.0) - 0.5)));
-  float markedW = marked + dot(gM, warpQ) * detailL;
-  float foamW = vFoam + dot(gF, warpQ) * detailL;
   // The switch from the fresh lip band to old streaks (oldness, from the cell-interpolated
   // vAge and vFlag) is displaced the same way, so it does not cut the foam along a cell.
   vec2 gA = vec2(0.0);
@@ -588,11 +629,11 @@ void main() {
   }
 #endif
   float oldnessW = smoothstep(0.0, 0.12, vAge + dot(gA, warpQ)) * (1.0 - smoothstep(0.25, 0.5, vFlag + dot(gG, warpQ)));
-  oldness = mix(oldness, oldnessW, detailL);
+  oldness = mix(oldness, oldnessW, detailW);
   // Never past the flag outline (drawn at marked 0.5), whatever the displacement.
   float oldAmountL = smoothstep(0.5, 0.58, marked)
                    * smoothstep(edgeAt - 0.05, edgeAt + 0.05, markedW) * smoothstep(gradeAt - 0.08, gradeAt + 0.08, foamW);
-  oldAmount = mix(oldAmount, oldAmountL, detailL);
+  oldAmount = mix(oldAmount, oldAmountL, detailW);
   float denseOld = smoothstep(cover, cover + 0.18, streak * oldAmount);
   float holeAt = LACE_HOLE_BASE + LACE_HOLE_DENSE * denseOld;
   // Core at full strength, then a thinner translucent shoulder (LACE_SHOULDER of the core)
@@ -608,8 +649,8 @@ void main() {
   // The fill threshold wanders near the camera so the outline does not follow the
   // 2.2 m cells in straight edges (slightly biased low, so the lace keeps about the old
   // foam cover; it can only add foam where oldAmount is already non-zero, inside flags).
-  float coverJ = cover + LACE_EDGE * (valueNoise(q * vec2(1.0 / 0.7, 1.0 / 0.4) + 233.0) - 0.58) * detailL;
-  alphaSharp = smoothstep(coverJ, coverJ + 0.18, streak * oldAmount);
+  float coverJ = cover + LACE_EDGE * (valueNoise(q * vec2(1.0 / 0.7, 1.0 / 0.4) + 233.0) - 0.58) * detailW;
+  alphaSharp = smoothstep(coverJ, coverJ + sharpW, streak * oldAmount + edgeJ);
   float alphaOld = mix(alphaShare, alphaSharp, detailC) * strengthOld;
   // Near the camera the lace carries the foam: each streak peaks in its core and softens
   // to its edges, and the densest foam is held to LACE_CAP so it never fills solid.
@@ -634,6 +675,21 @@ void main() {
   float dimLace = DIM_LACE * fadeV * smoothstep(edgeAt - 0.08, edgeAt + 0.08, marked) * smoothstep(gradeAt - 0.1, gradeAt + 0.1, vFoam)
                 * mix(0.25 + 0.75 * holeN, lace, detailL);
   alpha = max(alpha, dimLace);
+  // Foam grain over the whole foam range (21:55 lace bar; 01:08 GAD dense grain): world-
+  // anchored value noise with cells ~2.5 px at every distance (two octaves blended by the
+  // pixel footprint, so it does not swim). Lace (alpha < ~0.3): alpha x (1 - 0.8 n);
+  // dense foam: weaker, alpha x (1 - 0.4 n), times a second, larger noise (~15 px).
+  // Each factor is divided by its mean (QM 01:09: lingering foam already reads as lighter
+  // water, so the grain must not dim it on average); alpha is capped at 1.
+  // ?lacegrain=0 turns it off (LACE_GRAIN 0).
+  float lg15 = log2(fpG * 15.0);
+  float oL = floor(lg15);
+  float nL = smoothstep(0.25, 0.75, mix(valueNoise(q / exp2(oL) + 331.0), valueNoise(q / exp2(oL + 1.0) + 337.0), lg15 - oL));
+  float denseW = smoothstep(0.25, 0.45, alpha);
+  float ampS = LACE_GRAIN * mix(1.0, 0.5, denseW);           // 0.8 lace, 0.4 dense
+  float ampL = LACE_GRAIN * 0.5 * denseW;                     // 0.4 on dense only
+  float grainF = (1.0 - ampS * nS) / (1.0 - 0.5 * ampS) * (1.0 - ampL * nL) / (1.0 - 0.5 * ampL);
+  alpha = min(alpha * grainF, 1.0);
   // Foam takes the fine chop's shading only where it darkens: never brighter than the
   // big grid's lighting alone would make it.
   vec3 foamColor = vec3(0.75, 0.81, 0.82) * (0.92 + 0.08 * min(lightFoam, lightBig));
@@ -787,7 +843,7 @@ export function createView(canvas) {
   const gpuLocs = gpuProgram ? locate(gpuProgram) : null;
   const fftLocs = fftProgram ? locate(fftProgram) : null;
   if (fftLocs) {
-    for (const name of ["physA", "physB", "physL", "physF", "physG", "physN", "chopStats", "fineStats", "fftR0", "fftR1", "fftR2", "fftR3", "fftStats", "fftLevels", "fftL", "choppiness", "pixAngle", "lodBias", "minLod", "antiTile", "xCount", "x0", "x1"]) {
+    for (const name of ["physA", "physB", "physL", "physF", "physG", "physN", "chopStats", "fineStats", "fftR0", "fftR1", "fftR2", "fftR3", "fftStats", "fftLevels", "fftL", "choppiness", "pixAngle", "lodBias", "minLod", "farHalve", "oneCopyFar", "tileThin", "ringLodAdd", "antiTile", "xCount", "x0", "x1"]) {
       fftLocs[name] = gl.getUniformLocation(fftProgram, name);
     }
     fftLocs.subMss = gl.getUniformLocation(fftProgram, "subMssU");
@@ -797,7 +853,13 @@ export function createView(canvas) {
   const fftParams = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
   const lodBias = Number(fftParams.get("lodBias") || 1);
   const minLod = Number(fftParams.get("minLod") || 0);
+  const oneCopyFar = fftParams.has("onecopy") ? Number(fftParams.get("onecopy")) : ONE_COPY_DEFAULT;
+  const tileThin = fftParams.has("tilethin") ? Number(fftParams.get("tilethin")) : TILE_THIN_DEFAULT;
+  const frontToBack = (fftParams.has("f2b") ? Number(fftParams.get("f2b")) : 1) > 0.5; // v28-lod: nearest chunks first (?f2b=0 off)
+  // v28-lod: ?farhalve=1 quarters the ring density past 840 m (default set below after the estimate)
+  const farHalve = fftParams.has("farhalve") ? Number(fftParams.get("farhalve")) : FAR_HALVE_DEFAULT;
   const antiTile = fftParams.get("antiTile") === "0" ? 0 : 1;
+  const chunkOnly = (fftParams.has("chunk") ? Number(fftParams.get("chunk")) : CHUNK_DEFAULT) > 0.5;
   // ?top=1: straight down from high up, for the tiling map (review only).
   const topView = fftParams.get("top") === "1";
   const topHeight = Number(fftParams.get("topHeight") || 4200);
@@ -1022,14 +1084,14 @@ export function createView(canvas) {
       canvas.height = height;
     }
     if (fft && fftMesh.key !== `${fft.N}/${fft.L}`) {
-      const m = buildFftMesh(fft.N, fft.L);
+      const m = buildFftMesh(fft.N, fft.L, chunkOnly ? 0 : undefined, farHalve > 0.5); // chunk: reach 0 = no rings
       gl.bindBuffer(gl.ARRAY_BUFFER, fftMesh.xz);
       gl.bufferData(gl.ARRAY_BUFFER, m.xz, gl.STATIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, fftMesh.meta);
       gl.bufferData(gl.ARRAY_BUFFER, m.meta, gl.STATIC_DRAW);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, fftMesh.index);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.index, gl.STATIC_DRAW);
-      fftMesh.count = m.index.length;
+      fftMesh.count = m.fullCount ?? m.index.length; // v28-lod: the thin tile lists sit after fullCount
       fftMesh.chunks = m.chunks;
       fftMesh.key = `${fft.N}/${fft.L}`;
     }
@@ -1132,6 +1194,10 @@ export function createView(canvas) {
       gl.uniform1f(locs.pixAngle, (Math.PI / 4) / canvas.height);
       gl.uniform1f(locs.lodBias, lodBias);
       gl.uniform1f(locs.minLod, minLod);
+      gl.uniform1f(locs.farHalve, farHalve);
+      gl.uniform1f(locs.tileThin, tileThin);
+      gl.uniform1f(locs.ringLodAdd, fftParams.has("ringlodadd") ? Number(fftParams.get("ringlodadd")) : 0);
+      gl.uniform1f(locs.oneCopyFar, oneCopyFar);
       gl.uniform1f(locs.antiTile, antiTile);
       const count = Math.min(fft.explicitCount, 64);
       gl.uniform1i(locs.xCount, count);
@@ -1141,7 +1207,7 @@ export function createView(canvas) {
       }
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, fftMesh.index);
       // v28 perf: only the chunks that can reach the screen (?nocull=1 draws all, for checks)
-      const ranges = noCull ? [[0, fftMesh.count]] : visibleRanges(fftMesh.chunks, vpMat, 60);
+      const ranges = noCull ? [[0, fftMesh.count]] : visibleRanges(fftMesh.chunks, vpMat, 60, tileThin > 0.5 || frontToBack ? eye : null, tileThin > 0.5 ? TILE_THIN_D1 + 1 : Infinity, frontToBack);
       fftMesh.drawn = ranges.reduce((a, r) => a + r[1], 0);
       if (typeof window !== "undefined") window.__fftDrawn = [fftMesh.drawn / 3, fftMesh.count / 3];
       timed("render:fftMesh", () => { for (const [first, count] of ranges) gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, first * 4); });

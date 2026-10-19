@@ -50,7 +50,7 @@ export function crestReachAt(scenario, speed) {
 // wavenumber from the crest curvature (k^2 = -h''/a, curvature over +-ts cells).
 // The trough window is half of the wind sea's peak wavelength (PM: kp = 0.77 g / U^2),
 // 8-320 m; the curvature stencil round(window / 20 m), 2-4 cells. mode 0 = the v27 rule (break-band height + steep face within reach).
-export const BREAK_RULE = { M: 1, ak: 0.18, minWindow: 8, maxWindow: 320, windowFraction: 0.5 };
+export const BREAK_RULE = { M: 1, ak: 0.27, minWindow: 8, maxWindow: 320, windowFraction: 0.5 };
 // GAD 04:15: foam lives about as long as its breaker's period. The breaking crests of a
 // fully developed sea are about equally steep at every wind (Hs kp / 2 is wind-independent),
 // so they get sparser per area as the waves grow (~1 / lambda_p^2); bigger breakers leave

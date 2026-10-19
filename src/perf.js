@@ -17,7 +17,7 @@ function stats(values) {
   const sorted = Float64Array.from(values).sort();
   const at = (q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))];
   const round = (v) => Math.round(v * 1000) / 1000;
-  return { median: round(at(0.5)), p95: round(at(0.95)), max: round(sorted[sorted.length - 1]), count: sorted.length };
+  return { median: round(at(0.5)), p95: round(at(0.95)), p99: round(at(0.99)), max: round(sorted[sorted.length - 1]), count: sorted.length };
 }
 
 export function createPerf(gl, physicsMode) {

@@ -294,6 +294,33 @@ void main() {
   }
   o = vec4(total, 0.0, 0.0, 1.0);
 }`;
+// v28 perf (GAD: far cascade at a lower rate, time-interpolated): o = c + (c - p) * uW per texel.
+// With uW = 0 and p = c it is a plain copy (keeps the latest FFT result as "current").
+const EXTRAP4_FS = HEAD + `
+uniform sampler2D c0; uniform sampler2D c1; uniform sampler2D c2; uniform sampler2D c3;
+uniform sampler2D p0; uniform sampler2D p1; uniform sampler2D p2; uniform sampler2D p3;
+uniform float uW;
+layout(location = 0) out vec4 o0;
+layout(location = 1) out vec4 o1;
+layout(location = 2) out vec4 o2;
+layout(location = 3) out vec4 o3;
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  vec4 a0 = texelFetch(c0, q, 0), a1 = texelFetch(c1, q, 0), a2 = texelFetch(c2, q, 0), a3 = texelFetch(c3, q, 0);
+  o0 = a0 + (a0 - texelFetch(p0, q, 0)) * uW;
+  o1 = a1 + (a1 - texelFetch(p1, q, 0)) * uW;
+  o2 = a2 + (a2 - texelFetch(p2, q, 0)) * uW;
+  o3 = a3 + (a3 - texelFetch(p3, q, 0)) * uW;
+}`;
+const EXTRAP1_FS = HEAD + `
+uniform sampler2D c0; uniform sampler2D p0;
+uniform float uW;
+out vec4 o0;
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  vec4 a0 = texelFetch(c0, q, 0);
+  o0 = a0 + (a0 - texelFetch(p0, q, 0)) * uW;
+}`;
 const STATS_B_FS = HEAD + `
 uniform sampler2D tA;
 out vec4 o;
@@ -405,7 +432,9 @@ export function fftSeaProblem(gl) {
   return null;
 }
 
+export const SEA_RATE = (() => { const v = typeof location !== "undefined" ? Number(new URLSearchParams(location.search).get("searate")) : NaN; return Number.isFinite(v) && v >= 0 ? v : 20; })();
 export function createFftSea(gl, N) {
+  const RATE_CAP = SEA_RATE > 0;
   if (!(N >= 16 && (N & (N - 1)) === 0 && N <= 1024)) throw new Error("FFT sea: N must be a power of two up to 1024");
   const levels = Math.round(Math.log2(N)) + 1;
   const progs = {
@@ -417,6 +446,8 @@ export function createFftSea(gl, N) {
     copy: program(gl, COPY_FS, "copy"),
     statsA: program(gl, STATS_A_FS, "stats"),
     statsB: program(gl, STATS_B_FS, "stats"),
+    ex4: program(gl, EXTRAP4_FS, "extrap"),
+    ex1: program(gl, EXTRAP1_FS, "extrap"),
   };
   function tex(w, h, format, filter = gl.NEAREST, mips = 1, wrap = gl.CLAMP_TO_EDGE) {
     const t = gl.createTexture();
@@ -448,6 +479,13 @@ export function createFftSea(gl, N) {
   const T = [0, 1].map(() => Array.from({ length: 5 }, () => tex(N, N, gl.RGBA32F)));
   const fb4 = T.map((set) => target(set.slice(0, 4)));
   const fb1 = T.map((set) => target([set[4]]));
+  // Rate cap (?searate=<Hz>, default 30; 0 = every step): Tc holds the latest FFT result, Tp the one
+  // before, Tx the extrapolated fields on steps that skip the FFT.
+  const extraSet = () => Array.from({ length: 5 }, () => tex(N, N, gl.RGBA32F));
+  const Tc = extraSet(), Tp = extraSet(), Tx = extraSet();
+  const sets = { Tc, Tp };
+  const fbOf = (set) => ({ fb4: target(set.slice(0, 4)), fb1: target([set[4]]) });
+  const fbs = new Map([Tc, Tp, Tx].map((set) => [set, fbOf(set)]));
   const R = Array.from({ length: 4 }, () => tex(N, N, gl.RGBA16F, gl.LINEAR, levels, gl.REPEAT));
   const copyFb = target(R);
   const statsATex = tex(16, levels, gl.RGBA32F);
@@ -498,7 +536,32 @@ export function createFftSea(gl, N) {
   }
   let final = 0;
   // GL state (vertex array bound, depth test off) is the caller's.
-  function step(setup, depth, gravity, L, dt) {
+  function extrap(out, cur, prev, w) {
+    const f = fbs.get(out);
+    run(progs.ex4, f.fb4, N, N, [["c0", cur[0]], ["c1", cur[1]], ["c2", cur[2]], ["c3", cur[3]], ["p0", prev[0]], ["p1", prev[1]], ["p2", prev[2]], ["p3", prev[3]]], (u) => gl.uniform1f(u.uW, w));
+    run(progs.ex1, f.fb1, N, N, [["c0", cur[4]], ["p0", prev[4]]], (u) => gl.uniform1f(u.uW, w));
+  }
+  let haveCur = false, havePrev = false, sinceFft = 0, lastInterval = 0, statsReady = false;
+  // step(..., dt, skip): skip = true extrapolates the last two FFT results to dt past the latest
+  // instead of running the FFT (the caller passes the time since the last FFT to the next full step).
+  function step(setup, depth, gravity, L, dt, skip = false) {
+    if (skip && haveCur && havePrev && lastInterval > 0) {
+      sinceFft += dt;
+      const w = Math.min(sinceFft / lastInterval, 1.5);
+      extrap(Tx, sets.Tc, sets.Tp, w);
+      run(progs.copy, copyFb, N, N, [["t0", Tx[0]], ["t1", Tx[1]], ["t2", Tx[2]], ["t3", Tx[3]]]);
+      timed("sea:mipmap", () => { for (const t of R) { gl.bindTexture(gl.TEXTURE_2D, t); gl.generateMipmap(gl.TEXTURE_2D); } });
+      return { T: Tx, R, statsTex, levels, N, L, extrapolated: true };
+    }
+    const out = fullStep(setup, depth, gravity, L, dt);
+    if (RATE_CAP) {
+      const t = sets.Tp; sets.Tp = sets.Tc; sets.Tc = t;
+      extrap(sets.Tc, out.T, out.T, 0);
+      havePrev = haveCur; haveCur = true; lastInterval = dt; sinceFft = 0;
+    }
+    return out;
+  }
+  function fullStep(setup, depth, gravity, L, dt) {
     lastArgs = [setup, depth, gravity, L];
     run(progs.phase, phaseFb[1 - phaseCur], N, N, [["tPhase", phase[phaseCur]]], (u) => {
       modeUniforms(u, setup, depth, gravity, L);
@@ -559,5 +622,5 @@ export function createFftSea(gl, N) {
     gl.deleteVertexArray(vao);
     return data;
   }
-  return { step, read, readSpectrum, N, levels, phaseInit: init };
+  return { step, read, readSpectrum, N, levels, phaseInit: init, rateCap: RATE_CAP };
 }
