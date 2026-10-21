@@ -330,7 +330,15 @@ function toEs3(source, stage) {
 }
 
 // Reflection tuning, kept together.
-const REFLECT_DEFS = `#define SKY_ZENITH ${SKY_ZENITH_C.join(", ")}\n` + (STORM ? "#define SKY_SEEN_LO -0.40\n#define SKY_SEEN_HI -0.20\n" : "#define SKY_SEEN_LO -0.04\n#define SKY_SEEN_HI 0.14\n") + "#define REFLECT_GAIN 1.0\n";
+// v30a colour pass (GAD): reflection sky, body colours, facing ramp and display grade.
+const V30_DEFS = [
+  "#define REFL_HORIZON 0.62, 0.80, 0.96", "#define REFL_ZENITH 0.22, 0.50, 0.88",
+  "#define BODY_DEEP 0.004, 0.018, 0.035", "#define BODY_FACE 0.05, 0.16, 0.26", "#define BODY_LIP 0.10, 0.32, 0.44",
+  "#define FACE_W 0.15", "#define AWAY_REFL 0.2",
+  "#define GRADE_P 0.1023", "#define GRADE_M 0.39", "#define GRADE_G 1.0", "#define GRADE_CAP 0.88", "#define GRADE_KNEE 0.70",
+  "#define GRADE_HUE 200.0", "#define GRADE_WK 3.5", "#define GRADE_SAT 0.82",
+].join("\n") + "\n";
+const REFLECT_DEFS = `#define SKY_ZENITH ${SKY_ZENITH_C.join(", ")}\n` + V30_DEFS + (STORM ? "#define SKY_SEEN_LO -0.40\n#define SKY_SEEN_HI -0.20\n" : "#define SKY_SEEN_LO -0.04\n#define SKY_SEEN_HI 0.14\n") + "#define REFLECT_GAIN 2.4\n";
 // Finer patch distance fade (metres from the eye), kept together. Set by measurement:
 // at full strength out to 30-40 m its ripples drove the sun glint into frame-to-frame
 // sparkle there (sub-pixel normals, and glint is too nonlinear for mips to average);
@@ -490,13 +498,14 @@ float keptAt(float kept[8], float level) {
 // above the horizon mostly meet the next wave instead of the sky (skySeen). Returns the
 // reflected colour already weighted; w gets the weight.
 vec3 skyFacet(vec3 nn, vec3 V, out float w) {
-  vec3 skyHorizon = vec3(SKY_HORIZON_C);
-  vec3 skyZenith = vec3(SKY_ZENITH);
+  // v30a: the reflection sees a brighter, bluer sky than the drawn backdrop (GAD v30a).
+  vec3 skyHorizon = vec3(REFL_HORIZON);
+  vec3 skyZenith = vec3(REFL_ZENITH);
   float cosV = clamp(dot(nn, V), 0.0, 1.0);
   float fresnel = 0.02 + 0.98 * pow(1.0 - cosV, 5.0);
   vec3 R = reflect(-V, nn);
   vec3 skyR = mix(skyHorizon, skyZenith, sqrt(clamp(R.y, 0.0, 1.0)));
-  w = fresnel * smoothstep(SKY_SEEN_LO, SKY_SEEN_HI, R.y) * REFLECT_GAIN;
+  w = min(fresnel * smoothstep(SKY_SEEN_LO, SKY_SEEN_HI, R.y) * REFLECT_GAIN, 1.0);
   return skyR * w;
 }
 ${LOBE_GLSL}
@@ -554,13 +563,18 @@ void main() {
   // palette 10:01 / GAD 10:14: v28 water-body constants rotated in CIELAB to hue 265 (Forel-Ule 2-3),
   // same L*, C*. TUNED value: the model's own upwelling hue (286.6) plus the v28 sky reflection gives
   // 284.8 in the standard view (> 10 deg off 265), so the rotation is kept (hue-test-upwelling.png).
-  vec3 trough = vec3(0.0137, 0.0395, 0.0701);
-  vec3 face = vec3(0.1771, 0.2807, 0.3844);
-  vec3 color = mix(trough, face, shade);
+  // v30a (GAD colour pass): hue ~200 body, no 265 rotation. Slopes turned away from the camera
+  // fall to a blue-black; slopes facing it show the lit body. The sky reflection (below) lights
+  // the sky-tilted slopes; a final grade (V30_GRADE) sets the display range and hue.
+  vec3 trough = vec3(BODY_DEEP);
+  vec3 face = vec3(BODY_FACE);
+  // relative to flat water at this view angle, so distance (grazing) does not read as "away"
+  float facing = smoothstep(-FACE_W, FACE_W, dot(n, V) - V.y);
+  vec3 color = mix(trough, face, shade * facing);
 
   float lip = smoothstep(0.45, 0.85, vLip);
   float depthFade = clamp(10.0 / max(depth, 2.0), 0.2, 1.0);
-  color = mix(color, vec3(0.2774, 0.4112, 0.5483), lip * depthFade);
+  color = mix(color, vec3(BODY_LIP), lip * depthFade);
   color *= UPWELL; // storm: overcast upwelling (Kasten & Czeplak 1980); 1 under the clear sky
 
   // Translucency: subsurface light through thin crests (see TRANSL_DEFS).
@@ -601,8 +615,10 @@ void main() {
            + skyFacet(normalize(vec3(g.x - spread, 1.0, g.y)), V, w1)
            + skyFacet(normalize(vec3(g.x, 1.0, g.y + spread)), V, w2)
            + skyFacet(normalize(vec3(g.x, 1.0, g.y - spread)), V, w3);
-  float reflShare = 0.25 * (w0 + w1 + w2 + w3);
-  color = color * (1.0 - reflShare) + 0.25 * sky;
+  // v30a: slopes turned away from the camera keep only AWAY_REFL of the sky (blue-black backs).
+  float awayK = mix(AWAY_REFL, 1.0, facing);
+  float reflShare = 0.25 * (w0 + w1 + w2 + w3) * awayK;
+  color = color * (1.0 - reflShare) + 0.25 * sky * awayK;
 
   // Sun glitter (Cox and Munk 1954): radiance = E * rho * p(facet) / (4 cos(view) cos^4(beta)),
   // with p the Gaussian slope distribution of mss above, centred on this pixel's normal,
@@ -911,6 +927,21 @@ void main() {
   // colour drops to DIM_DENSE of itself (about 125 instead of 190), so the foam area and
   // the lace (alpha <= DIM_LACE) are unchanged.
   foamColor *= mix(1.0, DIM_DENSE, smoothstep(0.35, 0.8, alpha));
+  // v30a grade (water only, before the foam is laid on): luma through a contrast curve about
+  // GRADE_P -> GRADE_M (power GRADE_G), soft shoulder from GRADE_KNEE to the cap GRADE_CAP (225), then rebuilt at hue GRADE_HUE with
+  // saturation GRADE_SAT, eased off only where full saturation cannot hold that luma (bright glints).
+  {
+    // Exposure rises a little with the wind's slope variance: a rough sea mirrors more sky
+    // (more facets tilted toward it), so the two winds land at the same mid-tone.
+    float yIn = max(dot(color, vec3(LUMA)), 0.0) * (1.0 + GRADE_WK * (subMss + chopMss + fineMss));
+    float yC = GRADE_M * pow(yIn / GRADE_P, GRADE_G);
+    float yOut = yC < GRADE_KNEE ? yC : GRADE_KNEE + (GRADE_CAP - GRADE_KNEE) * (1.0 - exp(-(yC - GRADE_KNEE) / (GRADE_CAP - GRADE_KNEE)));
+    float hf = (240.0 - GRADE_HUE) / 60.0;                   // hue in 180..240: R min, B max
+    float satMax = (1.0 - yOut) / (0.9278 - 0.7152 * hf);    // keeps B <= 1 at this luma
+    float sat = clamp(min(GRADE_SAT, satMax), 0.0, 1.0);
+    vec3 hc = vec3(1.0 - sat, 1.0 - sat + sat * hf, 1.0);
+    color = hc * (yOut / dot(hc, vec3(LUMA)));
+  }
   // GAD 10:26 glint clamp (v29): the specular under foam is scaled by (1 - foam alpha) before the
   // foam is laid over it, so sun glitter cannot shine through lace past the foam cap.
   color = mix(color - alpha * glintPart, foamColor, alpha);

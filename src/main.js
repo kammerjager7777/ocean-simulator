@@ -2,7 +2,7 @@ import { GRAVITY_NOTE } from "./physics/gravity.js";
 import { scenario } from "./physics/scenario.js?v=29.1.6";
 import { createWind } from "./physics/wind.js";
 import { createSurface } from "./physics/surface.js?v=29.1.6";
-import { createView } from "./render/view.js?v=29.2.6";
+import { createView } from "./render/view.js?v=30a.1";
 import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=29.1.6";
 import { createPerf } from "./perf.js?v=29.1.6";
 
