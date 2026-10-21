@@ -2,55 +2,88 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Ocean simulator</title>
-  <style>
-    html, body { margin: 0; height: 100%; background: #071018; color: #d5dde4; font: 14px/1.4 ui-sans-serif, system-ui, sans-serif; }
-    canvas { display: block; width: 100vw; height: 100vh; }
-    #panel {
-      position: fixed; top: 16px; left: 16px; width: 280px;
-      padding: 14px 14px 12px; background: rgba(7, 16, 24, 0.82);
-      border: 1px solid rgba(213, 221, 228, 0.25); border-radius: 10px;
-    }
-    h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
-    p { margin: 0 0 10px; color: #b7c2cb; }
-    label { display: block; margin: 8px 0 2px; }
-    input[type="range"] { width: 100%; }
-    .row { display: flex; justify-content: space-between; gap: 8px; }
-    select, button { font: inherit; }
-    #gravity { font-size: 12px; color: #9aa7b2; }
-    #readout, #bands { font-variant-numeric: tabular-nums; }
-  </style>
+  <link rel="stylesheet" href="./src/ui/ui.css?v=29.2">
 </head>
 <body>
   <canvas id="sea"></canvas>
-  <section id="panel">
-    <h1>Open ocean</h1>
-    <p>One sea, three spectral bands.</p>
-    <label class="row"><span>Wind direction</span><span id="dir-val">90°</span></label>
-    <input id="dir" type="range" min="0" max="359" value="90">
-    <label class="row"><span>Wind speed</span><span id="spd-val">12 m/s</span></label>
-    <input id="spd" type="range" min="0" max="25" step="0.5" value="12">
-    <label class="row"><span>Choppiness</span><span id="chop-val">1.5</span></label>
-    <input id="chop" type="range" min="0" max="2.5" step="0.1" value="1.5">
-    <label class="row"><span>Size</span><span id="size-val">250 m</span></label>
-    <input id="size" type="range" min="100" max="1000" step="10" value="250">
-    <label class="row"><span>Gusts</span></label>
-    <select id="gust">
-      <option value="continuous" selected>Continuous</option>
-      <option value="gusty">Gusty</option>
-    </select>
-    <label class="row"><span>Depth</span><span id="depth-val">40 m</span></label>
-    <input id="depth" type="range" min="2" max="80" step="1" value="40">
-    <p id="gravity"></p>
-    <label><input id="flags" type="checkbox"> Show break flags</label>
-    <label><input id="pause" type="checkbox"> Pause the sea</label>
-    <p id="bands"></p>
-    <p id="readout"></p>
-    <p id="clock"></p>
-    <p id="camera"></p>
-    <p>Drag to look. Scroll to zoom.</p>
+  <section id="panel" class="glass" aria-label="Ocean controls">
+    <header class="ph">
+      <div class="ph-text">
+        <h1 class="title"><span class="t-full">Ocean Simulator</span><span class="t-short">Ocean</span></h1>
+        <div class="subtitle">v29 · tropical reef</div>
+      </div>
+      <button id="panel-toggle" class="icon-btn" type="button" aria-expanded="true" aria-controls="panel-body" aria-label="Minimise controls">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </header>
+    <div id="panel-body">
+      <div class="windrow">
+        <div id="dial" class="dial" tabindex="0" role="slider" aria-label="Wind direction" aria-valuemin="0" aria-valuemax="359" aria-valuenow="90">
+          <svg viewBox="0 0 120 120" width="120" height="120" aria-hidden="true">
+            <circle class="ring" cx="60" cy="60" r="42"/>
+            <text x="60" y="13">N</text><text x="110" y="64">E</text><text x="60" y="115">S</text><text x="10" y="64">W</text>
+            <g id="dial-arrow"><line x1="60" y1="60" x2="60" y2="24"/><circle class="knob" cx="60" cy="24" r="6"/></g>
+          </svg>
+        </div>
+        <div class="windread">
+          <div class="lbl">Wind</div>
+          <div class="mono big"><span id="dir-val">90°</span>  <span id="dial-spd">12.0 m/s</span></div>
+        </div>
+        <input id="dir" class="vh" type="range" min="0" max="359" value="90" aria-label="Wind direction (degrees)" tabindex="-1">
+      </div>
+      <div class="ctl"><label class="lrow" for="spd"><span class="lbl">Wind speed</span><span class="mono val" id="spd-val">12 m/s</span></label>
+        <input id="spd" type="range" min="0" max="25" step="0.5" value="12"></div>
+      <div class="ctl"><label class="lrow" for="chop"><span class="lbl">Choppiness</span><span class="mono val" id="chop-val">1.5</span></label>
+        <input id="chop" type="range" min="0" max="2.5" step="0.1" value="1.5"></div>
+      <div class="ctl"><label class="lrow" for="size"><span class="lbl">Size</span><span class="mono val" id="size-val">250 m</span></label>
+        <input id="size" type="range" min="100" max="1000" step="10" value="250"></div>
+      <div class="ctl"><label class="lrow" for="depth"><span class="lbl">Depth</span><span class="mono val" id="depth-val">40 m</span></label>
+        <input id="depth" type="range" min="2" max="80" step="1" value="40"></div>
+      <div class="srow"><span class="lbl" id="gust-lbl">Gusts</span>
+        <div class="seg" role="radiogroup" aria-labelledby="gust-lbl">
+          <button type="button" role="radio" data-v="continuous" aria-checked="true">Steady</button>
+          <button type="button" role="radio" data-v="gusty" aria-checked="false">Gusty</button>
+        </div>
+        <select id="gust" class="vh" tabindex="-1" aria-hidden="true">
+          <option value="continuous" selected>Continuous</option>
+          <option value="gusty">Gusty</option>
+        </select>
+      </div>
+      <label class="srow" for="flags"><span class="lbl">Break flags</span><input id="flags" class="sw" type="checkbox" role="switch"></label>
+      <label class="srow" for="pause"><span class="lbl">Pause</span><input id="pause" class="sw" type="checkbox" role="switch"></label>
+    </div>
   </section>
-  <script type="module" src="./src/main.js?v=29.1.6"></script>
+  <section id="strip" class="glass" aria-label="Sea stats">
+    <div class="srowline mono">
+      <span><b id="st-fps">--</b> FPS</span>
+      <span class="dk">MED <b id="st-med">--</b> ms</span>
+      <span class="dk">P99 <b id="st-p99">--</b> ms</span>
+      <span>WIND <b id="st-wind">--</b> m/s</span>
+      <span class="dk">SEA STATE <b id="st-sea">--</b></span>
+      <span>FOAM <b id="st-foam">--</b>%</span>
+      <button id="strip-toggle" class="icon-btn" type="button" aria-expanded="false" aria-controls="strip-more" aria-label="Expand stats">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <div id="strip-more">
+      <div class="more-grid mono">
+        <span>Hs <b id="st-hs">--</b> m</span><span>PEAK λ <b id="st-lam">--</b> m</span><span>PEAK T <b id="st-tp">--</b> s</span>
+        <span>DEPTH <b id="st-depth">--</b> m</span><span>HELD <b id="st-held">0</b></span>
+        <canvas id="spark" width="240" height="48" aria-label="Frame time graph"></canvas>
+      </div>
+      <div class="more-text">
+        <p id="bands"></p>
+        <p id="readout"></p>
+        <p id="gravity"></p>
+        <p id="clock"></p>
+        <p id="camera"></p>
+        <p>Drag to look. Scroll to zoom. H hides controls, S hides stats.</p>
+      </div>
+    </div>
+  </section>
+  <script type="module" src="./src/main.js?v=29.2"></script>
+  <script type="module" src="./src/ui/ui.js?v=29.2"></script>
 </body>
 </html>

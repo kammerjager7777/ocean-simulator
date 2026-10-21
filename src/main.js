@@ -141,6 +141,8 @@ function frame(now) {
   readout(state);
   label("#clock", `Sim time ${simTime.toFixed(2)} s${pause.checked ? " (paused)" : ""}`);
   label("#camera", `Camera height ${view.cameraHeight().toFixed(1)} m above the sea`);
+  // v29.2 glass UI: the stats strip reads the latest state and held-frame count (read-only).
+  window.__oceanState = state; if (held) window.__oceanHeld = (window.__oceanHeld || 0) + 1;
   if (perf) perf.record(now, t1 - t0, performance.now() - t0, { held: !!waitCard, simTime, lags: surface.takeLags ? surface.takeLags() : [], passTimes: surface.passTimes });
 }
 
