@@ -68,7 +68,7 @@ dir.addEventListener("input", () => {
 });
 spd.addEventListener("input", () => {
   wind.speed = Number(spd.value);
-  label("#spd-val", `${spd.value} m/s`);
+  label("#spd-val", `${Number(spd.value).toFixed(1)} m/s`);
 });
 gust.addEventListener("change", () => {
   wind.gust = gust.value;

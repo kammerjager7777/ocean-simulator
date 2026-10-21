@@ -110,7 +110,7 @@ label.srow { cursor: pointer; }
 .seg { display: flex; width: 136px; height: 22px; box-sizing: border-box; border: 1px solid var(--text-muted); border-radius: 11px; padding: 1px; flex: none; }
 .seg button { flex: 1; border: 0; margin: 0; padding: 0; border-radius: 9px; background: transparent; color: var(--text-muted); font: 500 10px/18px var(--ui); letter-spacing: 0.10em; text-transform: uppercase; cursor: pointer; }
 .seg button:hover { color: var(--text); }
-.seg button[aria-checked="true"] { background: var(--accent-deep); color: var(--text); }
+.seg button[aria-checked="true"] { background: var(--deep); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent); }
 
 /* icon buttons */
 .icon-btn { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; border: 0; padding: 0; border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; position: relative; }
