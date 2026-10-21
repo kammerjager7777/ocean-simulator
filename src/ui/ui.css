@@ -98,7 +98,7 @@ input[type="range"]:not(.vh)::-moz-range-thumb { width: 16px; height: 16px; box-
 input[type="range"]:not(.vh):hover::-moz-range-thumb { transform: scale(1.15); }
 input[type="range"]:not(.vh):active::-moz-range-thumb { transform: scale(1.25); box-shadow: 0 0 0 6px rgba(95, 211, 200, 0.25); }
 input:focus { outline: none; }
-input[type="range"]:not(.vh):focus-visible, .sw:focus-visible, .seg button:focus-visible, .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.sw:focus-visible, .seg button:focus-visible, .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 /* switches */
 .sw { -webkit-appearance: none; appearance: none; position: relative; width: 36px; height: 18px; margin: 0; flex: none; border-radius: 9px; background: var(--track); border: 1px solid transparent; box-sizing: border-box; cursor: pointer; transition: background 160ms ease-in-out, border-color 120ms; }
@@ -163,3 +163,8 @@ label.srow { cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0ms !important; }
 }
+
+/* slider focus: ring hugs the thumb (2 px --accent, 3 px gap), not the whole input box, so it never reaches the label */
+input[type="range"]:not(.vh):focus-visible { outline: none; }
+input[type="range"]:not(.vh):focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(7, 31, 80, 0.9), 0 0 0 5px var(--accent); }
+input[type="range"]:not(.vh):focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px rgba(7, 31, 80, 0.9), 0 0 0 5px var(--accent); }
