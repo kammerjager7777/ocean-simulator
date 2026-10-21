@@ -123,7 +123,7 @@ label.srow { cursor: pointer; }
   height: 40px; transition: height 200ms ease-out, opacity 150ms ease-out; }
 #strip.faded { transition: height 200ms ease-out, opacity 600ms var(--ease); }
 #strip.open { height: 168px; }
-.srowline { display: flex; align-items: center; gap: 24px; height: 38px; font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap; color: var(--text-muted); }
+.srowline { display: flex; align-items: center; gap: 20px; height: 38px; font-size: 13px; line-height: 16px; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap; color: var(--text-muted); }
 .srowline b, .more-grid b { font-weight: 500; color: var(--text); }
 .srowline b.warn, .more-grid b.warn { color: var(--warn); }
 #strip-toggle { margin-left: -12px; }
@@ -152,7 +152,7 @@ label.srow { cursor: pointer; }
   .windrow { margin: 0 0 0 -18px; }
   #strip { left: calc(12px + var(--sal)); right: calc(12px + var(--sar)); top: calc(12px + var(--sat)); bottom: auto; max-width: none; height: 32px; padding: 0 12px; cursor: pointer; }
   #strip.open { height: min(168px, 30vh); }
-  .srowline { height: 30px; font-size: 13px; gap: 16px; justify-content: space-between; }
+  .srowline { height: 30px; font-size: 13px; gap: 10px; justify-content: space-between; }
   .srowline .dk { display: none; }
   #strip-toggle { margin-left: 0; }
   #strip-more { flex-direction: column; height: auto; }
