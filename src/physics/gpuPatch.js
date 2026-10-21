@@ -15,8 +15,8 @@
 // renderer samples (quantised as view.js did, then mipmapped by GL), and the slope
 // variance each mip level keeps (box-averaged levels, as view.js's keptPerLevel), which the
 // renderer reads from a small texture. Nothing comes back to the CPU.
-import { shoal } from "./band.js?v=28";
-import { timed } from "./passTimer.js?v=28";
+import { shoal } from "./band.js?v=29.1.6";
+import { timed } from "./passTimer.js?v=29.1.6";
 
 const TAU = Math.PI * 2;
 // Display range of the 8-bit slope texture (view.js: CHOP_SCALE / FINE_SCALE).
@@ -363,7 +363,7 @@ export function createGpuChopPatch(gl, bandSpec, patchSpec = bandSpec.patch) {
       if (calm || k > kCut || w <= omegaLow || k <= kLow) continue;
       const cg = (gravity * t + gravity * k * h * (1 - t * t)) / (2 * w);
       const e = spectrum.density(w) * cg * dirDensity / k * dk * dk;
-      slotAmp[j] = shoal(Math.sqrt(2 * e), w, k, depth, gravity);
+      slotAmp[j] = shoal(Math.sqrt(2 * e), w, k, depth, gravity) * (band.ampScale === undefined ? 1 : band.ampScale);
       slotOk[j] = 1;
     }
     let modes = 0;

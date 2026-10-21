@@ -40,8 +40,27 @@ in float vFoamKeep;
 // physics textures at this pixel's undisplaced position (vSea.xy), not interpolated from the
 // mesh vertices, so single-cell foam shows on the thinned rings too. The values are the same
 // physics fields (CPU parity untouched); only where they are sampled changes.
+vec4 fpF(ivec2 c) { return texelFetch(physF, (c % physN + physN) % physN, 0); }
+vec4 fpG(ivec2 c) { return texelFetch(physG, (c % physN + physN) % physN, 0); }
+// v29.1 foam: the foam fields are cell-sized; read bilinearly at the cell's own lattice they show
+// the cell rectangles (QM/Michael: "square foam"). The read position is warped by a smooth,
+// world-fixed noise of about 0.7 cell, so no edge of a foam patch lies along a grid line.
+vec2 foamWarp(vec2 p, float sp) {
+  vec2 q = p / (3.1 * sp);
+  return 0.7 * sp * vec2(sin(q.y * 2.3 + 1.7 * sin(q.x * 1.3)) + 0.5 * sin(q.x * 5.1 + q.y * 3.7),
+                        sin(q.x * 2.1 + 1.9 * sin(q.y * 1.1)) + 0.5 * sin(q.y * 4.7 - q.x * 3.3)) / 1.5;
+}
+// crest-wide breaking activity: the largest 'recent' within ~3 cells (a 9-tap cross + diagonals)
+float foamNear(vec2 p) {
+  float sp = fftL / float(physN);
+  ivec2 c = ivec2(floor((p + 0.5 * fftL) / sp + 0.5));
+  float m = 0.0;
+  for (int j = -1; j <= 1; j += 1) for (int i = -1; i <= 1; i += 1) m = max(m, max(fpG(c + 3 * ivec2(i, j)).z, fpG(c + 3 * ivec2(i, j)).w));
+  return m;
+}
 void foamPix(vec2 p, out vec4 F, out vec4 G) {
   float sp = fftL / float(physN);
+  p += foamWarp(p, sp);
   vec2 u = (p + 0.5 * fftL) / sp;
   vec2 i0 = floor(u); vec2 fr = u - i0;
   ivec2 c00 = (ivec2(i0) % physN + physN) % physN;
@@ -110,6 +129,8 @@ const float TILE_THIN_D0 = 60.0;  // odd tile vertices start to morph (horizonta
 const float TILE_THIN_D1 = 75.0; // fully morphed; chunks wholly past this draw at half density
 uniform float minLod;    // shading detail never finer than this level (near-Nyquist waves blink on the mesh)   // footprint multiplier (> 1 fades sooner)
 uniform float antiTile;  // 1: mixed copies away from the tile; 0: plain repeat (review only)
+uniform float block;     // v29: 1 = the cut-away block (tile only, physics fields to the very edge, walls and floor)
+uniform float depth;     // v29: floor depth (the depth slider; the same value the physics uses)
 uniform highp int xCount;
 uniform vec4 x0[MAXX];   // amplitude, k, cos dir, sin dir
 uniform vec4 x1[MAXX];   // phase at the origin in turns, 1 for the chop band
@@ -130,6 +151,8 @@ out vec4 vSea;
 out vec4 vXs;
 out float vXq; // undisplaced x, z, lod, per-pixel normal weight
 out vec3 vWorld;
+out float vKind;  // v29: 0 surface, 1 wall, 2 floor
+out float vSurfY; // v29: the physics surface height at this x, z (the wall's top)
 const float TAU = 6.283185307179586;
 const bool PIXN = true;
 float levelVar(float lod) {
@@ -257,9 +280,9 @@ void tileVert(vec2 p, out float h, out vec2 sh, out vec3 n, out vec4 L, out vec4
   ringLod += ringLodAdd * (clamp((c - 1.0) / 0.5, 0.0, 1.0) + farHalve * clamp((c - 4.0) / 2.0, 0.0, 1.0));
   float lod = clamp(max(max(ringLod, log2(max(foot, 1.0))), minLod), 0.0, fftLevels - 1.0);
   float lodPix = clamp(max(log2(max(foot, 1.0)), minLod), 0.0, fftLevels - 1.0);
-  edgeW = clamp((max(abs(p.x), abs(p.y)) - 10.0) / (half_ - 10.0 - spacing), 0.0, 1.0);
+  edgeW = block > 0.5 ? 0.0 : clamp((max(abs(p.x), abs(p.y)) - 10.0) / (half_ - 10.0 - spacing), 0.0, 1.0);
   ivec2 cell = ivec2(floor((p + half_) / spacing + 0.5));
-  cell = (cell % physN + physN) % physN;
+  cell = block > 0.5 ? clamp(cell, ivec2(0), ivec2(physN - 1)) : (cell % physN + physN) % physN;  // fix6: the block edge row does not wrap to the opposite side
   vec4 a = texelFetch(physA, cell, 0);
   vec4 b = texelFetch(physB, cell, 0);
   h = a.x;
@@ -305,8 +328,21 @@ void main() {
   // level coarser again, ramped over the first part of the ring so the lod stays continuous.
   ringLod += ringLodAdd * (clamp((c - 1.0) / 0.5, 0.0, 1.0) + farHalve * clamp((c - 4.0) / 2.0, 0.0, 1.0));
   float lod = clamp(max(max(ringLod, log2(max(foot, 1.0))), minLod), 0.0, fftLevels - 1.0);
-  float edgeW = clamp((max(abs(p.x), abs(p.y)) - 10.0) / (half_ - 10.0 - spacing), 0.0, 1.0);
-  bool tile = p.x >= -half_ - 1e-3 && p.y >= -half_ - 1e-3 && p.x < half_ - 0.5 * spacing && p.y < half_ - 0.5 * spacing;
+  // v29 block: no rings to hand over to, so the physics fields run to the very edge (the far edge
+  // row wraps to cell 0: the physics is periodic) and the walls read exactly the same vertices.
+  float edgeW = block > 0.5 ? 0.0 : clamp((max(abs(p.x), abs(p.y)) - 10.0) / (half_ - 10.0 - spacing), 0.0, 1.0);
+  // v29 GAD foam fix: the block keeps the geometry exact to the edge (edgeW 0), but foam, lips
+  // and glow keep v28's own tile fade (keep = 1 - v28 edgeW). Setting keep = 1 had put tile
+  // foam out where the ~1 m edge noise (edit 5) is unresolved, so it showed the cell rectangles.
+  // v29.1 foam: in the block the foam/lip/glow fade no longer starts 10 m from the centre (that
+  // ramp, kept from v28's tile-to-ring handover, thinned foam to half by mid-block and left only
+  // the biggest peaks breaking near the edges); it is a 3 m feather at the walls only.
+  float edgeLook = block > 0.5 ? smoothstep(half_ - 3.0, half_, max(abs(p.x), abs(p.y))) : clamp((max(abs(p.x), abs(p.y)) - 10.0) / (half_ - 10.0 - spacing), 0.0, 1.0);
+  // v29 QM corner fix: in the block there is no coarser ring, so the tile's outer-edge vertices
+  // must not morph to open-sea neighbour averages (meta.yz) nor hang skirts: every edge vertex
+  // reads its own physics texel, exactly like the wall-top vertex at the same x, z.
+  vec2 mYZ = block > 0.5 ? vec2(0.0) : meta.yz;
+  bool tile = block > 0.5 || (p.x >= -half_ - 1e-3 && p.y >= -half_ - 1e-3 && p.x < half_ - 0.5 * spacing && p.y < half_ - 0.5 * spacing);
   float h; vec2 sh; vec2 sl; vec3 sq; vec3 n;
   vec2 slx = vec2(0.0); vec3 sqx = vec3(0.0); bool pixDone = false;
   // per-pixel normals: their detail is limited by the pixel footprint only (the mesh no
@@ -317,7 +353,7 @@ void main() {
   vec4 tL = vec4(0.0), tF = vec4(0.0), tG = vec4(0.0);
   float mt = tileThin * smoothstep(TILE_THIN_D0, TILE_THIN_D1, length(eye.xz - p));
   vec2 oddT = mod(floor((p + half_) / spacing + 0.5), 2.0);
-  if (tile && meta.y == 0.0 && meta.z == 0.0 && mt > 0.0 && oddT.x + oddT.y > 0.5) {
+  if (tile && mYZ.x == 0.0 && mYZ.y == 0.0 && mt > 0.0 && oddT.x + oddT.y > 0.5) {
     // both odd: the half-density quad's diagonal is b-c, (+1,-1) (a,b,c / b,d,c split)
     vec2 dv = (oddT.x > 0.5 && oddT.y > 0.5) ? vec2(spacing, -spacing) : oddT * spacing;
     float h0, h1, h2, e0, e1, e2; vec2 a0, a1, a2, x0, x1, x2; vec3 n0, n1, n2, q0, q1, q2;
@@ -332,9 +368,9 @@ void main() {
     float k0 = 1.0 - e0, k1 = 1.0 - e1, k2 = 1.0 - e2;
     tL = mix(L0 * k0, 0.5 * (L1 * k1 + L2 * k2), mt); tF = F0; tG = G0;
     pixDone = true; thinDone = true;
-  } else if (tile && meta.y == 0.0 && meta.z == 0.0) {
+  } else if (tile && mYZ.x == 0.0 && mYZ.y == 0.0) {
     ivec2 cell = ivec2(floor((p + half_) / spacing + 0.5));
-    cell = (cell % physN + physN) % physN;
+    cell = block > 0.5 ? clamp(cell, ivec2(0), ivec2(physN - 1)) : (cell % physN + physN) % physN;  // fix6: the block edge row does not wrap to the opposite side
     vec4 a = texelFetch(physA, cell, 0);
     vec4 b = texelFetch(physB, cell, 0);
     h = a.x;
@@ -357,9 +393,9 @@ void main() {
       sh = mix(sh, sh2, edgeW);
       if (!PIXN) n = normalize(mix(n, normalFrom(sl2, sq2), edgeW));
     }
-  } else if (meta.y != 0.0 || meta.z != 0.0) {
+  } else if (mYZ.x != 0.0 || mYZ.y != 0.0) {
     // odd vertex on a finer region's outer edge: the average of its two neighbours
-    vec2 m = meta.yz;
+    vec2 m = mYZ;
     float h1, h2; vec2 a1, a2, s1, s2; vec3 q1, q2;
     seaAt(p - m, lod, h1, a1, s1, q1);
     seaAt(p + m, lod, h2, a2, s2, q2);
@@ -395,21 +431,21 @@ void main() {
   if (meta.w > 0.5 && thinDone) {
     // v28-lod morphed tile vertex: lips/thin morphed with the geometry (tL already faded),
     // foam fields of the vertex itself (the fragment reads foam per pixel anyway)
-    float keep = 1.0 - edgeW;
+    float keep = 1.0 - edgeLook;
     vThin = tL.z; vBroken = tL.x; vLip = tL.y;
     vAge = tF.z; vFade = tF.y * keep; vFoam = tF.x * keep; vAhead = tG.x; vRun = tG.y;
     vFlag = tG.w * keep; vRecent = tG.z * keep;
     vFoamKeep = keep;
   } else if (meta.w > 0.5) {
     ivec2 cell = ivec2(floor((p + half_) / spacing + 0.5));
-    cell = (cell % physN + physN) % physN;
+    cell = block > 0.5 ? clamp(cell, ivec2(0), ivec2(physN - 1)) : (cell % physN + physN) % physN;  // fix6: the block edge row does not wrap to the opposite side
     vec4 l = texelFetch(physL, cell, 0);
     vec4 f = texelFetch(physF, cell, 0);
     vec4 g = texelFetch(physG, cell, 0);
     vThin = l.z; vAge = f.z; vFlag = g.w; vRecent = g.z; vFade = f.y;
     vAhead = g.x; vRun = g.y; vBroken = l.x; vLip = l.y; vFoam = f.x;
     // foam, lips and glow fade out over the same band, so where they stop shows no line
-    float keep = 1.0 - edgeW;
+    float keep = 1.0 - edgeLook;
     vFoamKeep = keep;
     vThin *= keep; vBroken *= keep; vLip *= keep; vFoam *= keep; vFade *= keep; vFlag *= keep; vRecent *= keep;
   }
@@ -417,9 +453,41 @@ void main() {
   { float hx = 0.0; vec2 shx = vec2(0.0);
     if (PIXN && !pixDone) explicitAt(p, lodPix, hx, shx, slx, sqx);
     vXs = vec4(slx, sqx.xy); vXq = sqx.z; }
-  vSea = vec4(p, PIXN ? lodPix : lod, tile && meta.y == 0.0 && meta.z == 0.0 ? edgeW : 1.0);
+  vSea = vec4(p, PIXN ? lodPix : lod, tile && mYZ.x == 0.0 && mYZ.y == 0.0 ? edgeW : 1.0);
+  // v29.1 fix2: edge vertices move with the full chop shift again, so the outline stretches with
+  // the waves. (fix1 zeroed the shift across the wall and clamped xz to the block: every vertex
+  // whose shift reached past a wall was pinned onto the wall plane, stacking vertices of different
+  // heights at one x, z -> the tall thin fins and the "stuck" edge at high choppiness.) The wall-top
+  // vertex runs this same code (shared corner vertex), and the wall bottom stays at the undisplaced
+  // perimeter on the floor's edge, so surface, walls and floor stay one closed shell.
+  // v29.1 fix5: in the block the shift ACROSS each wall is tapered to exactly 0 at that wall (smooth,
+  // over 30% of the size), so the surface can never be pushed past a wall; the shift ALONG a wall
+  // is scaled down to <= 1.5% of the size there. Heights untouched (full waves at the wall). The
+  // surface edge, wall top and wall bottom are this same vertex code at the same x, z (one shared
+  // function of p), so the wall top IS the surface edge.
+  if (block > 0.5) {
+    float band = 0.6 * half_, lim = 0.03 * half_;
+    vec2 dE = half_ - abs(p);                                   // distance to the x- and z-walls
+    vec2 wN = smoothstep(vec2(0.0), vec2(band), dE);            // cross-wall factor per axis
+    vec2 s2 = choppiness * sh;
+    float kx = min(1.0, lim / max(abs(s2.x), 1e-4)), kz = min(1.0, lim / max(abs(s2.y), 1e-4));
+    sh.x *= wN.x * mix(kx, 1.0, wN.y);                          // across x-walls -> 0; along z-walls <= lim
+    sh.y *= wN.y * mix(kz, 1.0, wN.x);
+  }
   vWorld = vec3(p.x + choppiness * sh.x, h, p.y + choppiness * sh.y);
-  if (meta.w < -0.5) {
+  // v29: wall-top vertices (meta.w 2) are computed exactly like the surface vertex at the same
+  // x, z (same code path), so the wall top IS the surface edge; wall-bottom (3) and floor (4)
+  // vertices sit at the floor depth. Nothing here is written back to the physics.
+  vKind = meta.w > 3.5 ? 2.0 : meta.w > 1.5 ? 1.0 : 0.0;
+  // v29.1: the surface never dips through the floor (a 5 cm skin of water is always left); the
+  // wall top follows the same clamp. A no-op at depth (troughs never reach -depth there).
+  if (block > 0.5) { h = max(h, -depth + 0.05); vWorld.y = max(vWorld.y, -depth + 0.05); }
+  vSurfY = h;
+  // v29.1 fix2: the wall bottom (3) keeps the same horizontal shift as its wall-top vertex, so the
+  // walls stay vertical under the stretched outline and the floor (a fan to those bottom vertices,
+  // see buildBlockMesh) follows it: no gap, no sky under the water. The floor centre (4) stays put.
+  if (meta.w > 2.5) vWorld = (meta.w > 3.5 && meta.w < 4.5) ? vec3(p.x, -depth, p.y) : vec3(vWorld.x, -depth, vWorld.z);
+  if (meta.w < -0.5 && block < 0.5) {
     // skirt (see buildFftMesh): reaches outward under the coarser ring and a little down, so
     // the T-junction slivers are covered seen from above too (a vertical skirt has no area
     // there); elsewhere the coarser surface hides it.

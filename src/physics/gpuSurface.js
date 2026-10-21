@@ -18,12 +18,12 @@
 // The renderer reads the textures directly; nothing per point comes back to the CPU.
 // readFields() reads the whole field back, for parity tests only.
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, bandVariance } from "./band.js?v=28";
-import { createGpuChopPatch } from "./gpuPatch.js?v=28";
-import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=28";
-import { slopeBudget } from "./roughness.js?v=28";
-import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=28";
-import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=28";
+import { createBand, retuneBand, bandVariance } from "./band.js?v=29.1.6";
+import { createGpuChopPatch } from "./gpuPatch.js?v=29.1.6";
+import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=29.1.6";
+import { slopeBudget } from "./roughness.js?v=29.1.6";
+import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=29.1.6";
+import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=29.1.6";
 
 const TAU = Math.PI * 2;
 // Ages of samples that have never carried foam (surface.js uses Infinity).
@@ -199,6 +199,7 @@ uniform vec4 uTransl; // skin, length, max thickness, unused
 uniform vec2 uOpt;    // smoothing on, lip gate on
 uniform vec2 uBrkMod; // M, k_L
 uniform float uBrkLg; // long-slope gain (diagnostic ?brkLg, default 1)
+uniform float uDepthEta; // v29.1: depth-limited break, crest elevation of the short-wave height (the break test excludes the explicit swell) >= 0.06 d (tuned) while the Hs cap bites; 1e9 otherwise
 uniform vec4 uBrk;   // v28 foam fix: mode (1 = total-height steepness rule), steepness threshold, trough window uRB (cells), curvature stencil (cells)
 uniform vec4 uWidth;  // v28 width test: sample distance (cells), thick-water Jacobian, Jacobian floor, unused
 out vec4 o; // breaks, lips, thins, travel-axis crest
@@ -270,6 +271,8 @@ void main() {
         // long-wave elevation here (crests only), k_L the peak wavenumber (uBrkMod = M, k_L).
         float strain = uBrk.x > 1.5 ? 1.0 + uBrkMod.x * max(0.0, texelFetch(tX, p, 0).x * uBrkMod.y) : 1.0;
         if (eta > 0.0 && lap < 0.0 && sqrt(-lap * eta) * strain + longSlope >= uBrk.y) brk = 0.25;
+        // v29.1 depth-limited breaking: a crest standing half the breaker height above its trough level
+        if (eta >= uDepthEta && lap < 0.0) brk = 0.25;
       }
     }
   } else if (p.x >= 1 && p.y >= 1 && p.x < uN - 1 && p.y < uN - 1) {
@@ -561,7 +564,14 @@ void main() {
     int b = countRun(p, -1);
     run = a > 0 && b > 0 ? 1.0 : max(a, b) >= 2 ? 0.0 : 0.5;
   }
-  if (flagged) st = vec4(uStep, paint.y, paint.z, run);
+  // v29.1 foam fade-in: st.w packs the run flag (0, 0.5, 1) plus 2 x the step the current break
+  // started (a break that was not flagged in the last 3 steps starts a new onset).
+  float onset = floor(st.w / 2.0);
+  if (flagged) { if (uStep - st.x > 3.0 || st.x < 0.0) onset = uStep; st = vec4(uStep, paint.y, paint.z, run + 2.0 * onset); }
+  float stRun = mod(st.w, 2.0);
+  float sinceOn = uStep - onset;
+  float ageOn = sinceOn < float(uAgeLen) ? texelFetch(tAges, ivec2(int(sinceOn) % 64, int(sinceOn) / 64), 0).x : 1e30;
+  float fadeIn = smoothstep(0.0, 0.45, ageOn); // ramps over ~0.45 s from the break's first step
   float since = uStep - st.x;
   bool live = since < float(uAgeLen);
   float age = live ? texelFetch(tAges, ivec2(int(since) % 64, int(since) / 64), 0).x : 1e30;
@@ -570,9 +580,9 @@ void main() {
     // 1 - u^2 (3 - 2u), written as (1 - u)^2 (1 + 2u): the same fade, still above 0 right up
     // to the window's end in float32 (surface.js works in double precision).
     float v = (uWindow - age) / uWindow;
-    float fade = flagged ? 1.0 : v * v * (1.0 + 2.0 * u);
+    float fade = (flagged ? 1.0 : v * v * (1.0 + 2.0 * u)) * fadeIn;
     oF = vec4(st.y, fade, flagged ? 0.0 : age / uWindow, st.y * fade);
-    oG = vec4(st.z, st.w, flagged ? 0.0 : 1.0, flagged ? 1.0 : 0.0);
+    oG = vec4(st.z, stRun, flagged ? 0.0 : 1.0, flagged ? 1.0 : 0.0);
   } else {
     oF = vec4(0.0, 1.0, 0.0, 0.0);
     oG = vec4(uNoAhead, 0.0, 0.0, flagged ? 1.0 : 0.0);
@@ -937,15 +947,36 @@ export function createGpuSurface(gl, scenario, wind) {
 
   const round = Math.round;
   let stepIndex = 0;
+  let ampScale = 1;
+  // v29.1: shallow water cannot carry deep-water horizontal chop without folding: the choppiness
+  // eases to 40% between 10 m and 4 m depth (unchanged at 10 m and deeper).
+  const chopFor = (d) => scenario.choppiness * Math.min(1, Math.max(0.4, d / 10));
+  let lastDepth = 40;
   let last = null;
 
   function step(time, dt, depth) {
     timeEmpty();
+    lastDepth = depth;
     const winds = bands.map((band) => wind.sample(band.spec, time, dt));
     testLast.bands = bands; testLast.winds = winds; testLast.comps = [];
     const L = scenario.size;
     bands.forEach((band, i) => retuneBand(band, winds[i], depth, GRAVITY, dt, L / n));
     const setup = bandSetup(bands, winds, depth, GRAVITY, L, n);
+    // v29.1 depth-limited waves: the drawn sea's Hs is capped at the breaker index x depth
+    // (scenario.depthBreakRatio, 0.78) by one amplitude scale on every wave (grid, explicit waves,
+    // ripple patches); the finite-depth dispersion and shoaling are unchanged. The break test keeps
+    // the unscaled heights, so where the cap bites the depth-limited breaking (bh >= 0.78 d) rises.
+    // Deep water (Hs below the limit, e.g. ~12.6 m at 25 m/s vs 15.6 m at 20 m depth) is scale 1.
+    {
+      const lat0 = latticeIntegrals(setup, depth, GRAVITY, L);
+      const dk0 = TAU / L;
+      let v = lat0.reduce((s0, b) => s0 + b.variance, 0);
+      bands.forEach((band) => band.components.forEach((c) => { v += (c.amplitude * c.amplitude / 2) * Math.max(0, 1 - fftShare(c.k, dk0)); }));
+      const hs = 4 * Math.sqrt(v), lim = scenario.depthBreakRatio * depth;
+      ampScale = hs > lim ? lim / hs : 1;
+      setup.ampScale = ampScale;
+      bands.forEach((band) => { band.ampScale = ampScale; });
+    }
     // The ripple patches start exactly where the grid's chop stops.
     bands.forEach((band, i) => { if (band.spec.patch) band.heldOmegaEdge = setup[i].hi; });
     const depthTest = gl.isEnabled(gl.DEPTH_TEST);
@@ -997,7 +1028,7 @@ export function createGpuSurface(gl, scenario, wind) {
         const azH = Math.round(az * 4096) / 4096;
         let b0 = (c.k * (-half * cx - half * cz) + c.phase) / TAU;
         b0 -= Math.floor(b0);
-        w0.set([c.amplitude * sh, c.breakAmplitude * sh, c.k, isChop], count * 4);
+        w0.set([c.amplitude * sh * ampScale, c.breakAmplitude * sh, c.k, isChop], count * 4);
         testLast.comps.push({ a: c.amplitude * sh, ba: c.breakAmplitude * sh, k: c.k, cx, cz, phase: c.phase, half, spacing });
         xw0.set([c.amplitude * sh, c.k, cx, cz], count * 4);
         let ph = c.phase / TAU;
@@ -1031,7 +1062,7 @@ export function createGpuSurface(gl, scenario, wind) {
       gl.uniform4fv(u.uW0, w0);
       gl.uniform4fv(u.uW1, w1);
       gl.uniform4fv(u.uW2, w2);
-      gl.uniform1f(u.uChop, scenario.choppiness);
+      gl.uniform1f(u.uChop, chopFor(lastDepth));
       gl.uniform1f(u.uBreakSlope, scenario.breakSlope);
       gl.uniform1f(u.uDepthLimit, scenario.depthBreakRatio * depth);
     });
@@ -1043,6 +1074,7 @@ export function createGpuSurface(gl, scenario, wind) {
       setOffsets(u);
       gl.uniform1i(u.uReach, reach);
       gl.uniform1i(u.uR, r);
+      if (u.uDepthEta) gl.uniform1f(u.uDepthEta, ampScale < 1 ? 0.06 * lastDepth : 1e9 /* TUNED: short-wave crest elevation >= 0.06 d (0.3 m at 6 m gave 169 breaking, 0.6 m 12, 1.5 m 0) */);
       gl.uniform4f(u.uBrk, brk.mode, brk.ak, brk.rb, brk.ts); gl.uniform1f(u.uBrkLg, brk.lg ?? 1); gl.uniform2f(u.uBrkMod, brk.M || 0, brk.kL || 0);
       gl.uniform1f(u.uSpacing, spacing);
       gl.uniform4f(u.uTransl, TRANSLUCENCY.skin, TRANSLUCENCY.length, TRANSLUCENCY.maxThickness, Number(new URLSearchParams(typeof location !== "undefined" ? location.search : "").get("wgC") ?? 0));
@@ -1087,7 +1119,7 @@ export function createGpuSurface(gl, scenario, wind) {
 
     last = {
       gpu: { n, A: tex.A, B: tex.B, L: tex.L, F: tex.F, G: tex.G,
-        fft: { R: fft.R, stats: fft.statsTex, levels: fft.levels, N: n, L, spacing, choppiness: scenario.choppiness,
+        fft: { R: fft.R, stats: fft.statsTex, levels: fft.levels, N: n, L, spacing, choppiness: chopFor(depth), ampScale,
           explicitCount: count, explicit0: xw0.slice(0, Math.max(count, 1) * 4), explicit1: xw1.slice(0, Math.max(count, 1) * 4) } },
       explicitWaves: count,
       ...countsView(),
@@ -1106,7 +1138,7 @@ export function createGpuSurface(gl, scenario, wind) {
       bands: bands.map((band, i) => ({
         id: band.spec.id,
         label: band.spec.label,
-        significantHeight: 4 * Math.sqrt(explicitVar[i] + lattice[i].variance),
+        significantHeight: 4 * ampScale * Math.sqrt(explicitVar[i] + lattice[i].variance),
         latticeVariance: lattice[i].variance,
         explicitVariance: explicitVar[i],
         spectrum: band.spectrum ? band.spectrum.model : "pm",

@@ -1,8 +1,8 @@
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, sampleBand, bandVariance } from "./band.js?v=28";
-import { createChopPatch } from "./chopPatch.js?v=28";
-import { slopeBudget } from "./roughness.js?v=28";
-import { fftShare, FFT_SPLIT } from "./fftSea.js?v=28";
+import { createBand, retuneBand, sampleBand, bandVariance } from "./band.js?v=29.1.6";
+import { createChopPatch } from "./chopPatch.js?v=29.1.6";
+import { slopeBudget } from "./roughness.js?v=29.1.6";
+import { fftShare, FFT_SPLIT } from "./fftSea.js?v=29.1.6";
 
 // Energy-weighted mean travel direction of every wave component, as a unit (x, z) vector.
 // A calm sea has no energy, so it falls back to the wind direction.

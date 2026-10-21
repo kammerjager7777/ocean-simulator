@@ -1,10 +1,10 @@
 import { GRAVITY_NOTE } from "./physics/gravity.js";
-import { scenario } from "./physics/scenario.js?v=28";
+import { scenario } from "./physics/scenario.js?v=29.1.6";
 import { createWind } from "./physics/wind.js";
-import { createSurface } from "./physics/surface.js?v=28";
-import { createView } from "./render/view.js?v=28";
-import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=28";
-import { createPerf } from "./perf.js?v=28";
+import { createSurface } from "./physics/surface.js?v=29.1.6";
+import { createView } from "./render/view.js?v=29.1.6";
+import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=29.1.6";
+import { createPerf } from "./perf.js?v=29.1.6";
 
 // ?chopSpectrum=pm (or =elfouhaily) picks the chop band's spectrum for A/B comparison.
 // It only changes that band's scenario setting; nothing else reads it.
@@ -88,7 +88,7 @@ sizeInput.addEventListener("input", () => {
 
 function readout(state) {
   const heading = Math.round(((Math.atan2(state.travelZ, state.travelX) * 180) / Math.PI + 360) % 360);
-  label("#readout", `${state.breakingCount} samples breaking now; ${state.foamCount} carry foam from breaks in the last ${state.foamWindow} s. Waves travel toward ${heading}°. Foam sits on the front of each breaking wave and stays where it was laid, fading out over ${state.foamWindow} s.`);
+  label("#readout", `${state.breakingCount} samples breaking now; ${state.foamCount} carry foam from breaks in the last ${Number(state.foamWindow).toFixed(1)} s. Waves travel toward ${heading}°. Foam sits on the front of each breaking wave and stays where it was laid, fading out over ${Number(state.foamWindow).toFixed(1)} s.`);
 }
 // GPU counts arrive a moment after their step: the panel takes them when they land.
 if (surface.kind === "gpu") surface.onCounts = (s) => { if (s === state) readout(s); };
@@ -154,7 +154,7 @@ if (physicsNote) {
 
 // ?parity=1: CPU-vs-GPU parity test on this page's context (tests only; see parity.js).
 if (params.get("parity") === "1") {
-  import("./physics/parity.js?v=28").then(({ runParity }) => runParity(view.gl, {
+  import("./physics/parity.js?v=29.1.6").then(({ runParity }) => runParity(view.gl, {
     speeds: (params.get("speeds") || "0,5,10,17.5,25").split(",").map(Number),
     seconds: Number(params.get("seconds") || 6),
     gust: params.get("gust") || "continuous",

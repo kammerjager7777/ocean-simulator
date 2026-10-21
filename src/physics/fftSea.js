@@ -31,9 +31,9 @@
 // sxN, szN are the shading slopes (the chop band's slope counted twice, as surface.js).
 // sq.. are the squeeze terms of the Jacobian (sum a k cicj sin). Real pairs are packed two
 // to a transform (Hermitian spectra), one-sided fields one to a transform.
-import { shoal } from "./band.js?v=28";
-import { timed } from "./passTimer.js?v=28";
-import { elfouhailyParams, spectrumFor, wavenumber } from "./spectrum.js?v=28";
+import { shoal } from "./band.js?v=29.1.6";
+import { timed } from "./passTimer.js?v=29.1.6";
+import { elfouhailyParams, spectrumFor, wavenumber } from "./spectrum.js?v=29.1.6";
 
 const TAU = Math.PI * 2;
 export const BAND_EDGE = 0.03; // soft band edges, +-3% of omega
@@ -77,6 +77,7 @@ uniform float uDk;
 uniform float uG;
 uniform float uDepth;
 uniform float uKCut;
+uniform float uAmpScale; // v29.1 depth-limited Hs scale (1 in deep water); not on the break test
 uniform float uKBreak; // v28: the break test's own band limit (<= uKCut)
 uniform vec2 uSplit;      // wFft rises from uSplit.x to uSplit.y (rad/m)
 uniform float uEdge;
@@ -158,8 +159,8 @@ void waveAt(ivec2 p, out float a, out float ac, out float ab, out vec2 khat, out
     else if (b2.y > 0.5) eb += s * shared;
   }
   float g = gain(w, k);
-  a = sqrt(2.0 * e) * g;
-  ac = sqrt(2.0 * ec) * g;
+  a = sqrt(2.0 * e) * g * uAmpScale;
+  ac = sqrt(2.0 * ec) * g * uAmpScale;
   ab = k > uKBreak ? 0.0 : sqrt(2.0 * eb) * g;
 }
 `;
@@ -518,6 +519,7 @@ export function createFftSea(gl, N) {
     gl.uniform1f(u.uDepth, Math.max(depth, 0.5));
     const kc = setup.length ? setup[0].kCut : TAU / (CUT_CELLS * L / N);
     gl.uniform1f(u.uKCut, kc);
+    if (u.uAmpScale) gl.uniform1f(u.uAmpScale, setup.ampScale === undefined ? 1 : setup.ampScale);
     if (u.uKBreak) gl.uniform1f(u.uKBreak, BREAK_GRID > 0 ? Math.min(kc, TAU / (CUT_CELLS * L / BREAK_GRID)) : kc);
     gl.uniform2f(u.uSplit, FFT_SPLIT[0] * dk, FFT_SPLIT[1] * dk);
     gl.uniform1f(u.uEdge, BAND_EDGE);

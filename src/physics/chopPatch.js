@@ -1,4 +1,4 @@
-import { shoal } from "./band.js?v=28";
+import { shoal } from "./band.js?v=29.1.6";
 
 // The short wind-chop band's own fine patch. The big grid (about 2.2 m spacing at
 // 420 m) cannot hold waves shorter than 2.4 cells, and the chop band's grid
@@ -152,7 +152,7 @@ export function createChopPatch(bandSpec, patchSpec = bandSpec.patch) {
       // Variance per lattice wave: S(omega) d(omega)/dk D(theta) / k * dk^2.
       const cg = (gravity * t + gravity * k * h * (1 - t * t)) / (2 * w);
       const e = spectrum.density(w) * cg * dirDensity / k * dk * dk;
-      const a = shoal(Math.sqrt(2 * e), w, k, depth, gravity);
+      const a = shoal(Math.sqrt(2 * e), w, k, depth, gravity) * (band.ampScale === undefined ? 1 : band.ampScale);
       amp[i] = a;
       modes += 1;
       variance += (a * a) / 2;

@@ -7,11 +7,11 @@
 //    decides it within EDGE of flipping), none in calm water (no CPU break within 6 cells);
 //  - foam matching the flags exactly on the card: fresh foam == flagged, foam only where
 //    flagged now or in the window, and the panel counts (reduction) == the fields.
-import { scenario as baseScenario } from "./scenario.js?v=28";
+import { scenario as baseScenario } from "./scenario.js?v=29.1.6";
 import { createWind } from "./wind.js";
-import { createSurface, crestReachAt, breakRuleAt, foamWindowAt } from "./surface.js?v=28";
-import { createGpuSurface } from "./gpuSurface.js?v=28";
-import { createChopPatch } from "./chopPatch.js?v=28";
+import { createSurface, crestReachAt, breakRuleAt, foamWindowAt } from "./surface.js?v=29.1.6";
+import { createGpuSurface } from "./gpuSurface.js?v=29.1.6";
+import { createChopPatch } from "./chopPatch.js?v=29.1.6";
 import { GRAVITY } from "./gravity.js";
 
 const EDGE = 2e-3; // metres (heights) or slope units: an order above float32 noise here
