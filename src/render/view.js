@@ -332,11 +332,11 @@ function toEs3(source, stage) {
 // Reflection tuning, kept together.
 // v30a colour pass (GAD): reflection sky, body colours, facing ramp and display grade.
 const V30_DEFS = [
-  "#define REFL_HORIZON 0.62, 0.80, 0.96", "#define REFL_ZENITH 0.22, 0.50, 0.88",
+  "#define REFL_HORIZON 0.6627, 0.7961, 0.8784", "#define REFL_ZENITH 0.3098, 0.5608, 0.7686", // GAD: #A9CBE0 -> #4F8FC4 (reflection only; backdrop stays white)
   "#define BODY_DEEP 0.004, 0.018, 0.035", "#define BODY_FACE 0.05, 0.16, 0.26", "#define BODY_LIP 0.10, 0.32, 0.44",
   "#define FACE_W 0.15", "#define AWAY_REFL 0.2",
-  "#define GRADE_P 0.1023", "#define GRADE_M 0.39", "#define GRADE_G 1.0", "#define GRADE_CAP 0.88", "#define GRADE_KNEE 0.70",
-  "#define GRADE_HUE 200.0", "#define GRADE_WK 3.5", "#define GRADE_SAT 0.82",
+  "#define GRADE_P 0.1023", "#define GRADE_M 0.39", "#define GRADE_G 1.0", "#define GRADE_CAP 0.77", "#define GRADE_KNEE 0.56",
+  "#define GRADE_HUE 204.0", "#define PATCH_ROT 1.0", "#define GRADE_WK 3.5", "#define GRADE_SAT 0.82", "#define GRADE_VMAX 0.898",
 ].join("\n") + "\n";
 const REFLECT_DEFS = `#define SKY_ZENITH ${SKY_ZENITH_C.join(", ")}\n` + V30_DEFS + (STORM ? "#define SKY_SEEN_LO -0.40\n#define SKY_SEEN_HI -0.20\n" : "#define SKY_SEEN_LO -0.04\n#define SKY_SEEN_HI 0.14\n") + "#define REFLECT_GAIN 2.4\n";
 // Finer patch distance fade (metres from the eye), kept together. Set by measurement:
@@ -453,6 +453,12 @@ vec2 chopTurn(vec4 c, float psi) {
 // and shifted by o, so its masks are independent of the first patch's. Measured offline
 // on the 13.5 m patch: slopes one tile apart correlate 0.00 to 0.08, ripple strength
 // about 0.3, the same as the first patch. For the first patch s = 1, o = 0, exactly as before.
+vec4 patchRot(sampler2D tex, float size, float scale, vec2 p, float ang) {
+  float cr = cos(ang), sr = sin(ang);
+  vec2 q = vec2(cr * p.x - sr * p.y, sr * p.x + cr * p.y);
+  vec4 g = patchFetch(tex, size, scale, q);   // (slope x re, im, slope z re, im)
+  return vec4(cr * g.xy + sr * g.zw, -sr * g.xy + cr * g.zw);
+}
 vec2 patchSlope(sampler2D tex, float size, float scale, vec2 p, float s, float o) {
   float psiA = 6.2832 * (valueNoise(p / (41.0 * s) + (11.0 + o)) + 0.6 * valueNoise(p / (17.0 * s) + (23.0 + o)));
   float psiB = 6.2832 * (valueNoise(p / (37.0 * s) + (41.0 + o)) + 0.6 * valueNoise(p / (15.0 * s) + (53.0 + o)));
@@ -461,9 +467,12 @@ vec2 patchSlope(sampler2D tex, float size, float scale, vec2 p, float s, float o
   float wB = valueNoise(p / (23.0 * s) + (117.0 + o)) + 0.02;
   float wC = valueNoise(p / (23.0 * s) + (131.0 + o)) + 0.02;
   float total = wA + wB + wC;
+  // v30a banding fix: the three fetches also read the patch through rotated coordinates
+  // (0, +PATCH_ROT, -PATCH_ROT rad), so the patch grid's axis-aligned features no longer line up
+  // into a cross-hatch; each slope is turned back by the same angle (grad_p = R^T grad_q).
   vec2 a = chopTurn(patchFetch(tex, size, scale, p), psiA);
-  vec2 b = chopTurn(patchFetch(tex, size, scale, p + vec2(0.383, 0.617) * size), psiB);
-  vec2 c = chopTurn(patchFetch(tex, size, scale, p + vec2(0.711, 0.229) * size), psiC);
+  vec2 b = chopTurn(patchRot(tex, size, scale, p + vec2(0.383, 0.617) * size, PATCH_ROT), psiB);
+  vec2 c = chopTurn(patchRot(tex, size, scale, p + vec2(0.711, 0.229) * size, -PATCH_ROT), psiC);
   return (sqrt(wA) * a + sqrt(wB) * b + sqrt(wC) * c) / sqrt(total);
 }
 vec2 fineSlope(vec2 p) {
@@ -928,7 +937,7 @@ void main() {
   // the lace (alpha <= DIM_LACE) are unchanged.
   foamColor *= mix(1.0, DIM_DENSE, smoothstep(0.35, 0.8, alpha));
   // v30a grade (water only, before the foam is laid on): luma through a contrast curve about
-  // GRADE_P -> GRADE_M (power GRADE_G), soft shoulder from GRADE_KNEE to the cap GRADE_CAP (225), then rebuilt at hue GRADE_HUE with
+  // GRADE_P -> GRADE_M (power GRADE_G), soft shoulder from GRADE_KNEE (143) to the cap GRADE_CAP (196), then rebuilt at hue GRADE_HUE with
   // saturation GRADE_SAT, eased off only where full saturation cannot hold that luma (bright glints).
   {
     // Exposure rises a little with the wind's slope variance: a rough sea mirrors more sky
@@ -937,7 +946,7 @@ void main() {
     float yC = GRADE_M * pow(yIn / GRADE_P, GRADE_G);
     float yOut = yC < GRADE_KNEE ? yC : GRADE_KNEE + (GRADE_CAP - GRADE_KNEE) * (1.0 - exp(-(yC - GRADE_KNEE) / (GRADE_CAP - GRADE_KNEE)));
     float hf = (240.0 - GRADE_HUE) / 60.0;                   // hue in 180..240: R min, B max
-    float satMax = (1.0 - yOut) / (0.9278 - 0.7152 * hf);    // keeps B <= 1 at this luma
+    float satMax = (1.0 - yOut / GRADE_VMAX) / (0.9278 - 0.7152 * hf); // keeps every channel <= GRADE_VMAX (229)
     float sat = clamp(min(GRADE_SAT, satMax), 0.0, 1.0);
     vec3 hc = vec3(1.0 - sat, 1.0 - sat + sat * hf, 1.0);
     color = hc * (yOut / dot(hc, vec3(LUMA)));
