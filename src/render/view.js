@@ -1547,7 +1547,7 @@ void main() {
       builtSize = state.size;
     }
     gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clearColor(SKY_HORIZON[0], SKY_HORIZON[1], SKY_HORIZON[2], 1);
+    gl.clearColor(1, 1, 1, 1); // v29.2.1: white backdrop (Michael); sky reflection and lighting still use SKY_HORIZON
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
     if (fft && builtSize !== state.size) {

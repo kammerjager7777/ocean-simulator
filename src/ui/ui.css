@@ -19,7 +19,7 @@
   --sat: env(safe-area-inset-top, 0px); --sar: env(safe-area-inset-right, 0px);
   --sab: env(safe-area-inset-bottom, 0px); --sal: env(safe-area-inset-left, 0px);
 }
-html, body { margin: 0; height: 100%; background: #071018; color: var(--text); font-family: var(--ui); overflow: hidden; }
+html, body { margin: 0; height: 100%; background: #FFFFFF; color: var(--text); font-family: var(--ui); overflow: hidden; }
 canvas#sea { display: block; width: 100vw; height: 100vh; }
 .vh { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; opacity: 0; pointer-events: none; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
