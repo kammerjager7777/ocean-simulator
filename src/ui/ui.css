@@ -67,17 +67,19 @@ body.ui-hidden-panel #panel, body.ui-hidden-strip #strip { display: none; }
 .srow { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 22px; }
 
 /* wind dial */
-.windrow { display: flex; align-items: center; gap: 4px; margin: -4px 0 -4px -18px; }
-.dial { width: 120px; height: 120px; flex: none; border-radius: 50%; cursor: grab; touch-action: none; outline: none; }
+.windrow { display: flex; align-items: center; gap: 12px; margin: -4px 0; }
+.dial { width: 112px; height: 120px; flex: none; border-radius: 50%; cursor: grab; touch-action: none; outline: none; }
 .dial:active { cursor: grabbing; }
 .dial svg { display: block; overflow: visible; }
 .dial .ring { fill: none; stroke: var(--text-muted); stroke-width: 1; transition: stroke 120ms ease-out; }
 .dial:hover .ring { stroke: var(--sand); }
-.dial text { fill: var(--text-muted); font: 10px var(--ui); text-anchor: middle; }
+.dial text { fill: var(--text-muted); font: 10px var(--ui); text-anchor: middle; paint-order: stroke; stroke: #0A2252; stroke-width: 4px; stroke-linejoin: round; }
 .dial line { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
 .dial .knob { fill: var(--accent); transition: filter 120ms; }
 .dial.drag .knob { filter: drop-shadow(0 0 4px rgba(95, 211, 200, 0.6)); stroke: rgba(95,211,200,0.25); stroke-width: 12; paint-order: stroke; }
-.dial:focus-visible { box-shadow: 0 0 0 3px transparent, 0 0 0 5px var(--accent); }
+/* focus ring drawn inside the SVG (r 46 = ring 42 + 3 px offset + 1 px; letters keep a glass-coloured halo over it), so the scroll box never clips it */
+.dial .focus { fill: none; stroke: var(--accent); stroke-width: 2; opacity: 0; }
+.dial:focus-visible .focus { opacity: 1; }
 .windread .big { font-size: 13px; line-height: 16px; color: var(--text); margin-top: 4px; white-space: pre; }
 
 /* sliders */
@@ -147,7 +149,6 @@ label.srow { cursor: pointer; }
   .lrow { margin-bottom: 0; }
   #panel-body { gap: 12px; }
   .srow { min-height: 44px; }
-  .windrow { margin: 0 0 0 -18px; }
   #strip { left: calc(12px + var(--sal)); right: calc(12px + var(--sar)); top: calc(12px + var(--sat)); bottom: auto; max-width: none; height: 32px; padding: 0 12px; cursor: pointer; }
   .srowline { height: 30px; font-size: 13px; gap: 10px; justify-content: space-between; }
   .srowline .dk { display: none; }

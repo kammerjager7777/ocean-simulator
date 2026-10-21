@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Ocean simulator</title>
-  <link rel="stylesheet" href="./src/ui/ui.css?v=29.2.3">
+  <link rel="stylesheet" href="./src/ui/ui.css?v=29.2.4">
 </head>
 <body>
   <canvas id="sea"></canvas>
@@ -21,8 +21,9 @@
     <div id="panel-body">
       <div class="windrow">
         <div id="dial" class="dial" tabindex="0" role="slider" aria-label="Wind direction" aria-valuemin="0" aria-valuemax="359" aria-valuenow="90">
-          <svg viewBox="0 0 120 120" width="120" height="120" aria-hidden="true">
+          <svg viewBox="4 0 112 120" width="112" height="120" aria-hidden="true">
             <circle class="ring" cx="60" cy="60" r="42"/>
+            <circle class="focus" cx="60" cy="60" r="46"/>
             <text x="60" y="13">N</text><text x="110" y="64">E</text><text x="60" y="115">S</text><text x="10" y="64">W</text>
             <g id="dial-arrow"><line x1="60" y1="60" x2="60" y2="24"/><circle class="knob" cx="60" cy="24" r="6"/></g>
           </svg>
@@ -78,7 +79,7 @@
     <!-- v29 text readouts: still written by main.js, not shown (GAD: strip shows numbers only) -->
     <div class="vh" aria-hidden="true"><p id="bands"></p><p id="readout"></p><p id="gravity"></p><p id="clock"></p><p id="camera"></p></div>
   </section>
-  <script type="module" src="./src/main.js?v=29.2.3"></script>
-  <script type="module" src="./src/ui/ui.js?v=29.2.3"></script>
+  <script type="module" src="./src/main.js?v=29.2.4"></script>
+  <script type="module" src="./src/ui/ui.js?v=29.2.4"></script>
 </body>
 </html>
