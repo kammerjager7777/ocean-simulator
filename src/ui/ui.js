@@ -182,6 +182,13 @@ function update() {
   const depth = Number($("#depth").value);
   set("st-depth", String(depth));
   set("st-held", String(window.__oceanHeld || 0));
+  if (st) {
+    const bh = (id) => { const b = st.bands && st.bands.find((x) => x.id === id); return b ? b.significantHeight.toFixed(2) : "--"; };
+    set("st-swell", bh("swell")); set("st-windsea", bh("wind-sea")); set("st-chop", bh("chop"));
+    set("st-fine", st.chopPatch && st.chopPatch.modes ? st.chopPatch.significantHeight.toFixed(2) : "--");
+    set("st-finer", st.finePatch && st.finePatch.modes ? st.finePatch.significantHeight.toFixed(2) : "--");
+    set("st-brk", String(st.breakingCount ?? "--")); set("st-foamed", String(st.foamCount ?? "--"));
+  }
   if (st && st.bands) {
     let s2 = 0; for (const b of st.bands) s2 += b.significantHeight ** 2;
     for (const p of [st.chopPatch, st.finePatch]) if (p && p.modes) s2 += p.significantHeight ** 2;
@@ -208,3 +215,5 @@ else {
   setInterval(update, 250);
   arm();
 }
+// The CPU-fallback warning (main.js #physics-note) sits with the hidden v29 readouts: show it in the panel.
+setTimeout(() => { const n = document.getElementById("physics-note"); if (n) document.getElementById("panel-body").prepend(n); }, 0);

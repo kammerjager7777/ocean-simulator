@@ -129,12 +129,10 @@ label.srow { cursor: pointer; }
 #strip-toggle { margin-left: -12px; }
 #strip-toggle svg { transition: transform 200ms ease-out; }
 #strip.open #strip-toggle svg { transform: rotate(180deg); }
-#strip-more { display: flex; gap: 16px; height: 128px; padding-bottom: 8px; box-sizing: border-box; }
-.more-grid { display: grid; grid-template-columns: repeat(3, auto); gap: 6px 20px; align-content: start; font-size: 12px; line-height: 14px; color: var(--text-muted); white-space: nowrap; flex: none; }
-#spark { grid-column: 1 / -1; width: 240px; height: 48px; margin-top: 4px; }
-.more-text { overflow-y: auto; font-size: 11px; line-height: 14px; color: var(--text-muted); min-width: 0; }
-.more-text p { margin: 0 0 4px; }
-#physics-note { color: var(--warn) !important; }
+#strip-more { display: flex; flex-direction: column; gap: 8px; height: 128px; padding-bottom: 8px; box-sizing: border-box; overflow: hidden; }
+.more-grid { display: grid; grid-template-columns: repeat(4, max-content); gap: 6px 24px; font-size: 12px; line-height: 14px; color: var(--text-muted); white-space: nowrap; }
+#spark { width: 240px; height: 48px; flex: none; }
+#physics-note { color: var(--warn) !important; font-size: 11px; line-height: 14px; margin: 0; }
 
 /* ---------- mobile / narrow (< 900 px) ---------- */
 @media (max-width: 899px) {
@@ -151,12 +149,13 @@ label.srow { cursor: pointer; }
   .srow { min-height: 44px; }
   .windrow { margin: 0 0 0 -18px; }
   #strip { left: calc(12px + var(--sal)); right: calc(12px + var(--sar)); top: calc(12px + var(--sat)); bottom: auto; max-width: none; height: 32px; padding: 0 12px; cursor: pointer; }
-  #strip.open { height: min(168px, 30vh); }
   .srowline { height: 30px; font-size: 13px; gap: 10px; justify-content: space-between; }
   .srowline .dk { display: none; }
   #strip-toggle { margin-left: 0; }
-  #strip-more { flex-direction: column; height: auto; }
-  .more-text { display: none; }
+  #strip.open { height: 168px; }
+  #strip-more { height: 136px; gap: 6px; }
+  .more-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 8px; font-size: 11px; line-height: 13px; }
+  #spark { height: 40px; }
 }
 @media (max-width: 899px) and (min-height: 900px) { #panel { max-height: 50vh; } #panel-body { max-height: calc(50vh - 58px); } }
 
