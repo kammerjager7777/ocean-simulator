@@ -1,0 +1,133 @@
+/* v30.23 MODERN skin (GAD modern-ui-spec.md): Hairline HUD, Sky-Keyed chips, Living Highlight (canvas).
+   Swappable with theme.js. Colours come from custom properties written by theme.applyTod (time of day).
+   No glass, no blur, no filled boxes (the buoy card's flat 72% fill is the one fill). */
+@font-face { font-family: "Barlow"; src: url("./fonts/Barlow-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Barlow"; src: url("./fonts/Barlow-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Geist Mono"; src: url("./fonts/GeistMono.ttf") format("truetype"); font-weight: 100 900; font-display: swap; }
+:root { --accent: #BFE3F7; --accent-rgb: 191,227,247; --hud-text: #F5F7FA; --hud-muted: #C9D3DD; --hud-muted-rgb: 201,211,221; --card-rgb: 13,27,38; --scrim-rgb: 10,22,34; --plate-a: 0.65;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1); --k: 1;
+  --sans: "Barlow", "Helvetica Neue", Arial, sans-serif; --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace; --tsh: none; --halo-rgb: 0,8,20; --ink-ac: #BFE3F7; }
+/* the old v29-v30.22 glass panel and strip stay in the DOM (their inputs and ids are the source of truth) but are not shown */
+#panel, #strip { display: none !important; }
+#v23-vignette { position: fixed; inset: 0; pointer-events: none; z-index: 1; background-size: 100% 100%; }
+#onsea { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2; }
+#onsea-ui { position: fixed; inset: 0; pointer-events: none; z-index: 3; }
+#onsea-ui .hit, #v23-hud .hit { pointer-events: auto; }
+.v23-fallback { height: 0; overflow: hidden; }
+/* type (§3) */
+.t1 { font: 500 12px/16px var(--sans); letter-spacing: 1.6px; text-transform: uppercase; }
+.l1 { font: 500 11px/14px var(--sans); letter-spacing: 1.6px; text-transform: uppercase; }
+.l2 { font: 500 10px/12px var(--sans); letter-spacing: 1.8px; text-transform: uppercase; }
+.n1 { font: 300 25px/28px var(--mono); font-variant-numeric: tabular-nums; }
+.n2 { font: 400 13px/16px var(--mono); font-variant-numeric: tabular-nums; }
+.n3 { font: 400 12px/14px var(--mono); font-variant-numeric: tabular-nums; }
+.n4 { font: 400 10px/12px var(--mono); letter-spacing: 0.5px; text-transform: uppercase; font-variant-numeric: tabular-nums; }
+.nocaps { text-transform: none; letter-spacing: 0.5px; }
+.ac { color: var(--ink-ac); } .mu { color: var(--hud-muted); } .tx { color: var(--hud-text); }
+/* Glyphs only. Each string is black on a light backdrop and white on a dark one.
+   There is no outline, halo, or plate. Hover shine stays on the row, not on the type. */
+.plate { position: relative; }
+#v23-hud.on-light, #onsea-ui .v23c.on-light, #v23-hud .ink-on-light { --hud-text: #0C1724; --hud-muted: #0C1724; --hud-muted-rgb: 12,23,36; --ink-ac: #0C1724; color: #0C1724; text-shadow: none; }
+#v23-hud.on-dark, #onsea-ui .v23c.on-dark, #v23-hud .ink-on-dark { --hud-text: #F5F7FA; --hud-muted: #E8EEF6; --hud-muted-rgb: 232,238,246; color: #F5F7FA; text-shadow: none; }
+/* HUD (§6) */
+#v23-hud { position: fixed; inset: 0; pointer-events: none; z-index: 6; color: var(--hud-text); text-shadow: none; isolation: isolate; }
+:where(#v23-hud button) { all: unset; box-sizing: border-box; cursor: pointer; pointer-events: auto; }
+#v23-hud button:focus-visible, #v23-hud .hrow:focus-visible { outline: 1px solid var(--hud-text); outline-offset: 3px; }
+.hb { position: absolute; width: 40px; height: 40px; display: grid; place-items: center; }
+.hb svg { overflow: visible; }
+.hb .ring { fill: none; stroke: var(--hud-text); stroke-opacity: 0.9; stroke-width: 1.2; transition: stroke 120ms var(--ease), stroke-opacity 120ms var(--ease); }
+.hb:hover .ring { stroke: var(--hud-text); stroke-opacity: 1; stroke-width: 1.5; }
+.hb:active .ring { fill: rgba(var(--accent-rgb), 0.2); }
+.hb .ic { stroke: var(--hud-text); stroke-width: 1.2; stroke-linecap: round; fill: none; }
+.hb .dot { fill: var(--hud-text); }
+#hb-set { left: 24px; top: 24px; } #hb-pause { right: 24px; top: 24px; }
+#hud-title { position: absolute; left: 70px; top: 28px; } #hud-cap { position: absolute; left: 70px; top: 45px; }
+#hud-title, #hud-cap { pointer-events: none; }
+#hud-rows, #hud-sheet { position: absolute; left: 24px; top: 76px; width: 184px; transition: opacity 240ms var(--ease), transform 240ms var(--ease); }
+#hud-rows::before, #hud-sheet::before { content: ""; position: absolute; left: 6px; right: 0; top: 0; border-top: 1px solid rgba(var(--hud-muted-rgb), 0.45); }
+.hrows-end { margin: 0 0 0 6px; border-top: 1px solid rgba(var(--hud-muted-rgb), 0.25); margin-top: -2px; }
+.hrow { display: flex; align-items: center; height: 32px; padding-left: 6px; pointer-events: auto; cursor: pointer; }
+.hrow:first-of-type { margin-top: 10px; }
+.hrow .nm { flex: 1; } .hrow .cnt { margin-right: 10px; } .hrow .dg { width: 16px; }
+.tg { position: relative; width: 22px; height: 11px; flex: none; }
+.tg::before { content: ""; position: absolute; inset: 0; border-radius: 5.5px; border: 1px solid rgba(var(--hud-muted-rgb), 0.55); box-sizing: border-box; transition: border-color 120ms var(--ease); }
+.tg::after { content: ""; position: absolute; top: 2.3px; left: 2.3px; width: 6.4px; height: 6.4px; border-radius: 50%; box-sizing: border-box; border: 1px solid rgba(var(--hud-muted-rgb), 0.8); transition: transform 120ms var(--ease), background 120ms var(--ease); }
+.on .tg::before { border: 1.2px solid var(--ink-ac); } .on .tg::after { transform: translateX(11px); background: var(--ink-ac); border-color: var(--ink-ac); }
+.chev { width: 8px; height: 10px; margin-left: 2px; } .chev path { stroke: var(--hud-text); stroke-width: 1.2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.hidden-col { opacity: 0; transform: translateY(-8px); pointer-events: none !important; }
+.hidden-col * { pointer-events: none !important; }
+.sheet-off { opacity: 0; transform: translateX(8px); pointer-events: none !important; }
+.sheet-off * { pointer-events: none !important; }
+.rows-left { opacity: 0; transform: translateX(-8px); pointer-events: none !important; }
+.rows-left * { pointer-events: none !important; }
+#hud-pl { position: absolute; right: 70px; top: 28px; text-align: right; pointer-events: none; }
+#hud-pl .l1 { display: block; } #hud-pl .n4 { display: block; margin-top: 1px; }
+.paused #hud-pl .l1 { color: var(--ink-ac); }
+#hb-pause .play { fill: var(--hud-text); opacity: 0; transition: opacity 120ms var(--ease); } #hb-pause .bars { stroke: var(--hud-text); stroke-width: 1.6; stroke-linecap: round; transition: opacity 120ms var(--ease); }
+.paused #hb-pause .play { opacity: 1; } .paused #hb-pause .bars { opacity: 0; } .paused #hb-pause .ring { stroke: var(--ink-ac); stroke-width: 1.5; stroke-opacity: 1; }
+#hud-stats { position: absolute; left: 30px; bottom: 20px; white-space: nowrap; pointer-events: none; }
+#hud-stats::after { content: ""; position: absolute; left: 0; top: -14px; width: 28px; border-top: 1.2px solid var(--ink-ac); }
+#hud-stats .sep { opacity: 0.6; margin: 0 6px; }
+.nostats #hud-stats { display: none; }
+#hud-ver { position: absolute; right: 30px; bottom: 21px; pointer-events: none; }
+#hud-toast { position: absolute; left: 50%; top: 28px; transform: translateX(-50%); white-space: nowrap; opacity: 0; transition: opacity 120ms var(--ease); pointer-events: none; }
+#hud-toast.on { opacity: 1; transition: opacity 180ms var(--ease); }
+#hud-toast::after { content: ""; position: absolute; left: 50%; margin-left: -12px; width: 24px; bottom: -8px; border-top: 1px solid var(--ink-ac); }
+#hud-toast .st { font: 600 11px/14px var(--sans); letter-spacing: 1.6px; margin-left: 8px; }
+/* chips (§7): positioned with transform only; no box, no border; text plate + shadow */
+.v23c { position: absolute; left: 0; top: 0; white-space: nowrap; color: var(--hud-text); text-shadow: none; opacity: 0; transition: opacity 120ms var(--ease); will-change: transform; pointer-events: none; }
+.v23c.on { opacity: 1; transition: opacity 180ms var(--ease); }
+.v23c .row { display: block; }
+.v23c .gap { display: inline-block; width: 9px; }
+.v23c .gust { pointer-events: auto; cursor: pointer; padding: 10px 0; margin: -10px 0; }
+.v23c.clean-off { opacity: 0 !important; }
+/* buoy card (§7.3) */
+.v23-card { position: absolute; left: 0; top: 0; width: 208px; height: 128px; box-sizing: border-box; padding: 0 14px; background: rgba(var(--card-rgb), 0.72); color: var(--hud-text);
+  border-top: 1.5px solid var(--accent); border-bottom: 1px solid rgba(var(--accent-rgb), 0.5); opacity: 0; transition: opacity 120ms var(--ease); pointer-events: none; transform-origin: 50% 100%; will-change: transform; }
+.v23-card.on { opacity: 1; transition: opacity 180ms var(--ease); pointer-events: auto; }
+.v23-card .r { position: absolute; left: 14px; right: 14px; white-space: nowrap; }
+.v23-card .r1 { top: 12px; display: flex; justify-content: space-between; align-items: center; height: 12px; }
+.v23-card .r2 { top: 26px; } .v23-card .r3 { top: 62px; } .v23-card .r4 { top: 79px; }
+.v23-card .dv { display: inline-block; min-width: 4ch; }
+.v23-card .div { position: absolute; left: 14px; right: 14px; top: 100px; border-top: 1px solid rgba(var(--hud-muted-rgb), 0.35); }
+.v23-card .r5 { top: 105px; }
+.v23-card .x { display: none; width: 32px; height: 32px; margin: -10px -10px -10px 0; place-items: center; cursor: pointer; pointer-events: auto; background: none; border: 0; padding: 0; }
+.v23-card .x svg path { stroke: var(--hud-text); stroke-width: 1.2; stroke-linecap: round; }
+.v23-card:hover .x { display: grid; } .v23-card:hover .bl { display: none; }
+#v23-kbd .vh, .vh { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.v23-kbd:focus-visible { outline: none; }
+@media (prefers-reduced-motion: reduce) { #hud-rows, #hud-sheet, .v23c, .v23-card, #hud-toast, .tg::after { transition-duration: 120ms !important; transform: none; } }
+/* review/contrast: ?notext=1 makes text transparent (shadows and plates kept) for the §9.4 B capture */
+.notext #v23-hud *, .notext #onsea-ui * { -webkit-text-fill-color: transparent !important; }
+#onsea-ui.clean .v23c, #onsea-ui.clean .v23-card { opacity: 0 !important; pointer-events: none !important; transition: opacity 240ms var(--ease) !important; }
+.v23c.clarity { text-align: right; } /* Addendum A: the clarity readout is right-aligned 36 px left of the knob */
+/* .over is only a marker now (the chip's anchor is over the block). Colour comes from .on-light / .on-dark. */
+/* ?ink=diff: white text inverted against whatever is behind it (mix-blend-mode on the layer, so it blends with the canvas) */
+.ink-diff #v23-hud, .ink-diff #onsea-ui { mix-blend-mode: difference; isolation: auto; }
+.ink-diff #v23-hud, .ink-diff #onsea-ui .v23c { --hud-text: #FFFFFF; --hud-muted: #FFFFFF; --ink-ac: #FFFFFF; color: #FFFFFF; text-shadow: none; }
+/* hover shine on the HUD rows (item 9: only a very slight light under the cursor) */
+.hrow { position: relative; } .hrow::after { content: ""; position: absolute; inset: 2px -6px 2px 0; border-radius: 3px; background: radial-gradient(closest-side, rgba(255,255,255,0.16), rgba(255,255,255,0)); opacity: 0; transition: opacity 160ms var(--ease); pointer-events: none; }
+.hrow:hover::after { opacity: 1; }
+.ink-dark .hrow::after { background: radial-gradient(closest-side, rgba(255,255,255,0.4), rgba(255,255,255,0)); }
+/* chip readouts: the big number + caps label (David Li reference) */
+.v23c .big { font: 600 17px/20px var(--sans); letter-spacing: 0.4px; font-variant-numeric: tabular-nums; }
+.v23c .cap { font: 500 10px/12px var(--sans); letter-spacing: 1.8px; text-transform: uppercase; }
+.v23c.ctr { text-align: center; }
+
+/* v30.25 smaller type, independent high-contrast buoy card, watch-style Solar dial. */
+.t1 { font-size: 11px; line-height: 14px; } .l1 { font-size: 10px; line-height: 12px; }
+.l2 { font-size: 9px; line-height: 11px; letter-spacing: 1.5px; } .n1 { font-size: 22px; line-height: 25px; }
+.n2 { font-size: 11px; line-height: 14px; } .n3 { font-size: 10.5px; line-height: 12px; } .n4 { font-size: 9px; line-height: 11px; }
+.v23c .big { font-size: 15px; line-height: 17px; } .v23c .cap { font-size: 9px; line-height: 11px; letter-spacing: 1.5px; }
+.v23-card, .v23-card .tx, .v23-card .mu, .v23-card .ac { --hud-text: #F7FAFD; --hud-muted: #F0F5FA; --hud-muted-rgb: 240,245,250; --ink-ac: #D7ECFF; color: #F7FAFD; text-shadow: none; }
+.v23-card { background: rgba(5,17,29,.94); }
+.v23-card .r5 { display: block; letter-spacing: .35px; } /* numeric wave history follows; no vague, possibly-stale status */
+.world-chip { text-shadow: none; }
+#solar-dial { --solar-sky: #000; position: absolute; right: 28px; bottom: 58px; width: 200px; height: 156px; overflow: hidden; border-radius: 42px; border: 1px solid rgba(255,255,255,.22); background: #000; color: #F6F8FF; pointer-events: none; opacity: 0; cursor: ew-resize; touch-action: none; transition: opacity 140ms var(--ease); z-index: 8; }
+#solar-dial.on { opacity: 1; pointer-events: auto; }
+#solar-dial canvas { position: absolute; inset: 0; width: 200px; height: 156px; }
+#solar-dial .solar-time { position: absolute; top: 101px; left: 0; width: 200px; text-align: center; pointer-events: none; }
+#solar-dial .solar-clock { display: block; font: 400 25px/29px var(--mono); font-variant-numeric: tabular-nums; }
+#solar-dial .solar-phase { display: block; font: 500 9px/12px var(--sans); letter-spacing: 1.2px; text-transform: uppercase; }
+#solar-dial .solar-caption { display: none; }
+#onsea-ui.clean #solar-dial { opacity: 0; pointer-events: none; }

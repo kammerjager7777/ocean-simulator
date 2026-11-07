@@ -18,17 +18,42 @@
 // The renderer reads the textures directly; nothing per point comes back to the CPU.
 // readFields() reads the whole field back, for parity tests only.
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, bandVariance } from "./band.js?v=29.1.6";
-import { createGpuChopPatch } from "./gpuPatch.js?v=29.1.6";
-import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=29.1.6";
-import { slopeBudget } from "./roughness.js?v=29.1.6";
-import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=29.1.6";
-import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=29.1.6";
+import { createBand, retuneBand, bandVariance } from "./band.js?v=30.22";
+import { createGpuChopPatch } from "./gpuPatch.js?v=30.22";
+import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=30.22";
+import { slopeBudget } from "./roughness.js?v=30.22";
+import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=30.22";
+import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=30.22";
 
+let simTimeCover = 0; // v30.6: clock for the cover pass eddy field
 const TAU = Math.PI * 2;
 // Ages of samples that have never carried foam (surface.js uses Infinity).
 const NEVER = 1e30;
 const BLOCK = 16;
+// v30c foam coverage constants (URL overrides for tuning: ?ftd= ?ftr= ?ffeed= ?fsrc=)
+const FQ = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+const EN_CREF = Number(FQ.get("ecr") || 6.0).toFixed(3); // v30.19 reference crest speed (m/s) for the break-energy scale
+const EN_K = Number(FQ.get("ek") || 4.0).toFixed(3);    // v30.19 coverage calibration (Monahan & O'Muircheartaigh 1980)
+const FOAM_TAU_DENSE = Number(FQ.get("ftd") || 2.2); // whitewater fades over 1-2 s
+const FOAM_TAU_RESID_K = Number(FQ.get("ftr") || 1.0); // residual film: 2 s at 5 m/s rising to 6 s at 25 m/s (x this)
+const FOAM_FEED = Number(FQ.get("ffeed") || 0.5);
+const FOAM_SRC = Number(FQ.get("fsrc") || 12.0);
+const FOAM_VIS = Number(FQ.get("foamvis") || 0.3); // v30.20: FOAM SEA counts cells at or above this foam strength
+const FOAM_SL = Number(FQ.get("fsl") ?? (FQ.get("fcov") === "0" ? 1 : 0.11)); // v30.22h: fit to top-down pale cover at 10/15/25 m/s // v30.22f FOAM SEA: weight of lace-only cells
+const FOAM_JTH = Number(FQ.get("fjth") || 0.75); // Jacobian below this = surface folding at the tip
+// v30.22f whitecap coverage vs wind (Monahan-style: ~1% at 10 m/s, 3-5% at 15, 8-15% at 20-25). ?fcov=0 restores
+// v30.22e. The dense white phase of released foam (the flat pale patches) is shortened, most at low wind
+// (?fcd0= at 10 m/s .. ?fcd1= at 25), and the strand spawn rate follows the wind (?fcr0= .. ?fcr1=, log ramp).
+const FCOV = FQ.get("fcov") !== "0";
+const FC = { d0: Number(FQ.get("fcd0") ?? 2.0), d1: Number(FQ.get("fcd1") ?? 2.5), r0: Number(FQ.get("fcr0") ?? 1.0), r1: Number(FQ.get("fcr1") ?? 1.5) };
+const fcS = (U) => { const t = Math.min(1, Math.max(0, (U - 10) / 15)); return t * t * (3 - 2 * t); };
+// splat gain of the dense phase (< 1: the whitecap patch is holed by the lace instead of a flat pale fill)
+const FC_WG = Number(FQ.get("fwg") ?? (FCOV ? 0.6 : 1));
+// big oceans (> 250 m) carry bigger, more energetic breakers (longer-lived, wider splats): their dense phase is
+// shortened by (250 / size)^?fcsz= so the coverage stays roughly size-invariant (25 m/s at 1000 m read 45%)
+const FC_SZ = Number(FQ.get("fcsz") ?? 1.2);
+export function foamDenseK(U, L = 250) { return FCOV ? (FC.d0 + (FC.d1 - FC.d0) * fcS(U)) * Math.pow(Math.min(1, 250 / Math.max(L, 1)), FC_SZ) : 1; }
+export function foamRateK(U) { return FCOV ? FC.r0 * Math.pow(FC.r1 / FC.r0, fcS(U)) : 1; }
 
 const HEADER = `#version 300 es
 precision highp float;
@@ -590,6 +615,458 @@ void main() {
   oS = st;
 }`;
 
+// v30c physics foam: continuous coverage on the physics grid (ping-pong tK).
+//   .x dense whitewater (0..1), .y residual bubble film (0..1), .z age-weighted dense (for the bubble-cloud glow)
+// Grid cells are the FFT sea's undisplaced (Lagrangian) positions, so the orbital motion is already
+// carried by the displacement: a foam parcel stays on its cell while the cell is swept and squeezed by
+// the waves, and its surface density is coverage / Jacobian (the renderer divides), which gathers foam
+// where the surface converges (negative divergence of the orbital velocity) and thins it where it spreads.
+// What is left to advect here is the mean drift (wind drift ~3% of U10 + Stokes drift), semi-Lagrangian.
+// Sources: the break test's painted front (grade 0..1, same Jacobian/steepness test and wind-eased
+// threshold as v30b). Decay in two stages: dense e-fold uTauD (~3 s) feeding a residual film that
+// e-folds over uTauR (~30 s); a share of the dense loss becomes residual.
+const COVER_FS = HEADER + `
+#define ECR ${EN_CREF}
+#define EK ${EN_K}
+
+uniform sampler2D tP; uniform sampler2D tL; // v30.18.3
+uniform sampler2D tCU; // v30.22c curl field (.y landing foam)
+uniform sampler2D tK;
+uniform sampler2D tA;
+uniform float uJth;
+uniform vec2 uShift;   // drift this step, in cells
+uniform float uDt;
+uniform float uTauD;
+uniform float uTauR;
+uniform float uTauA;
+uniform float uFeed;   // share of dense loss that becomes residual film
+uniform float uSrc;    // source rate (1/s) toward the painted grade
+uniform vec2 uCrest;  // unit vector along the crest (across travel), in cells
+uniform float uSrcK;   // breaking-strength gain, rising with wind (whitecap coverage ~ U^3)
+uniform float uTime;
+out vec4 o;
+uniform float uDepth; uniform float uSp; uniform vec2 uWind; uniform sampler2D tHL; uniform float uLp; // v30.8b: depth (m), physics cell (m), wind unit vector
+uniform int uM;        // v30.8: foam grid size (2x the physics grid: 512 at N=256)
+vec4 kAt(ivec2 c) { return texelFetch(tK, (c % uM + uM) % uM, 0); }
+// physics fields sampled bilinearly at a coarse-grid position (index space, wraps)
+float bilHL(vec2 p) { vec2 i0 = floor(p), f = p - i0; ivec2 c = ivec2(i0);
+  #define TH(o) texelFetch(tHL, ((c + o) % 64 + 64) % 64, 0).x
+  return mix(mix(TH(ivec2(0, 0)), TH(ivec2(1, 0)), f.x), mix(TH(ivec2(0, 1)), TH(ivec2(1, 1)), f.x), f.y); }
+vec4 bilA(sampler2D t, vec2 p) { vec2 i0 = floor(p), f = p - i0; ivec2 c = ivec2(i0);
+  #define TW(o) texelFetch(t, ((c + o) % uN + uN) % uN, 0)
+  return mix(mix(TW(ivec2(0, 0)), TW(ivec2(1, 0)), f.x), mix(TW(ivec2(0, 1)), TW(ivec2(1, 1)), f.x), f.y); }
+float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vn(vec2 p) { vec2 i = floor(p), f = p - i; f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+// v30.18.1 passive drift: eddy swirl in METRES (scale 18 m / 7 m), speed capped at SWIRL_MAX m/s, so foam
+// left behind drifts with the surface current (uShift, ~3% of wind) and never outruns it or runs backward.
+vec2 swirlM(vec2 m, float turb) { float e = 0.5;
+  #define PSM(q) (vn((q) / 18.0 + vec2(0.0, uTime * 0.05)) + 0.5 * vn((q) / 7.0 + vec2(uTime * 0.08, 17.0)))
+  vec2 c = vec2(PSM(m + vec2(0.0, e)) - PSM(m - vec2(0.0, e)), -(PSM(m + vec2(e, 0.0)) - PSM(m - vec2(e, 0.0)))) / (2.0 * e) * 18.0;
+  vec2 v = c * 0.08 * (0.4 + turb); float l = length(v); return l > 0.15 ? v * (0.15 / l) : v; }
+float psi(vec2 p) { return vn(p / 9.0 + vec2(0.0, uTime * 0.05)) + 0.5 * vn(p / 4.0 + vec2(uTime * 0.08, 17.0)); }
+void main() {
+  // v30.6 step 4: the turbulence a break leaves behind stirs the foam. A divergence-free (curl-noise,
+  // Bridson 2007) eddy velocity, strongest where the bubble plume (air) says the water was just
+  // churned, slowly evolving; it shears and swirls the patches and tears their ends.
+  float rM = float(uM) / float(uN);           // fine cells per physics cell
+  vec2 pc0 = (gl_FragCoord.xy - 0.5) / rM;    // physics-grid position
+  float turb = texelFetch(tK, ivec2(gl_FragCoord.xy), 0).w;
+  vec2 ut = vec2(psi(pc0 + vec2(0.0, 0.5)) - psi(pc0 - vec2(0.0, 0.5)), -(psi(pc0 + vec2(0.5, 0.0)) - psi(pc0 - vec2(0.5, 0.0))));
+  // v30.8b windrows (Langmuir): a weak cross-wind convergence (~0.08 m/s, 12-25 m spacing, slowly
+  // wandering) gathers the residual into streaks parallel to the wind.
+  vec2 wc = vec2(-uWind.y, uWind.x);
+  float yc = dot(pc0 * uSp, wc), xa = dot(pc0 * uSp, uWind);
+  float lw = 18.0 + 7.0 * (vn(vec2(xa / 60.0, 3.0)) - 0.5);
+  vec2 vw = wc * 0.08 * sin(6.2832 * yc / lw + 2.0 * vn(vec2(xa / 40.0, uTime * 0.02))) / uSp;
+  vec2 x = gl_FragCoord.xy - 0.5 - rM * (uShift + (swirlM(pc0 * uSp, turb) / uSp + vw) * uDt); // v30.18.1
+  vec2 i0 = floor(x); vec2 f = x - i0; ivec2 c = ivec2(i0);
+  vec4 k = mix(mix(kAt(c), kAt(c + ivec2(1, 0)), f.x), mix(kAt(c + ivec2(0, 1)), kAt(c + ivec2(1, 1)), f.x), f.y);
+  // v30c.3 whitewater seed: only the crest tip. A cell seeds when the break test flags it (paint.x,
+  // same Jacobian/steepness test and wind-eased threshold), the surface is folding there (Jacobian
+  // below uJth) and it is a local height maximum along the travel direction (within 2 cells).
+  // Smoothed along the crest only (5 taps): a thin line 1-2 cells across lying along the crest. The
+  // cells then move with the water, so the crest runs ahead and leaves a band trailing behind it.
+  // v30.7 whole-crest seed (foam-realism-2 rank 1): breaking happens along the whole segment that
+  // passes the limit, so the seed is a soft test on the cell itself (folding Jacobian, painted grade
+  // as a boost, raised above the local mean height), no local-maximum test. It is smoothed along the
+  // crest's OWN direction (perpendicular to the local height gradient), not one global vector.
+  vec2 gh = vec2(bilA(tA, pc0 + vec2(1, 0)).x - bilA(tA, pc0 - vec2(1, 0)).x, bilA(tA, pc0 + vec2(0, 1)).x - bilA(tA, pc0 - vec2(0, 1)).x);
+  vec2 cr = length(gh) > 1e-5 ? vec2(-gh.y, gh.x) / length(gh) : uCrest;
+  // v30.8b whitecap size follows its wave: local wavelength from curvature/elevation (L = 2pi/k,
+  // k^2 ~ |lap h| / |h|); the seed is joined along ~0.4 L of that crest (9 taps).
+  // v30.8.2: crest line and size from the LONG wave (peak band): one breaker -> one band ~0.3 lambda_p
+  // long, joined along that crest; seeds only on its upper part (hl / local envelope).
+  float sH = float(uN) / 64.0;  // physics cells per long-grid texel
+  #define HLAT(p) bilHL((p) / sH)
+  float hl = HLAT(pc0);
+  vec2 ghl = vec2(HLAT(pc0 + vec2(sH, 0.0)) - HLAT(pc0 - vec2(sH, 0.0)), HLAT(pc0 + vec2(0.0, sH)) - HLAT(pc0 - vec2(0.0, sH)));
+  float env = 1e-3; float rr0 = 0.5 * uLp / uSp;
+  for (int a = 0; a < 8; a++) { float an = 0.785 * float(a); env = max(env, abs(HLAT(pc0 + rr0 * vec2(cos(an), sin(an))))); }
+  env = max(env, abs(hl));
+  float tstep = clamp(0.3 * uLp / (8.0 * uSp), 0.5, 8.0);
+  if (length(ghl) > 1e-5) cr = vec2(-ghl.y, ghl.x) / length(ghl);
+  float src = 0.0, ws = 0.0;
+  for (int i = -4; i <= 4; i++) {
+    float w = exp(-0.5 * float(i * i) / 10.0);
+    vec2 pc = pc0 + tstep * float(i) * cr;
+    vec4 aq = bilA(tA, pc);
+    float g = bilA(tP, pc).y;
+    float fold = 1.0 - smoothstep(uJth - 0.3, uJth + 0.05, aq.w);
+    float tip = max(fold * (0.45 + 0.55 * smoothstep(0.2, 0.8, g)), 0.7 * smoothstep(0.5, 0.95, g)); // soft OR: folding, or the break test's steep face
+    tip *= smoothstep(-0.15, 0.35, aq.x);                                         // on the raised crest/forward face, not the trough
+    tip *= smoothstep(0.3, 0.7, HLAT(pc) / env);                                   // only on the long wave's crest
+    { vec4 lq = bilA(tL, pc); float bS = smoothstep(0.45, 1.0, clamp(max(4.0 * lq.x, lq.y), 0.0, 1.0)); tip *= min(1.0, EK * bS * pow(sqrt(17.4 * max(aq.x, 0.0)) / ECR, 5.0)); } // v30.19 energy // v30.18.3: only under a breaking lip
+    tip = max(tip, smoothstep(0.7, 0.9, 2.0 * max(aq.x, 0.0) / max(uDepth, 0.5))); // depth-limited breaking, H/d > 0.78 (surf)
+    src = max(src, mix(0.6, 1.0, w) * tip);  // v30.8.3: dilate along the long crest (~0.3 lambda_p) so neighbours merge
+  }
+  src = min(1.0, uSrcK * smoothstep(0.3, 0.6, src)); // v30.8.3: weak isolated seeds (fragments) die
+  { ivec2 cq = (ivec2(floor(pc0 + 0.5)) % uN + uN) % uN; vec4 cu = texelFetch(tCU, cq, 0); if (cu.x < -0.5) src = max(src, clamp(cu.y, 0.0, 1.0)); } // v30.22c: whitewater where a curl's lip lands
+  // slow turbulent spreading of the patch (~0.05 m^2/s eddy diffusion)
+  vec4 nb = 0.25 * (kAt(c + ivec2(-1, 0)) + kAt(c + ivec2(2, 0)) + kAt(c + ivec2(0, -1)) + kAt(c + ivec2(0, 2)));
+  k = mix(k, nb, 0.04 * rM * rM); // same eddy diffusivity on the finer grid
+  float d0 = k.x;
+  float dense = d0 * exp(-uDt / uTauD);
+  float resid = k.y * exp(-uDt / uTauR) + uFeed * (d0 - dense);
+  float fresh = k.z * exp(-uDt / 0.8);
+  if (src > 0.0) { float a = 1.0 - exp(-uSrc * uDt); dense = max(dense, dense + (src - dense) * a); fresh = max(fresh, fresh + (src - fresh) * a); } // v30.7: persistence, max-accumulate
+  // v30.6 aeration: the bubble plume under breaks. Fed by the whitewater as it collapses (and by
+  // the break itself), it outlives the surface foam (small bubbles rise slowly, uTauA ~ 8-16 s) and
+  // spreads wider by turbulent mixing (5x the foam's diffusion).
+  float airN = mix(k.w, nb.w, min(0.6, 0.25 * rM * rM)) * exp(-uDt / uTauA) + 1.2 * max(d0 - dense, 0.0) + 0.3 * src * uDt * uSrc;
+  o = vec4(clamp(dense, 0.0, 1.0), clamp(resid, 0.0, 1.0), clamp(fresh, 0.0, 1.0), clamp(airN, 0.0, 1.0));
+}`;
+
+// v30.7 coverage stats for the controller: 16x16 blocks of the coverage grid -> (active share,
+// visible share). Read back asynchronously like the boat probe.
+const COVSTAT_FS = HEADER + `
+uniform sampler2D tK;
+uniform highp sampler2DArray tS2; uniform vec2 uWc; uniform float uWs; // v30.22f: drawn strand foam in a window (uv) around the camera
+uniform int uM;
+out vec4 o;
+void main() {
+  int B = uM / 16; ivec2 base = ivec2(gl_FragCoord.xy) * B;
+  float a = 0.0, v = 0.0;
+  for (int j = 0; j < 64; j += 2) { if (j >= B) break; for (int i = 0; i < 64; i += 2) { if (i >= B) break;
+    vec4 k = texelFetch(tK, base + ivec2(i, j), 0);
+    a += step(0.5, k.x); v += step(0.12, max(k.x, k.y)); } }
+  float nn = float(B * B) / 4.0;
+  // v30.22f FOAM SEA: share of the sea showing foam as the water shader draws it (whitecap: 4 x young strands
+  // at lod 2-3 >= foamvis; lace: 1 - exp(-2.5 (old + 0.5 young)) >= foamvis), 8 x 8 samples per block
+  float f = 0.0, fl = 0.0;
+  for (int j = 0; j < 8; j++) for (int i = 0; i < 8; i++) {
+    vec2 uv = uWc + uWs * ((gl_FragCoord.xy - 0.5 + (vec2(i, j) + 0.5) / 8.0) / 16.0 - 0.5);
+    vec4 sb = 0.5 * (textureLod(tS2, vec3(uv, 0.0), 2.0) + textureLod(tS2, vec3(uv, 0.0), 3.0));
+    float sd = textureLod(tS2, vec3(uv, 0.0), 1.8).r;
+    float dW = clamp(4.0 * sb.g, 0.0, 1.0), aR = 1.0 - exp(-2.5 * (sd + 0.5 * sb.g));
+    // the water shader breaks lace up with its lace mask (v30.22f: also at medium range): only ~1/3 of a
+    // lace-covered area shows foam (?fsl=), saturated whitecap (riding) counts in full
+    bool wcFull = dW >= ${FOAM_SL < 1 ? "0.9" : FOAM_VIS.toFixed(3)}; f += wcFull ? 1.0 : 0.0; fl += !wcFull && max(dW, aR) >= ${FOAM_VIS.toFixed(3)} ? 1.0 : 0.0; // v30.22g: whitecap and lace shares apart (FOAM SEA = wc + fsl x lace on the CPU) // v30.22f: only saturated whitecap counts in full (released dense foam is lace-masked too)
+  }
+  o = vec4(a / nn, v / nn, f / 64.0, fl / 64.0);
+}`;
+
+// v30.8.2 long-wave surface (Concept): the height band-limited to the energetic bands near the
+// spectral peak (Gaussian low-pass, sigma = 0.12 lambda_p), on a 64^2 grid. Breaking is started only
+// on the crests of this surface; short bands add texture but never start a whitecap.
+const STRANDS = new URLSearchParams(globalThis.location ? location.search : "").get("strands") !== "0";
+const STRAND_CHAINS = Math.max(4096, Math.min(16384, Number(FQ.get("chains") || 4096))); // v30.19.3: back to 4096 (8192 doubled splat/line draws -> 17 ms p99 at 25 m/s on the Mac)
+const STRAND_ROWS = STRAND_CHAINS / 16;
+const STRAND_BOOST = Number(FQ.get("sboost") ?? 1.5); // v30.19.3: high-wind extra spawn (15->25 m/s)
+const STRAND_RATE = Number(new URLSearchParams(globalThis.location ? location.search : "").get("srate") ?? 0.12);
+const SPLATS = new URLSearchParams(globalThis.location ? location.search : "").get("splat") !== "0"; // v30.18.4 soft bubble splats
+const STRAND_TRAIL = Number(new URLSearchParams(globalThis.location ? location.search : "").get("strail") ?? 0.25);
+const FINE = new URLSearchParams(globalThis.location ? location.search : "").get("ffine") !== "0";
+const FILAMENTS = Math.max(1, Number(new URLSearchParams(globalThis.location ? location.search : "").get("ffil") ?? 7)); // v30.14 fine-layer filaments per strand
+const LONGH_FS = HEADER + `
+uniform sampler2D tA;
+uniform float uSig;   // sigma in physics cells
+out vec4 o;
+void main() {
+  vec2 c = (gl_FragCoord.xy - 0.5) * float(uN) / 64.0;
+  float acc = 0.0, wsum = 0.0;
+  for (int j = -3; j <= 3; j++) for (int i = -3; i <= 3; i++) {
+    vec2 d = vec2(float(i), float(j)) * 0.6 * uSig;
+    float w = exp(-0.5 * dot(d, d) / (uSig * uSig));
+    ivec2 q = (ivec2(floor(c + d)) % uN + uN) % uN;
+    acc += w * texelFetch(tA, q, 0).x; wsum += w;
+  }
+  o = vec4(acc / wsum, 0.0, 0.0, 1.0);
+}`;
+
+// v30.9 FOAM STRANDS (Lagrangian). Foam is drawn from material lines: each breaking event spawns a
+// chain of 16 nodes laid along the crest (length ~0.03 U^2 m: 3 m at 10 m/s, 19 m at 25), placed by
+// rejection sampling on the fold test (Jacobian below threshold on the raised crest), so foam only
+// appears where waves break and the spawn rate follows the breaking area. Nodes live on the same
+// Lagrangian grid as the coverage field (the renderer divides by the Jacobian, so strands gather where
+// the surface converges) and are carried by the same drift, Langmuir windrows and curl-noise eddies,
+// plus a finer eddy that folds and stretches each line into loops. A segment that is stretched past
+// ~4x its rest length tears (holes open, the web breaks up with age). Young chains are drawn as the
+// whitecap band, old ones as the lace web.
+const STRAND_FLOW = `
+#define ECR ${EN_CREF}
+#define EK ${EN_K}
+
+float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vn(vec2 p) { vec2 i = floor(p), f = p - i; f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+`;
+const STRAND_UPD_FS = HEADER + STRAND_FLOW + `
+uniform sampler2D tS; uniform sampler2D tA; uniform sampler2D tK; uniform sampler2D tHL; uniform sampler2D tL; // v30.18.3 tL: break/lip detector (same as the v30.17b lip)
+uniform int uM; uniform float uTime, uDt, uSp, uLen, uRate, uJth, uLife, uC, uGrow, uRideAll; uniform vec2 uShift, uWind;
+uniform vec2 uCamN; uniform float uWinN, uBias; // v30.16.1: spawn near the camera in big oceans
+out vec4 o;
+vec4 bilA(sampler2D t, vec2 p) { vec2 i0 = floor(p), f = p - i0; ivec2 c = ivec2(i0);
+  #define TW(o) texelFetch(t, ((c + o) % uN + uN) % uN, 0)
+  return mix(mix(TW(ivec2(0, 0)), TW(ivec2(1, 0)), f.x), mix(TW(ivec2(0, 1)), TW(ivec2(1, 1)), f.x), f.y); }
+float psi(vec2 p) { return vn(p / 9.0 + vec2(0.0, uTime * 0.05)) + 0.5 * vn(p / 4.0 + vec2(uTime * 0.08, 17.0)); }
+// v30.18.1 passive drift: eddy swirl in METRES (scale 18 m / 7 m), speed capped at SWIRL_MAX m/s, so foam
+// left behind drifts with the surface current (uShift, ~3% of wind) and never outruns it or runs backward.
+vec2 swirlM(vec2 m, float turb) { float e = 0.5;
+  #define PSM(q) (vn((q) / 18.0 + vec2(0.0, uTime * 0.05)) + 0.5 * vn((q) / 7.0 + vec2(uTime * 0.08, 17.0)))
+  vec2 c = vec2(PSM(m + vec2(0.0, e)) - PSM(m - vec2(0.0, e)), -(PSM(m + vec2(e, 0.0)) - PSM(m - vec2(e, 0.0)))) / (2.0 * e) * 18.0;
+  vec2 v = c * 0.08 * (0.4 + turb); float l = length(v); return l > 0.15 ? v * (0.15 / l) : v; }
+float psiF(vec2 m) { return vn(m / 2.5 + vec2(uTime * 0.11, 3.0)) + 0.6 * vn(m / 1.1 + vec2(9.0, uTime * 0.17)); } // metres
+void main() {
+  ivec2 id = ivec2(gl_FragCoord.xy); vec4 p = texelFetch(tS, id, 0);
+  int j = id.x % 16; float cid = float(id.y * 16 + id.x / 16);
+  float rM = float(uM) / float(uN);
+  bool act = p.w > 1000.0; float life = act ? p.w - 1000.0 : p.w;
+  bool dead = life <= 0.0 || (uTime - p.z) > life;
+  if (dead) {
+    vec2 seed = vec2(cid * 0.137, fract(uTime * 7.31) * 911.0);
+    vec2 r = vec2(h21(seed), h21(seed + 17.3)) * float(uN);
+    if (h21(seed + 23.7) < uBias) r = mod(uCamN + (vec2(h21(seed + 31.1), h21(seed + 41.9)) - 0.5) * uWinN, float(uN));
+    vec4 aq = bilA(tA, r);
+    // v30.18.3 foam only from a visible overturn: the cell must carry a strong lip (physL, the v30.17b lip
+    // test, >= 0.5 so the crest has already steepened through the weak stage) on a raised crest; the
+    // chain is laid where the lip lands, ~0.4 wave heights ahead of the crest along the wind.
+    vec4 lq = bilA(tL, r); float lipS = clamp(max(4.0 * lq.x, lq.y), 0.0, 1.0);
+    // v30.19 foam from dissipated energy: b = how far past the breaking threshold (lip detector), local
+    // crest speed from the crest height (H/lambda ~ 1/7 at breaking: c = sqrt(g 7H / 2pi) = sqrt(10.9 H)),
+    // energy per metre of crest ~ b c^5 / g, relative to a reference crest (ECR m/s). Spawn rate, chain
+    // length/width and life follow it: small waves make thin short streaks or nothing, big ones wide patches.
+    float bS = smoothstep(0.45, 1.0, lipS);
+    float cl = sqrt(10.9 * 1.6 * max(aq.x, 0.0));
+    float qE = min(3.0, bS * pow(cl / ECR, 5.0));
+    float fold = step(0.05, aq.x) * step(1e-4, qE);
+    if (fold > 0.0 && h21(seed + 5.1) < uRate * EK * min(qE, 1.0)) {
+      float sq = sqrt(qE);
+      r += uWind * (0.8 * max(aq.x, 0.0)) / uSp;
+      vec2 uv = r / float(uN), eh = vec2(1.0 / 64.0, 0.0);   // crest direction from the LONG wave (one breaker -> one straight band)
+      vec2 g = vec2(texture(tHL, uv + eh.xy).x - texture(tHL, uv - eh.xy).x, texture(tHL, uv + eh.yx).x - texture(tHL, uv - eh.yx).x);
+      vec2 cr = length(g) > 1e-5 ? vec2(-g.y, g.x) / length(g) : vec2(-uWind.y, uWind.x);
+      vec2 ac = vec2(-cr.y, cr.x);
+      float t = (float(j) - 7.5) / 15.0;
+      float L = uLen * (0.6 + 0.8 * h21(seed + 2.2)) * clamp(0.2 + 0.8 * sq, 0.2, 1.4);
+      float bow = (1.0 - 4.0 * t * t) * 0.08 * L * (h21(seed + 3.3) - 0.5);   // crests are slightly curved
+      vec2 pos = r + (cr * t * L + ac * (bow + 3.0 * clamp(sq, 0.15, 1.2) * (h21(seed + 4.4) - 0.5) + 0.25 * (h21(seed + float(j) * 1.7) - 0.5))) / uSp;
+      p = vec4(mod(pos * rM, float(uM)), uTime, 1000.0 + uLife * (0.6 + 0.8 * h21(seed + 9.1)) * clamp(0.25 + 0.75 * sq, 0.25, 1.3)); // born ACTIVE (riding its crest)
+    } else p = vec4(p.xy, 0.0, 0.0);
+  } else if (act) {
+    // v30.11 crest-joined whitecap: an ACTIVE node rides its breaking crest. The long-wave crest moves
+    // through the grid at the phase speed; the node steps uphill on the peak-band height at that speed
+    // whenever that takes it higher, so it sits on the crest line and moves with it. All chains on one
+    // crest collect on the same line (merge into one band). End nodes grow outward along the crest
+    // while the surface there is still folding; interior nodes relax to even spacing. A node stops
+    // riding (becomes lace) when the surface under it stops folding, or after 3-7 s.
+    vec2 pc0 = p.xy / rM;
+    vec2 uv = pc0 / float(uN), eh = vec2(1.0 / 64.0, 0.0);
+    vec2 g = vec2(texture(tHL, uv + eh.xy).x - texture(tHL, uv - eh.xy).x, texture(tHL, uv + eh.yx).x - texture(tHL, uv - eh.yx).x);
+    // v30.15 (Michael: starburst spikes): stepping straight up the gradient pulled nodes along gradient
+    // lines into each peak, so chains became radial spokes. Now a node only moves with the wave, along
+    // its propagation direction (the wind), and only while that keeps it on the rising crest.
+    if (length(g) > 1e-7 && dot(g, uWind) > 0.0) {
+      vec2 cand = pc0 + uWind * 0.8 * uC * uDt / uSp; // v30.18.3: spilling foam rides a little slower than the crest
+      if (texture(tHL, cand / float(uN)).x > texture(tHL, uv).x) pc0 = cand;
+    }
+    float M = float(uM);
+    vec2 pr = texelFetch(tS, ivec2(id.x - (j > 0 ? 1 : 0), id.y), 0).xy / rM, nx = texelFetch(tS, ivec2(id.x + (j < 15 ? 1 : 0), id.y), 0).xy / rM;
+    vec2 dp = pr - pc0, dn = nx - pc0; float h = float(uN) * 0.5;
+    if (length(dp) < h && length(dn) < h) {
+      if (j > 0 && j < 15) pc0 += 0.15 * (0.5 * (dp + dn));
+      else {
+        vec2 out_ = j == 0 ? -normalize(dn + 1e-6) : -normalize(dp + 1e-6);
+        vec2 ext = pc0 + out_ * uGrow * uDt / uSp;
+        vec4 ae = bilA(tA, ext);
+        if ((1.0 - smoothstep(uJth - 0.3, uJth + 0.05, ae.w)) > 0.2) pc0 = ext;
+      }
+    }
+    vec4 aq = bilA(tA, pc0);
+    vec4 lq = bilA(tL, pc0 - uWind * (0.8 * max(aq.x, 0.0)) / uSp); float lipS = clamp(max(4.0 * lq.x, lq.y), 0.0, 1.0);
+    float actMax = 1.0 + 2.0 * h21(vec2(cid, 7.7));
+    bool keep = (uTime - p.z) < actMax && (lipS > 0.25 || (uTime - p.z) < 0.4); // v30.18.3: ride only while its crest is still breaking (1-3 s) // v30.12: in big boxes (>= 500 m, several long crests) the whole chain rides its crest for its active span
+    p.xy = mod(pc0 * rM + rM * uShift, M);
+    p.w = keep ? p.w : life;
+    if (!keep) p.z = uTime;   // lace clock starts now (fades in, v30.14)
+  } else {
+    vec2 pc0 = p.xy / rM;
+    float turb = texelFetch(tK, (ivec2(p.xy) % uM + uM) % uM, 0).w;
+    vec2 ut = vec2(psi(pc0 + vec2(0.0, 0.5)) - psi(pc0 - vec2(0.0, 0.5)), -(psi(pc0 + vec2(0.5, 0.0)) - psi(pc0 - vec2(0.5, 0.0))));
+    vec2 wc = vec2(-uWind.y, uWind.x);
+    float yc = dot(pc0 * uSp, wc), xa = dot(pc0 * uSp, uWind);
+    float lw = 18.0 + 7.0 * (vn(vec2(xa / 60.0, 3.0)) - 0.5);
+    vec2 vw = wc * 0.08 * sin(6.2832 * yc / lw + 2.0 * vn(vec2(xa / 40.0, uTime * 0.02))) / uSp;
+    vec2 m = pc0 * uSp; float e = 0.2;
+    vec2 uf = vec2(psiF(m + vec2(0.0, e)) - psiF(m - vec2(0.0, e)), -(psiF(m + vec2(e, 0.0)) - psiF(m - vec2(e, 0.0)))) / (2.0 * e); // 1/m * 1
+    vec2 sv = swirlM(m, turb) + uf * 0.03 * (0.5 + turb) * smoothstep(1.0, 6.0, uTime - p.z); float sl_ = length(sv); sv = sl_ > 0.2 ? sv * (0.2 / sl_) : sv; // v30.18.1: m/s, capped 0.2
+    vec2 v = sv / uSp + vw + uWind * uC * 0.6 * max(0.0, 1.0 - (uTime - p.z) / 0.4) / uSp; // release eases off the crest over 0.4 s // young chains keep the crest line; the fine eddy folds them as they age
+    p.xy = mod(p.xy + rM * (uShift + v * uDt), float(uM));
+  }
+  o = p;
+}`;
+const STRAND_VS = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D;
+uniform sampler2D tS; uniform int uM; uniform float uTime, uSeg, uYoung;
+uniform float uFine; uniform vec2 uCam; uniform float uWin; uniform float uGain, uFil, uTex, uDk, uFc;  // v30.14 camera-following fine layer (toroidal window uWin, M-grid units)
+out vec2 vI;
+float h21v(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+void main() {
+  int seg = gl_VertexID / 2, e = gl_VertexID % 2;
+  int chain = seg / 15, k = seg % 15;
+  int i0 = chain * 16 + k;
+  ivec2 a = ivec2(i0 % 256, i0 / 256), b = ivec2((i0 + 1) % 256, (i0 + 1) / 256);
+  vec4 pa = texelFetch(tS, a, 0), pb = texelFetch(tS, b, 0);
+  vec2 d = pb.xy - pa.xy; float M = float(uM);
+  float age = uTime - pa.z;
+  bool actA = pa.w > 1000.0; float lifeA = actA ? pa.w - 1000.0 : pa.w; bool actB = pb.w > 1000.0;
+  bool ok = lifeA > 0.0 && age < lifeA && age >= 0.0 && (length(d) < uSeg || (actA && actB && length(d) < 4.0 * uSeg)) && length(d) < 0.5 * M;
+  vec2 q = e == 0 ? pa.xy : pa.xy + d;
+  vec2 clip = q / M * 2.0 - 1.0;
+  if (uFine > 0.5) {
+    vec2 da = pa.xy - uCam; da -= M * floor(da / M + 0.5);            // wrapped offset from the camera
+    vec2 ua = fract((uCam + da) / uWin), ub = ua + d / uWin;
+    ok = ok && max(abs(da.x), abs(da.y)) < 0.47 * uWin && all(greaterThanEqual(ub, vec2(0.0))) && all(lessThan(ub, vec2(1.0)));
+    clip = (e == 0 ? ua : ub) * 2.0 - 1.0;
+    // v30.14 fine detail at the window's own 0.25 m resolution: each strand frays into uFil filaments.
+    // Filament j is seeded per chain (hash), offset sideways 0.2-1.2 m with a meander that varies along the
+    // chain and drifts with the strand's age (it advects with the parent nodes, which ride the flow).
+    if (gl_InstanceID > 0) {
+      float j = float(gl_InstanceID), ag = uTime - pa.z;
+      vec2 nrm = normalize(vec2(-d.y, d.x) + 1e-6);
+      float hs = h21v(vec2(float(chain), j)), hp = h21v(vec2(j, float(chain) * 0.37));
+      float off = (hs - 0.5) * 2.4 + 0.6 * sin(float(k + e) * (0.7 + hp) + 6.28 * hp + 0.4 * ag);
+      vec2 o = nrm * off / uTex;                          // metres -> window texels
+      float cut = h21v(vec2(float(seg), j));              // filaments break up: ~35% of segments missing
+      ok = ok && cut > 0.35 && !actA && ag > 10.0; // v30.18.4: filaments only on lace older than ~10 s
+      clip += o * 2.0 / 1024.0;
+    }
+  }
+  gl_Position = ok ? vec4(clip, 0.0, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
+  // v30.14 no pops: lace fades in over 1.2 s after its chain stops riding, out over the last 40% of its
+  // life; torn segments fade before they break; a riding chain's whitecap ramps in over 0.4 s and out
+  // over the last 0.8 s of its ride.
+  float fade = smoothstep(lifeA, 0.6 * lifeA, age) * smoothstep(0.0, 1.2, age) * (1.0 - smoothstep(0.6 * uSeg, uSeg, length(d)));
+  float young = actA && actB ? 1.0 : 0.0;
+  float actMax = 1.0 + 2.0 * h21v(vec2(float(chain), 7.7)); // v30.18.3 (matches STRAND_UPD)
+  float gy = smoothstep(0.0, 0.4, age) * (1.0 - smoothstep(actMax - 0.8, actMax, age));
+  float thin = clamp(0.25 * uSeg / max(length(d), 1e-3), 0.3, 1.0); // stretched strands thin
+  // v30.18.2 three-phase life after release (Michael's drone video): DENSE white 4-6 s (drawn into G, the
+  // whitecap channel), then MOTTLED bubbles over 5 s (opacity 0.6 -> 0.3), then LACE 0.3 -> 0 over the rest of life.
+  float dD = max(0.8, uDk * min(4.0 + 2.0 * h21v(vec2(float(chain), 3.1)), max(1.2, 0.2 * lifeA))); // v30.19: small breaks: short dense phase; v30.22f x uDk (wind)
+  float dense2 = smoothstep(0.0, 0.3, age) * (1.0 - smoothstep(dD - 1.0, dD, age));
+  float op = mix(0.6, 0.3, smoothstep(dD, dD + 5.0, age)) * (1.0 - smoothstep(dD + 5.0, lifeA, age)) * smoothstep(dD - 1.0, dD, age);
+  op *= 1.0 - smoothstep(0.25 * uSeg, 0.4 * uSeg, length(d)); // v30.18.4: stretched past ~1.5x rest -> dissolve (no spokes)
+  vI = young > 0.5 ? vec2(0.0, gy) : uFc > 0.5 ? vec2((op + 0.5 * dense2) * thin, 0.0) : vec2(op * thin, dense2 * 0.12);   // G accumulates (trail ~10x steady state) -> ~1; v30.22g: released dense phase drawn as lace (R)
+  if (gl_InstanceID > 0) vI = vec2(0.55 * vI.x + 0.25 * vI.y, 0.0);   // filaments are lace (aerated streaks), not whitecap
+  vI *= uGain;
+}`;
+// v30.18.4 soft splats: every node is also drawn as a soft round bubble cloud (gaussian disc, ~0.6-2 m),
+// so whitecaps and young foam have pillowy edges; old lace keeps the thin lines.
+const STRAND_PT_VS = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D;
+uniform sampler2D tS; uniform int uM; uniform float uTime, uTex, uGk, uFine, uWin, uWk, uDk, uFc; uniform vec2 uCam;
+out vec2 vI;
+float h21v(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+void main() {
+  int i = gl_VertexID, chain = i / 16; vec4 p = texelFetch(tS, ivec2(i % 256, i / 256), 0); float M = float(uM);
+  bool act = p.w > 1000.0; float life = act ? p.w - 1000.0 : p.w; float age = uTime - p.z;
+  float hv = h21v(vec2(float(i), 5.3));
+  float dD = max(0.8, uDk * min(4.0 + 2.0 * h21v(vec2(float(chain), 3.1)), max(1.2, 0.2 * life))); // v30.19: small breaks: short dense phase; v30.22f x uDk
+  float g = 0.0, r = 0.0, rad = 0.0;
+  if (life > 0.0 && age >= 0.0 && age < life) {
+    if (act) { g = smoothstep(0.0, 0.3, age); rad = 1.2; }
+    else { float dn = 1.0 - smoothstep(dD - 1.0, dD, age), mo = smoothstep(dD - 1.0, dD, age) * (1.0 - smoothstep(dD + 3.0, dD + 6.0, age));
+      g = dn; r = 0.45 * mo * (0.5 + hv); rad = mix(1.3, 2.0, smoothstep(0.0, dD + 5.0, age)); // spreads as it ages
+      // v30.22g: released foam is no longer drawn as whitecap (G: a solid white disc for the whole dense phase,
+      // the medium-range 'pale patches'): G only for ~0.5 s after release, the dense phase goes to the lace (R)
+      if (uFc > 0.5) { r += 0.35 * dn * (0.5 + hv); g = dn * (1.0 - smoothstep(0.2, 0.6, age)); } }
+  }
+  rad *= (0.6 + 0.8 * hv) * clamp(life / 25.0, 0.4, 1.2) * (1.0 + 1.6 * uWk * uWk); // v30.19.1: whitecaps widen with wind (Monahan coverage rises ~U^3.4) // v30.19: patch width follows the break energy (life)
+  vec2 q = p.xy / M; bool ok = rad > 0.0;
+  if (uFine > 0.5) { vec2 da = p.xy - uCam; da -= M * floor(da / M + 0.5); q = fract((uCam + da) / uWin); ok = ok && max(abs(da.x), abs(da.y)) < 0.47 * uWin; }
+  gl_Position = ok ? vec4(q * 2.0 - 1.0, 0.0, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
+  gl_PointSize = clamp(2.0 * rad / uTex, 1.0, 24.0);
+  vI = vec2(r, g * uGk * 2.5) * min(1.0, 2.0 * rad / uTex);
+}`;
+// v30.23 buoy foam trail (Michael t214s1054; GAD Nov 1): splats laid along a fast buoy drag, drawn into the
+// same strand foam layers (G young/dense, R lace) as the breaking foam. Dense for ~2.2 s, then it falls back
+// to residual lace. Each trail point gets 3 jittered round splats across its width (no straight edges).
+// v30.23 trail deposit gain into young foam G (crest splats use 2.5); ?trailg= for tuning against the luma cap
+const TRAIL_GAIN = Number(new URLSearchParams(globalThis.location ? location.search : "").get("trailg")) || 2.5;
+const TRAIL_VS = `#version 300 es
+precision highp float; precision highp int;
+uniform vec4 uTr[64]; uniform vec2 uTrN[64]; uniform int uM; uniform float uL, uTex, uGk, uFine, uWin, uTrG; uniform vec2 uCam;
+out vec2 vI;
+float h21t(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+void main() {
+  int i = gl_VertexID / 3, j = gl_VertexID % 3; vec4 t = uTr[i]; float M = float(uM);
+  float hv = h21t(vec2(float(i), float(j) + 0.37)), hw = h21t(vec2(float(j), float(i) * 1.7));
+  float age = t.z, w = t.w;
+  float lat = (float(j) - 1.0) * 0.33 + (hv - 0.5) * 0.25;                // across the trail (fractions of its width)
+  vec2 xz = t.xy + uTrN[i] * lat * w + vec2(hw - 0.5, hv - 0.5) * 0.2 * w;
+  float dense = (1.0 - smoothstep(1.2, 2.2, age)) * smoothstep(0.0, 0.12, age);
+  float lace = smoothstep(1.4, 2.2, age) * (1.0 - smoothstep(5.0, 11.0, age)) * (0.35 + 0.3 * hw);
+  float rad = w * (0.26 + 0.12 * hv) * (1.0 + 0.25 * smoothstep(0.0, 2.2, age));
+  vec2 p = fract(xz / uL + 0.5) * M; vec2 q = p / M; bool ok = w > 0.0 && (dense + lace) > 0.002;
+  if (uFine > 0.5) { vec2 da = p - uCam; da -= M * floor(da / M + 0.5); q = fract((uCam + da) / uWin); ok = ok && max(abs(da.x), abs(da.y)) < 0.47 * uWin; }
+  gl_Position = ok ? vec4(q * 2.0 - 1.0, 0.0, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
+  gl_PointSize = clamp(2.0 * rad / uTex, 1.0, 64.0);
+  vI = vec2(lace, dense * uTrG * uGk) * min(1.0, 2.0 * rad / uTex);
+}`;
+const STRAND_PT_FS = `#version 300 es
+precision highp float;
+in vec2 vI; out vec4 o;
+void main() { float r = 2.0 * length(gl_PointCoord - 0.5); o = vec4(vI * exp(-3.0 * r * r) * (1.0 - smoothstep(0.85, 1.0, r)), 0.0, 1.0); }`;
+const STRAND_FS = `#version 300 es
+precision highp float;
+in vec2 vI; out vec4 o;
+void main() { o = vec4(vI, 0.0, 1.0); }`;
+
+// v30.4 boat buoyancy: the sea height at up to 16 world points (bilinear on tA, the FFT tile wraps).
+const PROBE_FS = HEADER + `
+uniform sampler2D tA;
+uniform vec2 uPts[16];
+uniform vec2 uPts2[16]; // v30.21: on-sea UI points (buoy)
+uniform vec4 uSec;      // cross-section line x0, z0, x1, z1 (v30.22b: texels 20..83, 4 samples each)
+uniform sampler2D tG;   // v30.21: break flag (.w) for the section
+uniform float uTile;
+out vec4 o;
+vec4 aAt(ivec2 c) { return texelFetch(tA, (c % uN + uN) % uN, 0); }
+void main() {
+  int k = int(gl_FragCoord.x);
+  float sp = uTile / float(uN);
+  if (k < 20) {
+    vec2 pt = k < 16 ? uPts[k] : uPts2[k - 16];
+    vec2 u = (pt + 0.5 * uTile) / sp; vec2 i0 = floor(u); vec2 f = u - i0; ivec2 c = ivec2(i0);
+    o = mix(mix(aAt(c), aAt(c + ivec2(1, 0)), f.x), mix(aAt(c + ivec2(0, 1)), aAt(c + ivec2(1, 1)), f.x), f.y);
+    return;
+  }
+  // v30.22b: the 256-sample cross-section packed 4 per texel (64 texels = 1 KB): each channel is the
+  // height + 1000 where the break flag is set.
+  vec4 r = vec4(0.0);
+  for (int j = 0; j < 4; j += 1) {
+    int i = (k - 20) * 4 + j;
+    vec2 pt = mix(uSec.xy, uSec.zw, float(i) / 255.0);
+    vec2 u = (pt + 0.5 * uTile) / sp; vec2 i0 = floor(u); vec2 f = u - i0; ivec2 c = ivec2(i0);
+    float h = mix(mix(aAt(c).x, aAt(c + ivec2(1, 0)).x, f.x), mix(aAt(c + ivec2(0, 1)).x, aAt(c + ivec2(1, 1)).x, f.x), f.y);
+    ivec2 q = ivec2(floor(u + 0.5));
+    float fl = texelFetch(tG, (q % uN + uN) % uN, 0).w > 0.0 ? 1000.0 : 0.0;
+    r[j] = h + fl;
+  }
+  o = r;
+}`;
+
 // v27.2: is any join record (tJ.w) within JOIN_REACH cells (Chebyshev) of this texel?
 // Separable max: along x (uAxis 0, from tJ.w) then along z (uAxis 1, from the x pass).
 // Paint runs its joined loop only where it is: every join offset that loop tries is at
@@ -670,6 +1147,234 @@ void main() {
   o = best;
 }`;
 
+// v30.22c curl field (Michael: "realistic curls"). Four small passes on the physics grid, after the
+// break detector (physL, whose .w carries the break's onset age at crests):
+//   curlSrc   crest cells (height max along the travel grid axis A) -> (1, curling, curling*phase, curling*h)
+//   curlJoin  each crest cell walks along its OWN crest line (next column across travel, crest found
+//             within +-2 cells) for CURL_JR steps each way and Gaussian-averages the curl share, phase
+//             and crest height: one breaker = one long lip that tapers at both ends, no per-cell segments.
+//             Out: crest cells (amp, phase, lip height Hc, sub-cell crest offset), others (-1, 0, 0, 0).
+//   curlField crest cells as above; front-face cells find their crest upwind and store the cavity under
+//             the lip (-1 - cav) and the landing foam source (.y) where the lip comes down.
+//   curlList  per column across travel, the first CURL_SLOTS curling crest cells (the lip draw's instances).
+export const CURL_SLOTS = 12;
+// v30.22e curl size boost: true size (1) up close, rising smoothly to 2 (<= 20 m/s) .. 3 (25 m/s) at the
+// medium camera (~250 m), so lips still read from there. ?curlx= fixes it (no camera dependence).
+export function curlX(cq, U) {
+  if (cq.has("curlx")) return Number(cq.get("curlx"));
+  const far = 2.0 + Math.min(1, Math.max(0, (U - 20) / 5));
+  const d = Number(globalThis.__oceanCamDistFn ? globalThis.__oceanCamDistFn() : globalThis.__oceanCamDist) || 250, t = Math.min(1, Math.max(0, (d - 70) / 160));
+  return 1 + (far - 1) * t * t * (3 - 2 * t);
+}
+export const CURL_SHAPE_GLSL = `
+// lip profile (forward, up) from the crest top, s 0 root -> 1 tip; ph = time since onset / T
+float curlEnv(float ph) { return smoothstep(0.0, 0.12, ph) * (1.0 - smoothstep(1.1, 1.5, ph)); }
+// tg (0..1): how much bigger the lip is than the drop its wave allows (v30.22e): a tighter, rounder curl
+// (smaller radius, more fold, much shorter forward throw) instead of a flat plank
+vec2 curlAtT(float s, float ph, float Hc, float amp, float tg) {
+  float am = smoothstep(0.0, 0.45, amp); // shape is full over most of the breaker; only its ends shrink
+  float R = 0.5 * Hc * mix(0.55, 1.0, am) * mix(1.0, 0.8, tg);
+  float th = mix(0.5, 2.7, smoothstep(0.0, 0.85, ph)) * mix(0.6, 1.0, am) * (1.0 + 0.3 * tg);
+  float a0 = 0.3, phi = s * th;
+  float thr = 0.6 * Hc * smoothstep(0.1, 0.8, ph) * am * (1.0 - 0.55 * tg);
+  vec2 q = vec2(mix(1.3, 1.0, tg) * R * (sin(a0) - sin(a0 - phi)) + thr * s, R * (cos(a0 - phi) - cos(a0)));
+  q.y -= smoothstep(0.85, 1.4, ph) * s * s * 0.45 * Hc; // collapse: the lip slumps onto the face
+  return q;
+}
+vec2 curlAt(float s, float ph, float Hc, float amp) { return curlAtT(s, ph, Hc, amp, 0.0); }
+float curlTight(float cx, float ph) { return smoothstep(1.2, 2.6, cx) * smoothstep(0.15, 0.5, ph); } // boosted lips curl tighter
+vec2 curlDsT(float s, float ph, float Hc, float amp, float tg) { // d/ds of curlAtT (numerical, smooth)
+  return (curlAtT(min(s + 0.01, 1.0), ph, Hc, amp, tg) - curlAtT(max(s - 0.01, 0.0), ph, Hc, amp, tg)) / (min(s + 0.01, 1.0) - max(s - 0.01, 0.0));
+}
+vec2 curlDs(float s, float ph, float Hc, float amp) { return curlDsT(s, ph, Hc, amp, 0.0); }
+`;
+const CURL_COMMON = `
+uniform ivec2 uAx;   // one grid step downwind along the travel axis
+uniform ivec2 uBx;   // one grid step across (the other axis)
+vec4 tf(sampler2D t, ivec2 q) { return texelFetch(t, (q % uN + uN) % uN, 0); }
+`;
+// per-crest curl clock (seconds since this crest's break onset), carried along with the moving crest:
+// a crest cell takes over the record of the nearest crest cell up to 1 cell ahead / 3 cells behind it in
+// the last step's state (the crest travels downwind). It starts at 0 when the crest starts breaking,
+// keeps counting while it breaks (so the curl plays ONCE per onset) and is cleared after 0.6 s without
+// breaking, so a later, separate break plays again. Out: (crest 1/0, clock or -1, quiet time, 0).
+const CURL_CLOCK_FS = HEADER + CURL_COMMON + `
+uniform sampler2D tA; uniform sampler2D tL; uniform sampler2D tT; uniform float uDt;
+out vec4 o;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  float h = tf(tA, p).x;
+  o = vec4(0.0, -1.0, 0.0, 0.0);
+  if (!(h > 0.0 && h >= tf(tA, p + uAx).x && h > tf(tA, p - uAx).x && h >= tf(tA, p + 2 * uAx).x && h >= tf(tA, p - 2 * uAx).x)) return;
+  bool brk = false;
+  for (int k = -3; k <= 3; k += 1) if (tf(tL, p + k * uAx).x > 0.0) brk = true;
+  vec4 prev = vec4(0.0); bool found = false;
+  for (int d = 0; d < 5; d += 1) {
+    int k = d == 0 ? 0 : d == 1 ? 1 : d == 2 ? -1 : d == 3 ? 2 : 3; // behind (upwind) first
+    vec4 t = tf(tT, p - k * uAx);
+    if (t.x > 0.5) { prev = t; found = true; break; }
+  }
+  float clock = -1.0, quiet = 0.0;
+  if (found && prev.y >= 0.0) {
+    quiet = brk ? 0.0 : prev.z + uDt;
+    clock = quiet > 0.6 ? -1.0 : prev.y + uDt;
+  } else if (brk) clock = 0.0;
+  o = vec4(1.0, clock, quiet, 0.0);
+}`;
+const CURL_PASSES = FQ.get("curl") !== "0"; // v30.22g perf: ?curl=0 skips the curl passes
+let curlIdle = false;
+const CURL_SRC_FS = HEADER + CURL_COMMON + `
+uniform sampler2D tA; uniform sampler2D tT;
+uniform float uU; uniform float uSp; uniform float uK0; uniform float uS; uniform float uX;
+out vec4 o;
+float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vn(vec2 x) { vec2 i = floor(x), f = x - i; f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  float h = tf(tA, p).x, hm = tf(tA, p - uAx).x, hp = tf(tA, p + uAx).x;
+  o = vec4(0.0);
+  if (!(h > 0.0 && h >= hp && h > hm && h >= tf(tA, p + 2 * uAx).x && h >= tf(tA, p - 2 * uAx).x)) return;
+  float den = hm - 2.0 * h + hp;
+  float sub = den < -1e-6 ? clamp(0.5 * (hm - hp) / den, -0.5, 0.5) : 0.0;
+  float hpk = h - 0.25 * (hm - hp) * sub;
+  float age = tf(tT, p).y; // this crest's curl clock (CURL_CLOCK_FS)
+  float gateU = smoothstep(11.5, 13.0, uU);
+  // crest-height bar (m), box-tuned at size 250 (v30.22b): only the top ~10-25% of breaking crests
+  float H0 = uK0 / 0.22 * mix(mix(1.8, 2.4, smoothstep(12.0, 15.0, uU)), 0.35, smoothstep(15.0, 25.0, uU)); // v30.22c: 25 m/s bar 0.45 -> 0.35 m; 15 m/s bar 1.6 -> 2.4 m (a few curls, not ~15)
+  float big = smoothstep(H0, 1.3 * H0, hpk) * gateU;
+  float cur = age >= 0.0 ? big : 0.0;
+  float T = 1.1 + 0.6 * vn(vec2(p) * uSp / 45.0); // each breaker its own pace (1.1-1.7 s)
+  // the lip fits its own wave: it drops at most to the trough ahead and lands before that trough
+  // (profile: drop ~0.81 Hc, reach ~1.28 Hc), else at 25 m/s it plunged into the next wave
+  float hT = hpk, dT = 0.0;
+  for (int k = 1; k <= 24; k += 1) { float hk = tf(tA, p + k * uAx).x; if (hk > hT + 1e-4) break; hT = hk; dT = float(k) * uSp; }
+  float Hc = min(2.0 * uS * hpk, min(1.3 * (hpk - hT) / 0.81, 1.4 * dT / 1.28)); // it13/14: the tip is pulled onto the water ahead (lip sheet), so the drop cap is looser
+  o = vec4(1.0, cur, cur * age / T, cur * Hc * uX); // uX (?curlx=, default 1): optional exaggeration past the wave cap
+}`;
+const CURL_JOIN_FS = HEADER + CURL_COMMON + CURL_SHAPE_GLSL + `
+uniform sampler2D tC; uniform sampler2D tA;
+uniform float uSig; uniform int uR; uniform float uS; uniform int uMinLen;
+out vec4 o;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 s0 = tf(tC, p);
+  if (s0.x < 0.5) { o = vec4(-1.0, 0.0, 0.0, 0.0); return; }
+  float W = 1.0, Wc = s0.y, Wp = s0.z, Wh = s0.w;
+  float dEnd = 99.0; // steps to the nearer end of this curling stretch (the lip tapers to 0 there)
+  if (s0.y < 0.25) dEnd = 0.0;
+  int len = 1; // this breaker's length in columns (to uR each side): short pieces are not drawn (no chips)
+  for (int sd = -1; sd <= 1; sd += 2) {
+    ivec2 q = p; bool alive = true; bool run = s0.y >= 0.25; int miss = 0, low = 0;
+    for (int j = 1; j <= 16; j += 1) {
+      if (j > uR) break;
+      float w = exp(-0.5 * float(j * j) / (uSig * uSig));
+      W += w;
+      if (!alive) continue;
+      ivec2 b = q + sd * uBx; bool found = false; vec4 s = vec4(0.0);
+      for (int d = 0; d < 7; d += 1) {
+        int dd = (d + 1) / 2 * (d % 2 == 1 ? 1 : -1);
+        ivec2 t = b + dd * uAx; vec4 st = tf(tC, t);
+        if (st.x > 0.5) { q = t; s = st; found = true; break; }
+      }
+      // one missing column or one weak crest cell inside a breaker does not split it (it2 lobes)
+      if (!found) { miss += 1; q = b; if (miss >= 2) { alive = false; if (run) { dEnd = min(dEnd, float(j) - 2.0); run = false; } } continue; }
+      miss = 0;
+      if (run) { low = s.y < 0.25 ? low + 1 : 0; if (low >= 2) { dEnd = min(dEnd, float(j) - 2.0); run = false; } }
+      if (run) len += 1;
+      Wc += w * s.y; Wp += w * s.z; Wh += w * s.w;
+    }
+  }
+  float frac = Wc / W;
+  float ph = Wc > 1e-4 ? Wp / Wc : 0.0, hk = Wc > 1e-4 ? Wh / Wc : 0.0;
+  float amp = smoothstep(0.3, 0.7, frac) * curlEnv(ph) * smoothstep(0.0, uSig, max(dEnd, 0.0) + 0.5);
+  if (len < uMinLen) amp = 0.0;
+  float h = tf(tA, p).x, hm = tf(tA, p - uAx).x, hp = tf(tA, p + uAx).x;
+  float den = hm - 2.0 * h + hp;
+  float sub = den < -1e-6 ? clamp(0.5 * (hm - hp) / den, -0.5, 0.5) : 0.0;
+  o = vec4(amp, ph, hk, sub);
+}`;
+// second, short smoothing along the same crest line (sigma ~1.5 cells) of the joined amp/phase/height,
+// so neighbouring columns never step (no saw-tooth on the lip edge)
+const CURL_SMOOTH_FS = HEADER + CURL_COMMON + `
+uniform sampler2D tC; uniform sampler2D tJ; uniform float uSig;
+out vec4 o;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 j0 = tf(tJ, p);
+  if (j0.x < 0.0) { o = j0; return; }
+  float W = 1.0, Wa = j0.x, Wq = j0.x + 1e-4, Wp = j0.y * (j0.x + 1e-4), Wh = j0.z * (j0.x + 1e-4);
+  float Wo = 1.0, Oo = j0.w; // it18: the crest line's position along travel, smoothed (no saw-tooth where the crest steps a cell)
+  for (int sd = -1; sd <= 1; sd += 2) {
+    ivec2 q = p; bool alive = true;
+    for (int j = 1; j <= 7; j += 1) {
+      float w = exp(-0.5 * float(j * j) / (uSig * uSig));
+      W += w;
+      if (!alive) continue;
+      ivec2 b = q + sd * uBx; bool found = false;
+      for (int d = 0; d < 7; d += 1) {
+        int dd = (d + 1) / 2 * (d % 2 == 1 ? 1 : -1);
+        ivec2 t = b + dd * uAx;
+        if (tf(tC, t).x > 0.5) { q = t; found = true; break; }
+      }
+      if (!found) { q = b; alive = false; continue; }
+      vec4 jj = tf(tJ, q);
+      float a = max(jj.x, 0.0), wa = w * (a + 1e-4);
+      Wa += w * a; Wq += wa; Wp += wa * jj.y; Wh += wa * jj.z;
+      ivec2 dq = q - p; Wo += w; Oo += w * (float(dq.x * uAx.x + dq.y * uAx.y) + jj.w);
+    }
+  }
+  o = vec4(Wa / W, Wp / Wq, Wh / Wq, clamp(Oo / Wo, -2.0, 2.0));
+}`;
+const CURL_FIELD_FS = HEADER + CURL_COMMON + CURL_SHAPE_GLSL + `
+uniform sampler2D tJ; uniform float uSp; uniform int uK; uniform float uX;
+uniform sampler2D tC0; uniform int uAxisX; // v30.22g: column scan (no curling crest in this column -> nothing to search)
+out vec4 o;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 c = tf(tJ, p);
+  if (c.x >= 0.0) { o = c; return; }
+  o = vec4(-1.0, 0.0, 0.0, 0.0);
+  if (texelFetch(tC0, ivec2(uAxisX == 1 ? p.y : p.x, 0), 0).x < 0.0) return;
+  for (int k = 1; k <= 24; k += 1) {
+    if (k > uK) break;
+    vec4 j = tf(tJ, p - k * uAx);
+    if (j.x < 0.0) continue;
+    if (j.x > 0.01) {
+      float dist = (float(k) + j.w) * uSp, ph = j.y, Hc = j.z;
+      float xt = curlAtT(1.0, ph, Hc, j.x, curlTight(uX, ph)).x; // same (tightened) reach as the lip sheet
+      float cav = j.x * smoothstep(0.1, 0.5, ph) * smoothstep(0.0, 0.2 * xt, dist) * (1.0 - smoothstep(0.7 * xt, 0.95 * xt, dist)); // it15: no shadow beyond the landing line (read as a sheet hanging over darker water)
+      float land = smoothstep(0.6, 0.85, ph) * (1.0 - smoothstep(1.3, 1.6, ph)) * exp(-pow((dist - xt) / (0.35 * Hc + uSp), 2.0)) * min(1.0, 3.0 * j.x + 0.5);
+      o = vec4(-1.0 - cav, land, 0.0, 0.0);
+    }
+    break;
+  }
+}`;
+// v30.22g perf: one scan per crest column (N fragments) collects the first CURL_SLOTS curling crests into
+// three RGBA rows (-1 = none); curlList and curlField read it instead of each scanning the whole column
+// (curlList was CURL_SLOTS x N fragments x N texels; curlField walked up to 24 cells upwind in every column).
+const CURL_COL_FS = HEADER + CURL_COMMON + `
+uniform sampler2D tJ; uniform int uAxisX;
+layout(location = 0) out vec4 o0; layout(location = 1) out vec4 o1; layout(location = 2) out vec4 o2;
+void main() {
+  int u = int(gl_FragCoord.x); int cnt = 0; float s[12];
+  for (int i = 0; i < 12; i++) s[i] = -1.0;
+  for (int v = 0; v < 2048; v += 1) {
+    if (v >= uN || cnt >= ${CURL_SLOTS}) break;
+    ivec2 c = uAxisX == 1 ? ivec2(v, u) : ivec2(u, v);
+    if (texelFetch(tJ, c, 0).x > 0.01) { s[cnt] = float(v); cnt += 1; }
+  }
+  o0 = vec4(s[0], s[1], s[2], s[3]); o1 = vec4(s[4], s[5], s[6], s[7]); o2 = vec4(s[8], s[9], s[10], s[11]);
+}`;
+const CURL_LIST_FS = HEADER + CURL_COMMON + `
+uniform sampler2D tC0; uniform sampler2D tC1; uniform sampler2D tC2; uniform int uAxisX; // v30.22g: from the column scan (CURL_COL_FS)
+out vec4 o;
+void main() {
+  int k = int(gl_FragCoord.x), u = int(gl_FragCoord.y);
+  vec4 r = k < 4 ? texelFetch(tC0, ivec2(u, 0), 0) : k < 8 ? texelFetch(tC1, ivec2(u, 0), 0) : texelFetch(tC2, ivec2(u, 0), 0);
+  o = vec4(r[k % 4]);
+}`;
+
 const REDUCE_FS = HEADER + `
 uniform sampler2D tL;
 uniform sampler2D tC;
@@ -682,19 +1387,22 @@ void main() {
   vec4 c = vec4(0.0);
   float recent = 0.0;
   float maxSlope = 0.0;
+  float visible = 0.0; // v30.20: cells whose foam is visibly white (grade x fade >= FOAM_VIS)
   for (int dz = 0; dz < ${BLOCK}; dz += 1) {
     for (int dx = 0; dx < ${BLOCK}; dx += 1) {
       ivec2 q = base + ivec2(dx, dz);
       if (!inside(q)) continue;
       bool flagged = texelFetch(tG, q, 0).w > 0.0;
-      bool foam = texelFetch(tF, q, 0).w > 0.0;
+      float fw = texelFetch(tF, q, 0).w;
+      bool foam = fw > 0.0;
+      if (fw >= ${FOAM_VIS.toFixed(3)}) visible += 1.0;
       c += vec4(texelFetch(tL, q, 0).x > 0.0 ? 1.0 : 0.0, flagged ? 1.0 : 0.0, foam ? 1.0 : 0.0, foam && !flagged ? 1.0 : 0.0);
       if (texelFetch(tG, q, 0).z > 0.0) recent += 1.0;
       maxSlope = max(maxSlope, texelFetch(tC, q, 0).w);
     }
   }
   oCount = c;
-  oMore = vec4(recent, maxSlope, 0.0, 0.0);
+  oMore = vec4(recent, maxSlope, visible, 0.0);
 }`;
 
 function compile(gl, type, source, name) {
@@ -707,9 +1415,9 @@ function compile(gl, type, source, name) {
   return shader;
 }
 
-function makeProgram(gl, fs, name) {
+function makeProgram(gl, fs, name, vs) {
   const program = gl.createProgram();
-  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, QUAD_VS, name + " vertex"));
+  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, vs || QUAD_VS, name + " vertex"));
   gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fs, name));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`GPU physics: ${name} link failed: ${gl.getProgramInfoLog(program)}`);
@@ -737,6 +1445,7 @@ export function createGpuSurface(gl, scenario, wind) {
   if (problem) throw new Error("GPU physics unavailable: " + problem);
   // The physics grid is the FFT tile: N x N over scenario.size (spacing size / N).
   const n = scenario.fft || 256;
+  const M = Math.min(1024, n * Number(FQ.get("fgrid") || 2)); // v30.8 foam grid (finer than the physics grid)
   const sea = createFftSea(gl, n);
   let seaAcc = 0;
   const bands = scenario.bands.map(createBand);
@@ -757,23 +1466,45 @@ export function createGpuSurface(gl, scenario, wind) {
     join: makeProgram(gl, JOIN_FS, "join"),
     paint: makeProgram(gl, PAINT_FS, "paint"),
     age: makeProgram(gl, AGE_FS, "age"),
+    cover: makeProgram(gl, COVER_FS, "cover"),
+    probe: makeProgram(gl, PROBE_FS, "probe"),
+    covstat: makeProgram(gl, COVSTAT_FS, "covstat"),
+    longh: makeProgram(gl, LONGH_FS, "longh"),
+    strandUpd: makeProgram(gl, STRAND_UPD_FS, "strandUpd"),
+    strandDraw: makeProgram(gl, STRAND_FS, "strandDraw", STRAND_VS),
+    strandPts: makeProgram(gl, STRAND_PT_FS, "strandPts", STRAND_PT_VS),
+    foamTrail: makeProgram(gl, STRAND_PT_FS, "foamTrail", TRAIL_VS),
+    strandDecay: makeProgram(gl, "#version 300 es\nprecision highp float; uniform float uK; out vec4 o; void main() { o = vec4(0.0, uK, 0.0, 1.0); }", "strandDecay"),
     jmask: makeProgram(gl, JMASK_FS, "jmask"),
     joinpaint: makeProgram(gl, JOINPAINT_FS, "joinpaint"),
     reduce: makeProgram(gl, REDUCE_FS, "reduce"),
+    curlClock: makeProgram(gl, CURL_CLOCK_FS, "curlClock"),
+    curlSrc: makeProgram(gl, CURL_SRC_FS, "curlSrc"),
+    curlJoin: makeProgram(gl, CURL_JOIN_FS, "curlJoin"),
+    curlSmooth: makeProgram(gl, CURL_SMOOTH_FS, "curlSmooth"),
+    curlField: makeProgram(gl, CURL_FIELD_FS, "curlField"),
+    curlList: makeProgram(gl, CURL_LIST_FS, "curlList"),
+    curlCol: makeProgram(gl, CURL_COL_FS, "curlCol"),
   };
   for (const [k, v] of Object.entries(programs)) v.name = k;
   initPassTimer(gl);
   const vao = gl.createVertexArray();
 
-  function texture(size, data) {
+  function texture(size, data, h = size) {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, size, size);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, size, h);
     for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     if (data) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, size, size, gl.RGBA, gl.FLOAT, data);
     return tex;
+  }
+  function layerTarget(t, layer) {
+    const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, t, 0, layer); gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("GPU physics: strand layer target incomplete");
+    return { fb };
   }
   function target(textures) {
     const fb = gl.createFramebuffer();
@@ -793,6 +1524,17 @@ export function createGpuSurface(gl, scenario, wind) {
     A: texture(n), B: texture(n), C: texture(n), L: texture(n), J: texture(n), P: texture(n),
     S: [texture(n, start), texture(n, start)],
     F: texture(n), G: texture(n), X: texture(n),
+    K: [texture(M), texture(M)],
+    HL: (() => { const t = texture(64); gl.bindTexture(gl.TEXTURE_2D, t); gl.getExtension("OES_texture_float_linear");
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT); return t; })(),
+    SP: [texture(256, undefined, STRAND_ROWS), texture(256, undefined, STRAND_ROWS)], // v30.19.2: 256 x (chains/16)
+    // v30.14: one 1024^2 x 2 array (layer 0 = whole-tile strands, layer 1 = camera fine window) so the
+    // water shader spends one sampler on strands (the Mac's 16-unit fragment limit).
+    STR: (() => { const t = gl.createTexture(); const T = gl.TEXTURE_2D_ARRAY; gl.bindTexture(T, t);
+      gl.texStorage3D(T, 11, gl.RGBA16F, 1024, 1024, 2);
+      gl.texParameteri(T, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(T, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(T, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(T, gl.TEXTURE_WRAP_T, gl.REPEAT); gl.bindTexture(T, null); return t; })(),
   };
   // Until the first step: no foam (fade 1, ahead NO_FOAM_AHEAD), flat water.
   const g0 = new Float32Array(n * n * 4);
@@ -833,6 +1575,7 @@ export function createGpuSurface(gl, scenario, wind) {
   tex.JX = texture(n);
   tex.HX = texture(n);
   tex.JP = texture(n);
+  tex.CT = [texture(n), texture(n)]; tex.CS = texture(n); tex.CJ = texture(n); tex.CJ2 = texture(n); tex.CU = texture(n); tex.CL = texture(CURL_SLOTS, undefined, n); tex.CC = [texture(n, undefined, 1), texture(n, undefined, 1), texture(n, undefined, 1)]; // v30.22c curl field; v30.22g column scan
   const fbs = {
     wave: target([tex.A, tex.B, tex.C, tex.X]),
     rowsum: target([tex.HX]),
@@ -844,8 +1587,34 @@ export function createGpuSurface(gl, scenario, wind) {
     paint: target([tex.P]),
     age: [target([tex.S[1], tex.F, tex.G]), target([tex.S[0], tex.F, tex.G])],
     reduce: target([red.count, red.more]),
+    cover: [target([tex.K[1]]), target([tex.K[0]])],
+    longh: target([tex.HL]),
+    strandUpd: [target([tex.SP[1]]), target([tex.SP[0]])],
+    strandDraw: layerTarget(tex.STR, 0),
+    strandFine: layerTarget(tex.STR, 1),
+    curlClock: [target([tex.CT[1]]), target([tex.CT[0]])], curlSrc: target([tex.CS]), curlJoin: target([tex.CJ]), curlSmooth: target([tex.CJ2]), curlField: target([tex.CU]), curlList: target([tex.CL]), curlCol: target(tex.CC),
   };
+  let kCur = 0;
+  const PROBE_W = 84; // v30.22b: 16 boat + 4 UI (buoy) + 64 cross-section texels (4 samples each, 1 KB); was 288
+  // v30.4 boat probe: 16x1 target, read back asynchronously (one read in flight, never waits)
+  const probeTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, probeTex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, PROBE_W, 1);
+  for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+  const probeFb = target([probeTex]);
+  const probePack = gl.createBuffer();
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, probePack); gl.bufferData(gl.PIXEL_PACK_BUFFER, PROBE_W * 4 * 4, gl.STREAM_READ); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  // v30.7 coverage controller state
+  const covTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, covTex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 16, 16);
+  for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+  const covFb = target([covTex]);
+  const covPack = gl.createBuffer();
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, covPack); gl.bufferData(gl.PIXEL_PACK_BUFFER, 256 * 16, gl.STREAM_READ); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  let covFence = null, covT = 0, covLastT = 0; const cov = { gain: Number(FQ.get("fgain") || 2.0), active: 0, visible: 0, target: 0 };
+  const probeBufs = [new Float32Array(PROBE_W * 4), new Float32Array(PROBE_W * 4)]; let probeBi = 0; const covBuf = new Float32Array(1024); // v30.22g perf: reused readback arrays (no per-frame garbage)
+  let probeFence = null; let probePts = null; let uiPts = new Float32Array(32); let uiSec = [0, 0, 0, 0]; let uiOn = false; const probeOut = { data: null, time: -1 }; let probeTime = 0;
   let current = 0; // tex.S[current] holds the latest foam state
+  let curlAxis = { x: 1, ax: [1, 0], bx: [0, 1] }; let ctCur = 0;
 
   // Panel counts (v27.1): one pixel-pack buffer, one readback in flight at a time.
   // requestCounts() queues readPixels into the buffer (no CPU wait) and drops a fence;
@@ -861,9 +1630,9 @@ export function createGpuSurface(gl, scenario, wind) {
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
   const inFlight = { sync: null, step: -1 };
   const readback = new Float32Array(blocks * blocks * 8);
-  const counts = { step: -1, breakingCount: 0, freshCount: 0, foamCount: 0, lingerCount: 0, recentCount: 0, maxSlope: 0 };
+  const counts = { step: -1, breakingCount: 0, freshCount: 0, foamCount: 0, lingerCount: 0, recentCount: 0, maxSlope: 0, visibleCount: 0 };
   function absorb(data, step) {
-    let breaking = 0, fresh = 0, foam = 0, linger = 0, recent = 0, maxSlope = 0;
+    let breaking = 0, fresh = 0, foam = 0, linger = 0, recent = 0, maxSlope = 0, visible = 0;
     const half = blocks * blocks * 4;
     for (let i = 0; i < blocks * blocks; i += 1) {
       breaking += data[i * 4];
@@ -872,8 +1641,9 @@ export function createGpuSurface(gl, scenario, wind) {
       linger += data[i * 4 + 3];
       recent += data[half + i * 4];
       maxSlope = Math.max(maxSlope, data[half + i * 4 + 1]);
+      visible += data[half + i * 4 + 2];
     }
-    Object.assign(counts, { step, breakingCount: breaking, freshCount: fresh, foamCount: foam, lingerCount: linger, recentCount: recent, maxSlope });
+    Object.assign(counts, { step, breakingCount: breaking, freshCount: fresh, foamCount: foam, lingerCount: linger, recentCount: recent, maxSlope, visibleCount: visible });
   }
   function poll() {
     let landed = false;
@@ -935,10 +1705,10 @@ export function createGpuSurface(gl, scenario, wind) {
     }
     gl.activeTexture(gl.TEXTURE0);
   }
-  function run(prog, target, size, inputs, set) {
+  function run(prog, target, size, inputs, set, h = size) {
     gl.useProgram(prog.program);
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
-    gl.viewport(0, 0, size, size);
+    gl.viewport(0, 0, size, h);
     if (prog.uniforms.uN) gl.uniform1i(prog.uniforms.uN, n);
     bindInputs(prog, inputs);
     if (set) set(prog.uniforms);
@@ -954,6 +1724,50 @@ export function createGpuSurface(gl, scenario, wind) {
   let lastDepth = 40;
   let last = null;
 
+  let spCur = 0, strandSp = 1, strandDt = 0; const strandFine = { win: 128, on: false };
+  function drawStrands() {
+    if (!STRANDS) return;
+    const P = programs.strandDraw;
+    const L = scenario.size, win = L / Math.max(1, Math.round(L / 256));  // fine window (m, ~256 m = 0.25 m texels), divides the tile
+    const cam = globalThis.__oceanCam || [0, 0];
+    strandFine.win = win; strandFine.on = FINE;
+    for (const fine of FINE ? [false, true] : [false]) {
+    gl.useProgram(P.program); gl.bindFramebuffer(gl.FRAMEBUFFER, fine ? fbs.strandFine.fb : fbs.strandDraw.fb); gl.viewport(0, 0, 1024, 1024);
+    gl.uniform1f(P.uniforms.uFine, fine ? 1 : 0); gl.uniform1f(P.uniforms.uGain, 1); gl.uniform1f(P.uniforms.uFil, fine ? FILAMENTS : 1); // v30.18.2: no 2x gain (it saturated opacity)
+    gl.uniform1f(P.uniforms.uTex, fine ? (win / 1024) : (L / 1024));  // metres per texel of this layer
+    gl.uniform1f(P.uniforms.uWin, win / L * M);
+    gl.uniform2f(P.uniforms.uCam, (((cam[0] / L + 0.5) % 1 + 1) % 1) * M, (((cam[1] / L + 0.5) % 1 + 1) % 1) * M);
+    // v30.11: G (whitecap) persists as a trail behind the riding chains, e-folding over uTrail; R (lace) redrawn
+    { const D = programs.strandDecay; gl.useProgram(D.program); gl.uniform1f(D.uniforms.uK, Math.exp(-Math.max(strandDt, 0) / STRAND_TRAIL));
+      gl.enable(gl.BLEND); gl.blendFunc(gl.ZERO, gl.SRC_COLOR); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.disable(gl.BLEND); gl.useProgram(P.program); }
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, tex.SP[spCur]); gl.uniform1i(P.uniforms.tS, 4); gl.activeTexture(gl.TEXTURE0);
+    gl.uniform1i(P.uniforms.uM, M); gl.uniform1f(P.uniforms.uTime, simTimeCover || 0);
+    gl.uniform1f(P.uniforms.uSeg, 4.0 * (0.03 * wind.speed * wind.speed / 15) / strandSp * (M / n)); // tear at 4x rest length (fine cells)
+    gl.uniform1f(P.uniforms.uYoung, 1.3); gl.uniform1f(P.uniforms.uDk, foamDenseK(wind.speed, scenario.size)); gl.uniform1f(P.uniforms.uFc, FCOV ? 1 : 0);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+    gl.drawArraysInstanced(gl.LINES, 0, STRAND_CHAINS * 15 * 2, fine ? FILAMENTS : 1);
+    if (SPLATS) { const Q = programs.strandPts; gl.useProgram(Q.program); const QU = Q.uniforms;
+      gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, tex.SP[spCur]); gl.uniform1i(QU.tS, 4); gl.activeTexture(gl.TEXTURE0);
+      gl.uniform1i(QU.uM, M); gl.uniform1f(QU.uTime, simTimeCover || 0); gl.uniform1f(QU.uTex, fine ? (win / 1024) : (L / 1024));
+      gl.uniform1f(QU.uGk, FC_WG * (1 - Math.exp(-Math.max(strandDt, 0) / STRAND_TRAIL))); gl.uniform1f(QU.uFine, fine ? 1 : 0); gl.uniform1f(QU.uWk, Math.min(1, Math.max(0, (wind.speed - 10) / 15))); gl.uniform1f(QU.uWin, win / L * M); gl.uniform1f(QU.uDk, foamDenseK(wind.speed, scenario.size)); gl.uniform1f(QU.uFc, FCOV ? 1 : 0);
+      gl.uniform2f(QU.uCam, (((cam[0] / L + 0.5) % 1 + 1) % 1) * M, (((cam[1] / L + 0.5) % 1 + 1) % 1) * M);
+      gl.drawArrays(gl.POINTS, 0, STRAND_CHAINS * 16); gl.useProgram(P.program); }
+    { const tr = globalThis.__oceanFoamTrail; // v30.23 buoy foam trail
+      if (tr && tr.n > 0) { const Q = programs.foamTrail, QU = Q.uniforms; gl.useProgram(Q.program);
+        gl.uniform4fv(QU.uTr, tr.pts); gl.uniform1f(QU.uTrG, TRAIL_GAIN); gl.uniform2fv(QU.uTrN, tr.nrm); gl.uniform1i(QU.uM, M); gl.uniform1f(QU.uL, L); gl.uniform1f(QU.uTex, fine ? (win / 1024) : (L / 1024));
+        gl.uniform1f(QU.uGk, 1 - Math.exp(-Math.max(strandDt, 0) / STRAND_TRAIL)); gl.uniform1f(QU.uFine, fine ? 1 : 0); gl.uniform1f(QU.uWin, win / L * M);
+        gl.uniform2f(QU.uCam, (((cam[0] / L + 0.5) % 1 + 1) % 1) * M, (((cam[1] / L + 0.5) % 1 + 1) % 1) * M);
+        gl.drawArrays(gl.POINTS, 0, tr.n * 3); gl.useProgram(P.program); } }
+    { const sp = globalThis.__oceanRippleSplash; // v30.27 short touch-ripple foam ring
+      if (sp && sp.n > 0) { const Q = programs.foamTrail, QU = Q.uniforms; gl.useProgram(Q.program);
+        gl.uniform4fv(QU.uTr, sp.pts); gl.uniform1f(QU.uTrG, 1.15); gl.uniform2fv(QU.uTrN, sp.nrm); gl.uniform1i(QU.uM, M); gl.uniform1f(QU.uL, L); gl.uniform1f(QU.uTex, fine ? (win / 1024) : (L / 1024));
+        gl.uniform1f(QU.uGk, 1 - Math.exp(-Math.max(strandDt, 0) / STRAND_TRAIL)); gl.uniform1f(QU.uFine, fine ? 1 : 0); gl.uniform1f(QU.uWin, win / L * M);
+        gl.uniform2f(QU.uCam, (((cam[0] / L + 0.5) % 1 + 1) % 1) * M, (((cam[1] / L + 0.5) % 1 + 1) % 1) * M);
+        gl.drawArrays(gl.POINTS, 0, sp.n * 3); gl.useProgram(P.program); } }
+    gl.disable(gl.BLEND);
+    }
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex.STR); gl.generateMipmap(gl.TEXTURE_2D_ARRAY); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+  }
   function step(time, dt, depth) {
     timeEmpty();
     lastDepth = depth;
@@ -1077,12 +1891,33 @@ export function createGpuSurface(gl, scenario, wind) {
       if (u.uDepthEta) gl.uniform1f(u.uDepthEta, ampScale < 1 ? 0.06 * lastDepth : 1e9 /* TUNED: short-wave crest elevation >= 0.06 d (0.3 m at 6 m gave 169 breaking, 0.6 m 12, 1.5 m 0) */);
       gl.uniform4f(u.uBrk, brk.mode, brk.ak, brk.rb, brk.ts); gl.uniform1f(u.uBrkLg, brk.lg ?? 1); gl.uniform2f(u.uBrkMod, brk.M || 0, brk.kL || 0);
       gl.uniform1f(u.uSpacing, spacing);
-      gl.uniform4f(u.uTransl, TRANSLUCENCY.skin, TRANSLUCENCY.length, TRANSLUCENCY.maxThickness, Number(new URLSearchParams(typeof location !== "undefined" ? location.search : "").get("wgC") ?? 0));
-      { const q = new URLSearchParams(typeof location !== "undefined" ? location.search : ""); /* lip-width rule loosened with wind: at 25 m/s the lips are longer along travel and the
+      gl.uniform4f(u.uTransl, TRANSLUCENCY.skin, TRANSLUCENCY.length, TRANSLUCENCY.maxThickness, Number(FQ.get("wgC") ?? 0));
+      { const q = FQ; /* lip-width rule loosened with wind: at 25 m/s the lips are longer along travel and the
         forward edge's Jacobian fall is shallower (run 3 -> 5 cells, edge tolerance 0 -> -0.1; GAD option B) */
         const hw = Math.min(1, Math.max(0, (wind.speed - 17.5) / 7.5));
         gl.uniform4f(u.uWidth, Number(q.get("wgD") ?? 3 + 2 * hw), Number(q.get("wgJ") ?? -0.1 * hw), Number(q.get("wgF") ?? 0.2), Number(q.get("wgM") ?? 4)); gl.uniform2f(u.uOpt, Number(q.get("wgS") ?? 0), Number(q.get("wgG") ?? 0)); }
     });
+    if (CURL_PASSES && wind.speed >= 11.4) { // v30.22c curl field (see CURL_SRC_FS)
+      const axX = Math.abs(tx) >= Math.abs(tz) ? 1 : 0;
+      const ax = axX ? [Math.sign(tx) || 1, 0] : [0, Math.sign(tz) || 1], bx = axX ? [0, 1] : [1, 0];
+      const cq = FQ;
+      const curlS = Number(cq.get("curls") ?? 1.0) * (1 + 1.0 * Math.min(1, Math.max(0, (wind.speed - 15) / 10))); // lip size / crest-to-trough (capped by the wave itself)
+      const setAx = (u) => { gl.uniform2i(u.uAx, ax[0], ax[1]); if (u.uBx) gl.uniform2i(u.uBx, bx[0], bx[1]); };
+      curlAxis = { x: axX, ax, bx }; globalThis.__oceanCurlAxis = curlAxis;
+      run(programs.curlClock, fbs.curlClock[ctCur], n, { tA: tex.A, tL: tex.L, tT: tex.CT[ctCur] }, (u) => { setAx(u); gl.uniform1f(u.uDt, Math.max(dt, 0)); });
+      ctCur = 1 - ctCur;
+      run(programs.curlSrc, fbs.curlSrc, n, { tA: tex.A, tT: tex.CT[ctCur] }, (u) => { setAx(u); gl.uniform1f(u.uU, wind.speed); gl.uniform1f(u.uSp, spacing); gl.uniform1f(u.uK0, Number(cq.get("curlk") ?? 0.22)); gl.uniform1f(u.uS, curlS); const cx = curlX(cq, wind.speed); globalThis.__oceanCurlXPhys = cx; gl.uniform1f(u.uX, cx); });
+      run(programs.curlJoin, fbs.curlJoin, n, { tC: tex.CS, tA: tex.A }, (u) => { setAx(u); gl.uniform1f(u.uSig, Math.max(1.5, Number(cq.get("curlsig") ?? 4.0) / spacing)); gl.uniform1i(u.uR, Math.min(16, Math.ceil(2.5 * Math.max(1.5, Number(cq.get("curlsig") ?? 4.0) / spacing)))); gl.uniform1i(u.uMinLen, Math.ceil(Number(cq.get("curlmin") ?? 10) / spacing)); });
+      run(programs.curlSmooth, fbs.curlSmooth, n, { tC: tex.CS, tJ: tex.CJ }, (u) => { setAx(u); gl.uniform1f(u.uSig, Math.max(1.0, 2.5 / spacing)); });
+      run(programs.curlCol, fbs.curlCol, n, { tJ: tex.CJ2 }, (u) => { setAx(u); gl.uniform1i(u.uAxisX, axX); }, 1);
+      run(programs.curlField, fbs.curlField, n, { tJ: tex.CJ2, tC0: tex.CC[0] }, (u) => { setAx(u); gl.uniform1i(u.uAxisX, axX); gl.uniform1f(u.uSp, spacing); gl.uniform1i(u.uK, Math.min(24, Math.ceil(12 / spacing))); gl.uniform1f(u.uX, curlX(cq, wind.speed)); });
+      run(programs.curlList, fbs.curlList, CURL_SLOTS, { tC0: tex.CC[0], tC1: tex.CC[1], tC2: tex.CC[2] }, (u) => { setAx(u); gl.uniform1i(u.uAxisX, axX); }, n);
+      curlIdle = false;
+    } else if (!curlIdle) { // v30.22g perf: no curls (?curl=0, or below the 11.5 m/s gate): skip the curl passes, clear their outputs once
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbs.curlField.fb); gl.clearBufferfv(gl.COLOR, 0, [-1, 0, 0, 0]);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbs.curlList.fb); gl.clearBufferfv(gl.COLOR, 0, [-1, -1, -1, -1]);
+      curlIdle = true;
+    }
     run(programs.join, fbs.join, n, { tL: tex.L, tC: tex.C }, setOffsets);
     run(programs.jmask, fbs.jmaskX, n, { tJ: tex.J }, (u) => gl.uniform1i(u.uAxis, 0));
     run(programs.jmask, fbs.jmask, n, { tJ: tex.JX }, (u) => gl.uniform1i(u.uAxis, 1));
@@ -1105,6 +1940,88 @@ export function createGpuSurface(gl, scenario, wind) {
       gl.uniform1f(u.uNoAhead, NO_FOAM_AHEAD);
     });
     current = 1 - current;
+    { // v30c coverage (see COVER_FS)
+      const drift = 0.03 * wind.speed + 0.25; // m/s: wind drift ~3% of U10 plus a little Stokes drift
+      const wd = wind.direction;
+      const lpEff = Math.min(0.877 * wind.speed * wind.speed, 0.5 * L); // peak wavelength, capped by the box
+      run(programs.longh, fbs.longh, 64, { tA: tex.A }, (u) => gl.uniform1f(u.uSig, 0.12 * lpEff / spacing));
+      run(programs.cover, fbs.cover[kCur], M, { tP: tex.P, tK: tex.K[kCur], tA: tex.A, tHL: tex.HL, tL: tex.L, tCU: tex.CU }, (u) => {
+        gl.uniform1f(u.uLp, lpEff);
+        gl.uniform2f(u.uShift, drift * Math.cos(wd) * dt / spacing, drift * Math.sin(wd) * dt / spacing);
+        gl.uniform1f(u.uDt, Math.max(dt, 0)); gl.uniform1i(u.uM, M);
+        gl.uniform1f(u.uDepth, depth); gl.uniform1f(u.uSp, spacing); gl.uniform2f(u.uWind, Math.cos(wd), Math.sin(wd));
+        gl.uniform1f(u.uTauD, FOAM_TAU_DENSE);
+        gl.uniform1f(u.uTauR, FOAM_TAU_RESID_K * (wind.speed < 15 ? 3.0 + 3.0 * Math.max(0, (wind.speed - 5) / 10) : 6.0 + 9.0 * Math.min(1, (wind.speed - 15) / 10)) * Math.min(1, Math.max(0.45, depth / 6))); // v30.7: residual 6 s at 15 m/s -> 15 s at 25
+        gl.uniform1f(u.uTauD, FOAM_TAU_DENSE * Math.min(1, Math.max(0.5, depth / 4))); // v30.7: only shortened in really shallow water // bubbles hit the bed and degas sooner
+        gl.uniform1f(u.uFeed, FOAM_FEED);
+        gl.uniform1f(u.uTime, simTimeCover = (simTimeCover || 0) + dt);
+        gl.uniform1f(u.uTauA, 15.0 + 15.0 * Math.min(1, Math.max(0, (wind.speed - 10) / 15))); // v30.7: bubble cloud 15-30 s
+        gl.uniform1f(u.uSrc, FOAM_SRC);
+        gl.uniform2f(u.uCrest, -tz, tx);
+        gl.uniform1f(u.uJth, FOAM_JTH);
+        gl.uniform1f(u.uSrcK, wind.speed < 4 ? 0 : cov.gain);
+      });
+      kCur = 1 - kCur;
+      // v30.9 strands (see STRAND_UPD_FS)
+      if (STRANDS) {
+        strandSp = spacing; strandDt = dt;
+        run(programs.strandUpd, fbs.strandUpd[spCur], 256, { tS: tex.SP[spCur], tA: tex.A, tK: tex.K[kCur], tHL: tex.HL, tL: tex.L }, (u) => {
+          gl.uniform1i(u.uM, M); gl.uniform1f(u.uTime, simTimeCover); gl.uniform1f(u.uDt, Math.max(dt, 0)); gl.uniform1f(u.uSp, spacing);
+          gl.uniform1f(u.uLen, 0.03 * wind.speed * wind.speed);
+          { const lp = Math.min(0.877 * wind.speed * wind.speed, 0.5 * L); gl.uniform1f(u.uC, Math.sqrt(9.81 * lp / (2 * Math.PI))); gl.uniform1f(u.uGrow, 0.15 * wind.speed); gl.uniform1f(u.uRideAll, L >= 500 ? 1 : 0); } gl.uniform1f(u.uJth, FOAM_JTH);
+          gl.uniform1f(u.uRate, wind.speed < 4 ? 0 : STRAND_RATE * (4096 / STRAND_CHAINS + (1 - 4096 / STRAND_CHAINS) * Math.min(1, Math.max(0, (wind.speed - 11) / 6))) * (1 + STRAND_BOOST * Math.min(1, Math.max(0, (wind.speed - 15) / 10))) * foamRateK(wind.speed)); // v30.22f x foamRateK // v30.19.2: per-free-chain rate scaled so low winds (free pool never full) spawn as before
+          { // v30.16.1: the chain budget is fixed, so in oceans bigger than ~300 m most spawns go to a ~300 m
+            // window around the camera (same foam density per m² there as in a 250 m ocean)
+            const Ls = scenario.size, cam = globalThis.__oceanCam || [0, 0], win = Math.min(Ls, 300);
+            gl.uniform1f(u.uBias, Ls > 350 ? 1 - (win * win) / (Ls * Ls) * 1.0 - 0.1 : 0);
+            gl.uniform1f(u.uWinN, win / Ls * n);
+            gl.uniform2f(u.uCamN, (((cam[0] / Ls + 0.5) % 1 + 1) % 1) * n, (((cam[1] / Ls + 0.5) % 1 + 1) % 1) * n); }
+          gl.uniform1f(u.uLife, 20.0 + 12.0 * Math.min(1, Math.max(0, (wind.speed - 8) / 17))); // v30.18.2: lace lasts tens of seconds (12-45 s)
+          gl.uniform2f(u.uShift, drift * Math.cos(wd) * dt / spacing, drift * Math.sin(wd) * dt / spacing);
+          gl.uniform2f(u.uWind, Math.cos(wd), Math.sin(wd));
+        }, STRAND_ROWS);
+        spCur = 1 - spCur;
+      }
+    }
+    // v30.7 coverage controller (foam-realism-2 rank 1.4): hold the ACTIVE whitecap share to
+    // W_A(U) = 0.4% (U/10)^2.65 (between Monahan 1980 and Callaghan 2008, active ~1/4-1/3 of total).
+    // Measured on the grid, every ~0.25 s, slow (5 s) log-proportional gain change, clamped.
+    if (covFence && gl.clientWaitSync(covFence, 0, 0) !== gl.TIMEOUT_EXPIRED) {
+      const d = covBuf; gl.bindBuffer(gl.PIXEL_PACK_BUFFER, covPack); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, d); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      gl.deleteSync(covFence); covFence = null;
+      let a = 0, v = 0, fs = 0, fl = 0; for (let i = 0; i < 256; i++) { a += d[i * 4]; v += d[i * 4 + 1]; fs += d[i * 4 + 2]; fl += d[i * 4 + 3]; }
+      cov.active = a / 256; cov.visible = v / 256; cov.foamWc = fs / 256; cov.foamLace = fl / 256; cov.foamSea = cov.foamWc + FOAM_SL * cov.foamLace; // v30.22f: drawn foam share (FOAM SEA)
+      const U = wind.speed; cov.target = U < 4 ? 0 : 0.002 * Math.pow(U / 10, 3.5); // v30.8.1: steeper (rendered/grid share ~2 at low wind) // grid share; ~2x the rendered active share (partial cells)
+      const el = Math.min(1, Math.max(0, covT - covLastT)); covLastT = covT;
+      // v30.8b (Concept): calibration only. It sets the breaking gain for this wind in the first ~25 s
+      // after a wind change, then drifts only very slowly (tau ~ 100 s); foam still only comes from breaking cells.
+      if (cov.wind !== U) { cov.wind = U; cov.since = covT; }
+      const calib = covT - cov.since < 25 ? 1 : 0.05;
+      if (cov.target > 0 && FQ.get("fctrl") !== "0") cov.gain *= Math.exp(Math.max(-1, Math.min(1, Math.log((cov.target + 1e-5) / (cov.active + 1e-5)))) * el * calib / 5);
+      cov.gain = Math.max(0.05, Math.min(3, cov.gain));
+      globalThis.__foamCov = cov;
+    }
+    if (!covFence && time - covT >= 0.25) {
+      run(programs.covstat, covFb, 16, { tK: tex.K[kCur] }, (u) => { gl.uniform1i(u.uM, M);
+        const Ls = scenario.size, cam = globalThis.__oceanCam || [0, 0];
+        gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex.STR); gl.uniform1i(u.tS2, 5); gl.activeTexture(gl.TEXTURE0);
+        gl.uniform2f(u.uWc, Ls > 350 ? cam[0] / Ls + 0.5 : 0.5, Ls > 350 ? cam[1] / Ls + 0.5 : 0.5); gl.uniform1f(u.uWs, Math.min(Ls, 300) / Ls); });
+      gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); gl.activeTexture(gl.TEXTURE0);
+      gl.viewport(0, 0, 16, 16);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, covPack); gl.readPixels(0, 0, 16, 16, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      covFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); covT = time;
+    }
+    if (probeFence && gl.clientWaitSync(probeFence, 0, 0) !== gl.TIMEOUT_EXPIRED) {
+      const d = probeBufs[probeBi]; probeBi ^= 1; gl.bindBuffer(gl.PIXEL_PACK_BUFFER, probePack); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, d); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      gl.deleteSync(probeFence); probeFence = null; probeOut.data = d; probeOut.time = probeTime;
+    }
+    if ((probePts || uiOn) && !probeFence) {
+      const pw = uiOn ? PROBE_W : 16;
+      run(programs.probe, probeFb, pw, { tA: tex.A, tG: tex.G }, (u) => { gl.uniform2fv(u["uPts[0]"] || u.uPts, probePts || uiPts); if (u["uPts2[0]"] || u.uPts2) gl.uniform2fv(u["uPts2[0]"] || u.uPts2, uiPts); if (u.uSec) gl.uniform4f(u.uSec, uiSec[0], uiSec[1], uiSec[2], uiSec[3]); gl.uniform1f(u.uTile, L); });
+      gl.viewport(0, 0, pw, 1);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, probePack); gl.readPixels(0, 0, pw, 1, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      probeFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); probeTime = time;
+    }
     run(programs.reduce, fbs.reduce, blocks, { tL: tex.L, tC: tex.C, tF: tex.F, tG: tex.G });
     gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1117,11 +2034,13 @@ export function createGpuSurface(gl, scenario, wind) {
     stepFences.push({ step: stepIndex, sync: gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) });
     if (stepFences.length > 64) gl.deleteSync(stepFences.shift().sync);
 
+    drawStrands();
     last = {
-      gpu: { n, A: tex.A, B: tex.B, L: tex.L, F: tex.F, G: tex.G,
+      gpu: { n, A: tex.A, B: tex.B, L: tex.L, F: tex.F, G: tex.G, CU: tex.CU, CL: tex.CL, curlAxis, curlSlots: CURL_SLOTS, K: tex.K[kCur], STR: STRANDS ? tex.STR : null, SPt: STRANDS ? tex.SP[spCur] : null, stTime: simTimeCover || 0, stM: M, fineOn: STRANDS && FINE, fineWin: strandFine.win,
         fft: { R: fft.R, stats: fft.statsTex, levels: fft.levels, N: n, L, spacing, choppiness: chopFor(depth), ampScale,
           explicitCount: count, explicit0: xw0.slice(0, Math.max(count, 1) * 4), explicit1: xw1.slice(0, Math.max(count, 1) * 4) } },
       explicitWaves: count,
+      probe: probeOut,
       ...countsView(),
       countsStep: counts.step,
       stepIndex,
@@ -1147,8 +2066,11 @@ export function createGpuSurface(gl, scenario, wind) {
     return last;
   }
   function countsView() {
-    const { breakingCount, freshCount, foamCount, lingerCount, recentCount, maxSlope } = counts;
-    return { breakingCount, freshCount, foamCount, lingerCount, recentCount, maxSlope };
+    const { breakingCount, freshCount, foamCount, lingerCount, recentCount, maxSlope, visibleCount } = counts;
+    // v30.22f: FOAM SEA (visibleCount / samples) is the foam the water shader draws (strands, cov.foamSea);
+    // the break-test field's visible count (v30.20, never drawn since v30c) stays as brkVisibleCount (?foamsea=brk)
+    const drawn = STRANDS && FQ.get("foamsea") !== "brk" && cov.foamSea != null;
+    return { breakingCount, freshCount, foamCount, lingerCount, recentCount, maxSlope, visibleCount: drawn ? Math.round(cov.foamSea * n * n) : visibleCount, brkVisibleCount: visibleCount };
   }
   // Between steps (paused, or the counts' fence signalled late): pick up finished counts.
   function refresh(state) {
@@ -1222,6 +2144,10 @@ export function createGpuSurface(gl, scenario, wind) {
   const joinBlocks = () => { gl.bindFramebuffer(gl.FRAMEBUFFER, fbs.jmask.fb); const d = new Float32Array(n * n * 4); gl.readPixels(0, 0, n, n, gl.RGBA, gl.FLOAT, d); gl.bindFramebuffer(gl.FRAMEBUFFER, null); let c = 0; for (let i = 0; i < d.length; i += 4) c += d[i] > 0.5 ? 1 : 0; return c / (n * n); };
   // tests only (parity.js): this step's bands, winds and explicit components, in double precision
   const testState = () => testLast;
-  const api = { testState, N: n, joinBlocks, passTimes, takeLags, backlog, readSea, readPatches, step, refresh, countsNow, readFields, kind: "gpu", onCounts: null };
+  function readCurl() { // v30.22c debug/test: the curl field (RGBA32F n x n), synchronous
+    const out = new Float32Array(n * n * 4); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbs.curlField.fb); gl.readBuffer(gl.COLOR_ATTACHMENT0);
+    gl.readPixels(0, 0, n, n, gl.RGBA, gl.FLOAT, out); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null); return out; }
+  globalThis.__oceanCurl = readCurl;
+  const api = { readCurl, testState, N: n, joinBlocks, passTimes, takeLags, backlog, readSea, readPatches, step, refresh, countsNow, readFields, kind: "gpu", onCounts: null, setProbe(pts) { probePts = pts; }, setUiProbe(pts, sec) { uiOn = !!(pts || sec); if (pts) uiPts = pts; if (sec) uiSec = sec; } };
   return api;
 }

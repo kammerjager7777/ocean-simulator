@@ -1,8 +1,8 @@
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, sampleBand, bandVariance } from "./band.js?v=29.1.6";
-import { createChopPatch } from "./chopPatch.js?v=29.1.6";
-import { slopeBudget } from "./roughness.js?v=29.1.6";
-import { fftShare, FFT_SPLIT } from "./fftSea.js?v=29.1.6";
+import { createBand, retuneBand, sampleBand, bandVariance } from "./band.js?v=30.22";
+import { createChopPatch } from "./chopPatch.js?v=30.22";
+import { slopeBudget } from "./roughness.js?v=30.22";
+import { fftShare, FFT_SPLIT } from "./fftSea.js?v=30.22";
 
 // Energy-weighted mean travel direction of every wave component, as a unit (x, z) vector.
 // A calm sea has no energy, so it falls back to the wind direction.
@@ -80,6 +80,18 @@ export function faceGrade(s, F) {
   if (i >= 3) return G[3];
   return G[i] + (G[i + 1] - G[i]) * (u - i);
 }
+// v30b foam plateau fix: the break test reads the short field (waves up to the FFT cut-off,
+// 62.5 m), which sits in the spectrum's saturated tail above ~10 m/s, so its steepness hardly
+// grows with the wind and breaking (and the foam) levelled off between 17.5 and 25 m/s. Real
+// whitecap cover keeps climbing (~U^3.5), so above 17.5 m/s the steepness threshold eases as
+// (17.5 / U)^BREAK_WIND_EXP. At or below 17.5 m/s nothing changes. ?brkWexp overrides it.
+export const BREAK_WIND_EXP = 0.5;
+export function breakWindFactor(speed) {
+  const q = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+  const e = Number(q.get("brkWexp") ?? BREAK_WIND_EXP);
+  return speed > 17.5 ? (17.5 / speed) ** e : 1;
+}
+const BRK_SZ = 0.5; // v30.20 box calibration: exponent 0.5 at 15 m/s falling to 0.1 at 25 m/s (strong wind already over-breaks on big blocks)
 export function breakRuleAt(scenario, speed, spacing) {
   const q = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
   const lambdaP = speed > 0.05 ? (2 * Math.PI * speed * speed) / (0.77 * 9.81) : 0;
@@ -93,7 +105,12 @@ export function breakRuleAt(scenario, speed, spacing) {
   // curvature stencil grows with the window (the dominant wave's scale): 2-4 cells
   const ts = Number(q.get("brkTs") ?? Math.min(4, Math.max(1, Math.round(win / 20))));
   // The scenario's break slope scales the threshold (0.2 = BREAK_RULE.ak; Infinity switches breaking off).
-  return { lg: Number(q.get("brkLg") ?? 1), M: Number(q.get("brkM") ?? BREAK_RULE.M), kL: lambdaP > 0 ? (2 * Math.PI) / lambdaP : 0, mode, ak: Number(q.get("brkAk") ?? BREAK_RULE.ak) * (scenario.breakSlope / 0.2), rb: Math.max(1, Math.round(win / spacing)), ts };
+  // v30.20: on a bigger block each cell is coarser (size / N), so the curvature stencil smooths the
+  // short crests and fewer pass; above 250 m the threshold is lowered by (size / 250)^-BRK_SZ.
+  const szF = Math.pow(Math.max(1, scenario.size / 250), -Number(q.get("brkSz") ?? Math.min(0.6, Math.max(0.1, BRK_SZ - 0.04 * (speed - 15)))));
+  const rule = { lg: Number(q.get("brkLg") ?? 1), M: Number(q.get("brkM") ?? BREAK_RULE.M), kL: lambdaP > 0 ? (2 * Math.PI) / lambdaP : 0, mode, ak: Number(q.get("brkAk") ?? BREAK_RULE.ak) * (scenario.breakSlope / 0.2) * breakWindFactor(speed), rb: Math.max(1, Math.round(win / spacing)), ts };
+  rule.ak *= szF;
+  return rule;
 }
 
 export function createSurface(scenario, wind) {

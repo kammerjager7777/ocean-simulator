@@ -61,17 +61,20 @@ for (const b of segs) b.addEventListener("click", () => {
   if (gust.value !== b.dataset.v) { gust.value = b.dataset.v; gust.dispatchEvent(new Event("change", { bubbles: true })); }
   showGust();
 });
-$(".seg").addEventListener("keydown", (e) => {
+$(".seg")?.addEventListener("keydown", (e) => {
   if (!/Arrow(Left|Right|Up|Down)/.test(e.key)) return;
   e.preventDefault(); const i = segs.findIndex((b) => b.dataset.v === gust.value); const n = segs[(i + 1) % 2]; n.click(); n.focus();
 });
 gust.addEventListener("change", showGust);
 showGust();
 
+// v30.23: the dial is gone (the wind sock sets the wind); this block runs only if a dial exists.
+const dial = $("#dial");
+let dragging = false;
+if (dial) {
 // ---------- wind dial -> #dir range ----------
 const dir = $("#dir");
 const spd = $("#spd");
-const dial = $("#dial");
 const arrow = $("#dial-arrow");
 function showDir() {
   arrow.setAttribute("transform", `rotate(${Number(dir.value)} 60 60)`);
@@ -87,7 +90,6 @@ function setDir(deg) {
 }
 dir.addEventListener("input", showDir);
 spd.addEventListener("input", showSpd);
-let dragging = false;
 function dialAngle(e) {
   const r = dial.getBoundingClientRect();
   const a = (Math.atan2(e.clientX - (r.left + r.width / 2), -(e.clientY - (r.top + r.height / 2))) * 180) / Math.PI;
@@ -108,6 +110,8 @@ dial.addEventListener("keydown", (e) => {
   if (!d) return;
   e.preventDefault(); setDir(Number(dir.value) + d);
 });
+  showDir(); showSpd();
+}
 // Shift+arrow on sliders: 10x step.
 for (const el of document.querySelectorAll('#panel input[type="range"]:not(.vh)')) el.addEventListener("keydown", (e) => {
   if (!e.shiftKey || !/Arrow(Left|Right|Up|Down)/.test(e.key)) return;
@@ -116,7 +120,6 @@ for (const el of document.querySelectorAll('#panel input[type="range"]:not(.vh)'
   el.value = String(Math.min(Number(el.max), Math.max(Number(el.min), Number(el.value) + s)));
   el.dispatchEvent(new Event("input", { bubbles: true }));
 });
-showDir(); showSpd();
 
 // ---------- idle fade (4.0 s; out 600 ms, wake 150 ms) ----------
 const IDLE_MS = 4000;
@@ -129,9 +132,9 @@ function canFade() {
   if (a && a !== document.body && (panel.contains(a) || strip.contains(a))) return false;
   return true;
 }
-function fade() { if (canFade()) { panel.classList.add("faded"); strip.classList.add("faded"); } else arm(); }
+function fade() { if (!dragging) document.body.classList.add("ui-idle"); /* v30.21: one idle clock for the on-sea UI too */ if (canFade()) { panel.classList.add("faded"); strip.classList.add("faded"); } else arm(); }
 function arm() { clearTimeout(idleTimer); idleTimer = setTimeout(fade, IDLE_MS); }
-function wake() { panel.classList.remove("faded"); strip.classList.remove("faded"); arm(); }
+function wake() { document.body.classList.remove("ui-idle"); panel.classList.remove("faded"); strip.classList.remove("faded"); arm(); }
 addEventListener("pointermove", (e) => {
   if (lastX !== null && Math.hypot(e.clientX - lastX, e.clientY - lastY) < 4) return;
   lastX = e.clientX; lastY = e.clientY; wake();
@@ -144,7 +147,9 @@ const N = 120;
 const ft = new Float64Array(N);
 let fi = 0, fn = 0, prevT = null;
 const g = 9.81;
-function beaufort(u) { const t = [0.3, 1.6, 3.4, 5.5, 8.0, 10.8, 13.9, 17.2, 20.8]; let b = 0; while (b < t.length && u >= t[b]) b++; return b; }
+// v30.21: SEA STATE shows Beaufort force (WMO, on-sea spec §4); the same table as the Beaufort dial
+export const BEAUFORT_LO = [0, 0.5, 1.6, 3.4, 5.5, 8.0, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7];
+export function beaufort(u) { let b = 0; while (b + 1 < BEAUFORT_LO.length && u >= BEAUFORT_LO[b + 1] - 0.05) b++; return b; }
 function wavelength(T, h) { // finite-depth dispersion, fixed-point on k
   const w = (2 * Math.PI) / T; let k = (w * w) / g;
   for (let i = 0; i < 30; i++) k = (w * w) / (g * Math.tanh(Math.max(1e-6, k * h)));
@@ -175,9 +180,9 @@ function update() {
   }
   const u = Number(spd.value);
   set("st-wind", u.toFixed(1));
-  set("st-sea", String(beaufort(u)));
+  set("st-sea", "F" + beaufort(u));
   const st = window.__oceanState;
-  if (st && st.sampleCount) set("st-foam", ((100 * (st.foamCount || 0)) / st.sampleCount).toFixed(1));
+  if (st && st.sampleCount) set("st-foam", ((100 * ((st.visibleCount ?? st.foamCount) || 0)) / st.sampleCount).toFixed(1)); // v30.20: visible foam only
   if (!strip.classList.contains("open")) return;
   const depth = Number($("#depth").value);
   set("st-depth", String(depth));

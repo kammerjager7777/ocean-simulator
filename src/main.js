@@ -1,10 +1,12 @@
 import { GRAVITY_NOTE } from "./physics/gravity.js";
-import { scenario } from "./physics/scenario.js?v=29.1.6";
+import { scenario } from "./physics/scenario.js?v=30.22";
 import { createWind } from "./physics/wind.js";
-import { createSurface } from "./physics/surface.js?v=29.1.6";
-import { createView } from "./render/view.js?v=29.1.6";
-import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=29.1.6";
-import { createPerf } from "./perf.js?v=29.1.6";
+import { createSurface } from "./physics/surface.js?v=30.22";
+import { createView } from "./render/view.js?v=30.22";
+import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=30.22";
+import { createBoat } from "./physics/boat.js?v=30.22";
+import { createPerf } from "./perf.js?v=30.22";
+import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js?v=30.27";
 
 // ?chopSpectrum=pm (or =elfouhaily) picks the chop band's spectrum for A/B comparison.
 // It only changes that band's scenario setting; nothing else reads it.
@@ -49,6 +51,16 @@ const chopInput = document.querySelector("#chop");
 const sizeInput = document.querySelector("#size");
 const flags = document.querySelector("#flags");
 const pause = document.querySelector("#pause");
+const boatOn = document.querySelector("#boat");
+// v30.4 water clarity slider (1 clear tropical .. 0 murky coastal); ?clarity= sets its start
+const clarityIn = document.querySelector("#clarity");
+// v30.23: #clarity holds the Secchi depth Zsd in metres (3..40; default 1.7 / 0.076225 = 22.30 m, the v30.8 K).
+// ?clarity= in 0..1 is the legacy slider (1 clear .. 0 murky) and maps through the v30.8 K; > 1 is read as Zsd metres.
+if (clarityIn && params.get("clarity") !== null && Number.isFinite(Number(params.get("clarity")))) { const c = Number(params.get("clarity")); clarityIn.value = String(c <= 1 ? 1.7 / (0.076225 + 0.0785 * (1 - Math.max(0, c))) : Math.min(40, Math.max(3, c))); }
+const clarityVal = document.querySelector("#clarity-val");
+const clarityLabel = () => { if (clarityVal) { const c = Number(clarityIn.value); clarityVal.textContent = c >= 30 ? "clear tropical" : c >= 15 ? "open ocean" : c >= 6 ? "coastal" : "murky"; } };
+if (clarityIn) { clarityIn.addEventListener("input", clarityLabel); clarityLabel(); }
+const boat = createBoat();
 document.querySelector("#gravity").textContent = GRAVITY_NOTE;
 
 let depth = scenario.depth;
@@ -57,6 +69,7 @@ let last = performance.now();
 // moment: the same sea, redrawn, while flags or the camera change.
 let simTime = 0;
 let state = null;
+const rippled = new WeakSet(); let pts0 = null; // v30.23 ripple heights already added to these readbacks
 
 function label(id, text) {
   document.querySelector(id).textContent = text;
@@ -130,6 +143,21 @@ function frame(now) {
   // reads the drawing, and each step takes a fixed dt, so the state at a sim time is the
   // same as when every frame is drawn.
   const capT = window.__holdTargets;
+  // v30b spray/foam drift: the view needs the sim time and the wind (drawing only).
+  if (state) state.fx = { t: simTime, speed: wind.speed, dir: wind.direction };
+  // v30.4 boat: buoyancy from the GPU height probe (a step or two old), drawn at true 8 m scale
+  if (state && surface.setProbe) {
+    const on = !boatOn || boatOn.checked;
+    // v30.23: the boat bobs on the ripple-touch / buoy-wake rings too (added once to each new readback)
+    const pdat = state.probe && state.probe.data;
+    if (pdat && !rippled.has(pdat) && pts0) { rippled.add(pdat); for (let k = 0; k < 16; k++) pdat[k * 4] += rippleHeight(pts0[k * 2], pts0[k * 2 + 1], simTime); }
+    if (!pause.checked) pruneRipples(simTime);
+    if (on && !held && !pause.checked) boat.step(dt, state.probe && state.probe.data, wind);
+    pts0 = on ? boat.probePoints() : null;
+    surface.setProbe(on ? boat.probePoints() : null);
+    state.boat = on ? boat : null;
+    state.clarity = clarityIn ? Number(clarityIn.value) : 22.3024; // Secchi depth, m
+  }
   if (!noDraw || pause.checked || (capT && capT.length && simTime >= capT[0] - 1e-6)) view.draw(state, flags.checked);
   const fine = state.chopPatch && state.chopPatch.modes
     ? ` · Fine chop on its own ${state.chopPatch.size} m patch (${state.chopPatch.longest.toFixed(1)} to ${state.chopPatch.shortest.toFixed(1)} m waves): ${state.chopPatch.significantHeight.toFixed(2)} m`
@@ -156,7 +184,7 @@ if (physicsNote) {
 
 // ?parity=1: CPU-vs-GPU parity test on this page's context (tests only; see parity.js).
 if (params.get("parity") === "1") {
-  import("./physics/parity.js?v=29.1.6").then(({ runParity }) => runParity(view.gl, {
+  import("./physics/parity.js?v=30.22").then(({ runParity }) => runParity(view.gl, {
     speeds: (params.get("speeds") || "0,5,10,17.5,25").split(",").map(Number),
     seconds: Number(params.get("seconds") || 6),
     gust: params.get("gust") || "continuous",

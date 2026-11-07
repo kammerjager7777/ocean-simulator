@@ -2,10 +2,10 @@ import { scenario } from "./scenario.js";
 import { createWind } from "./wind.js";
 import { createSurface, NO_FOAM_AHEAD, crestReachAt, foamWindowAt } from "./surface.js";
 import { breakFieldCheck } from "./parity.js";
-import { createBand, retuneBand } from "./band.js?v=29.1.6";
-import { createChopPatch } from "./chopPatch.js?v=29.1.6";
-import { piersonMoskowitz, spectrumFor, elfouhailyParts, wavenumber } from "./spectrum.js?v=29.1.6";
-import { coxMunkMss } from "./roughness.js?v=29.1.6";
+import { createBand, retuneBand } from "./band.js?v=30.22";
+import { createChopPatch } from "./chopPatch.js?v=30.22";
+import { piersonMoskowitz, spectrumFor, elfouhailyParts, wavenumber } from "./spectrum.js?v=30.22";
+import { coxMunkMss } from "./roughness.js?v=30.22";
 import { GRAVITY } from "./gravity.js";
 
 function run(speed, depth, seconds) {

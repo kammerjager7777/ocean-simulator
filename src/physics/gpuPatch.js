@@ -15,8 +15,8 @@
 // renderer samples (quantised as view.js did, then mipmapped by GL), and the slope
 // variance each mip level keeps (box-averaged levels, as view.js's keptPerLevel), which the
 // renderer reads from a small texture. Nothing comes back to the CPU.
-import { shoal } from "./band.js?v=29.1.6";
-import { timed } from "./passTimer.js?v=29.1.6";
+import { shoal } from "./band.js?v=30.22";
+import { timed } from "./passTimer.js?v=30.22";
 
 const TAU = Math.PI * 2;
 // Display range of the 8-bit slope texture (view.js: CHOP_SCALE / FINE_SCALE).

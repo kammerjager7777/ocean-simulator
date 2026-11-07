@@ -35,11 +35,16 @@ uniform highp float antiTile;
 uniform float oneCopyFar; // v28-lod: 1 = one FFT copy per pixel past 600 m (faded in over 550-650 m)
 uniform highp sampler2D physF;
 uniform highp sampler2D physG;
+uniform vec2 foamDrift; // v30b: metres a foam patch drifts over its whole life (wind drift + Stokes drift)
 in float vFoamKeep;
 // GAD per-pixel foam: grade, fade, age, ahead, run, recent and flag read bilinearly from the
 // physics textures at this pixel's undisplaced position (vSea.xy), not interpolated from the
 // mesh vertices, so single-cell foam shows on the thinned rings too. The values are the same
 // physics fields (CPU parity untouched); only where they are sampled changes.
+#define FOAM_ADVECT ${Number(new URLSearchParams(globalThis.location?.search ?? "").get("advect") ?? 1).toFixed(3)}
+#define FOAM_SWIRL 0.35
+#define FOAM_CREST_LEN 2.4
+#define FOAM_STREAK_LEN 12.0
 vec4 fpF(ivec2 c) { return texelFetch(physF, (c % physN + physN) % physN, 0); }
 vec4 fpG(ivec2 c) { return texelFetch(physG, (c % physN + physN) % physN, 0); }
 // v29.1 foam: the foam fields are cell-sized; read bilinearly at the cell's own lattice they show
@@ -61,12 +66,56 @@ float foamNear(vec2 p) {
 void foamPix(vec2 p, out vec4 F, out vec4 G) {
   float sp = fftL / float(physN);
   p += foamWarp(p, sp);
-  vec2 u = (p + 0.5 * fftL) / sp;
-  vec2 i0 = floor(u); vec2 fr = u - i0;
-  ivec2 c00 = (ivec2(i0) % physN + physN) % physN;
-  ivec2 c10 = ((c00 + ivec2(1, 0)) % physN), c01 = ((c00 + ivec2(0, 1)) % physN), c11 = ((c00 + ivec2(1, 1)) % physN);
-  F = mix(mix(texelFetch(physF, c00, 0), texelFetch(physF, c10, 0), fr.x), mix(texelFetch(physF, c01, 0), texelFetch(physF, c11, 0), fr.x), fr.y);
-  G = mix(mix(texelFetch(physG, c00, 0), texelFetch(physG, c10, 0), fr.x), mix(texelFetch(physG, c01, 0), texelFetch(physG, c11, 0), fr.x), fr.y);
+  // v30b.3 edge bar: a second, finer warp (~1.4 cells, 0.45 cell deep) so no foam edge follows a
+  // pixel row or a grid line for more than a few pixels.
+  { vec2 r = p / (1.4 * sp);
+    p += 0.45 * sp * vec2(sin(r.y * 2.9 + 1.3 * sin(r.x * 3.7)) * sin(r.x * 1.9 + 0.4), sin(r.x * 3.1 + 1.1 * sin(r.y * 3.3)) * sin(r.y * 2.3 + 1.7)); }
+  // v30b.4 grid-axis edge bar: a third, cell-scale warp on axes rotated ~31 deg from the grid
+  // (~1 cell deep, ~0.9 cell wavelength) so a cell border never survives as a straight run.
+  { vec2 r = mat2(0.857, 0.515, -0.515, 0.857) * p / (0.9 * sp);
+    p += 0.62 * sp * vec2(sin(r.x * 2.7 + 1.9 * sin(r.y * 2.3 + 0.6)), sin(r.y * 2.5 + 1.7 * sin(r.x * 2.9 + 1.1)));
+    // v30b.5: second rotated octave (~0.45 cell, 0.22 cell deep, axes 58 deg off the grid)
+    vec2 r2 = mat2(0.530, 0.848, -0.848, 0.530) * p / (0.45 * sp);
+    p += 0.22 * sp * vec2(sin(r2.x * 2.9 + 1.5 * sin(r2.y * 2.1 + 0.3)), sin(r2.y * 2.7 + 1.3 * sin(r2.x * 3.1 + 2.2))); }
+  // v30b advection: foam is read upstream by how far it has drifted since it was laid down
+  // (age 0..1 of its window x foamDrift), plus a slow world-fixed swirl that grows with age, so
+  // ageing foam drifts off the crest, curls and stretches into streaks (each cell's age differs,
+  // so a patch smears along the drift). Fresh foam (age 0) stays on its break.
+  if (FOAM_ADVECT > 0.0) {
+    float a0 = fpF(ivec2(floor((p + 0.5 * fftL) / sp + 0.5))).z;
+    vec2 sq = p / 9.0;
+    vec2 swirl = vec2(sin(sq.y * 1.7 + 2.0 * sin(sq.x * 0.9)), -sin(sq.x * 1.5 + 2.0 * sin(sq.y * 1.1)));
+    p -= FOAM_ADVECT * a0 * (foamDrift + FOAM_SWIRL * length(foamDrift) * swirl);
+  }
+  // v30b.2 (GAD 3, blocky outlines): the root cause was the read itself: flag/recent/foam are
+  // per-cell (0/1 for the flags) and were read with one bilinear tap, whose iso-lines on a
+  // 0/1 field run along the cell grid (rectangular, grid-aligned patches). They are now read
+  // with an oriented 5-tap kernel (Gaussian along one axis, each tap bilinear): along the
+  // crest (across the wind) for fresh foam, so a breaking crest's foam is a band longer along
+  // the crest than deep, and along the wind for ageing foam, growing with age into streaks.
+  vec2 wd = length(foamDrift) > 1e-4 ? normalize(foamDrift) : vec2(1.0, 0.0);
+  float ageK = FOAM_ADVECT > 0.0 ? clamp(fpF(ivec2(floor((p + 0.5 * fftL) / sp + 0.5))).z, 0.0, 1.0) : 0.0;
+  // v30b.3: the streak length keeps growing with age (GAD: >= 3:1 on foam older than 2 s)
+  vec2 ax = mix(vec2(-wd.y, wd.x) * FOAM_CREST_LEN, wd * FOAM_STREAK_LEN * (0.35 + ageK), smoothstep(0.05, 0.45, ageK)) * sp;
+  F = vec4(0.0); G = vec4(0.0);
+  float ws = 0.0;
+  for (int k = -2; k <= 2; k += 1) {
+    float w = exp(-0.5 * float(k * k));
+    vec2 u = (p + float(k) * 0.5 * ax + 0.5 * fftL) / sp;
+    vec2 i0 = floor(u); vec2 fr = u - i0;
+    ivec2 c00 = (ivec2(i0) % physN + physN) % physN;
+    ivec2 c10 = ((c00 + ivec2(1, 0)) % physN), c01 = ((c00 + ivec2(0, 1)) % physN), c11 = ((c00 + ivec2(1, 1)) % physN);
+    F += w * mix(mix(texelFetch(physF, c00, 0), texelFetch(physF, c10, 0), fr.x), mix(texelFetch(physF, c01, 0), texelFetch(physF, c11, 0), fr.x), fr.y);
+    G += w * mix(mix(texelFetch(physG, c00, 0), texelFetch(physG, c10, 0), fr.x), mix(texelFetch(physG, c01, 0), texelFetch(physG, c11, 0), fr.x), fr.y);
+    ws += w;
+  }
+  F /= ws; G /= ws;
+  // the kernel spreads a lone flagged cell's 1 over ~3 cells; restore its peak so a single
+  // breaking cell still crosses the flag threshold (0.55-0.9), only its shape changes.
+  G.zw = min(G.zw * 1.6, vec2(1.0));
+  // v30b.4 (GAD 10 m/s solid foam +28%): thin foam slightly at low wind only (foamDrift 1.5 m at
+  // 10 m/s, 4 m at 17.5 m/s, so the nudge is gone by ~14 m/s).
+  F.x *= mix(1.0, 0.88, 1.0 - smoothstep(1.6, 3.0, length(foamDrift)));
 }
 const float TAUF = 6.283185307179586;
 // GAD ring edge: the sea's normal per pixel from the FFT slope texture (analytic slopes),
@@ -100,7 +149,10 @@ vec3 seaNormalPix(vec2 p, float lod) {
 }
 `;
 
+import { BED_GLSL } from "./seabed.js?v=30.27";
+import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.27";
 export const VERT_FFT = `#version 300 es
+#define FOAM_LIFT ${Number(new URLSearchParams(globalThis.location?.search ?? "").get("foamlift") ?? 0).toFixed(3)}
 #define MAXX 64
 in vec2 xz;
 in vec4 meta; // ring index (unused by the shader), morph dx, morph dz, 1 on tile vertices
@@ -118,6 +170,14 @@ uniform highp sampler2D fftR3; // squeeze xz (real)
 uniform highp sampler2D fftStats; // per-level shading-slope variance (texel L)
 uniform float fftLevels;
 uniform highp float fftL;
+uniform highp sampler2DArray physS;
+uniform float crestLift;
+uniform vec2 foamDrift; // v30.19 lean direction (downwind)
+uniform float curlU;     // v30.22b: wind speed (m/s) for the mesh curl gate
+uniform highp sampler2D physC; // v30.22c curl field (physics grid)
+#define CURL_ON ${(() => { const q = typeof location !== "undefined" ? new URLSearchParams(location.search) : null; return q && (q.get("curl") === "0" || q.get("curl") === "lip") ? "false" : "true"; })()}
+out vec3 vCurl;          // v30.22b: (curl weight, lip-tip weight, cavity weight under the lip)
+#define LEAN_ON ${typeof location !== "undefined" && new URLSearchParams(location.search).get("lean") === "0" ? "false" : "true"}
 uniform highp float choppiness;
 uniform vec3 eye;
 uniform float pixAngle;  // radians per pixel
@@ -131,6 +191,7 @@ uniform float minLod;    // shading detail never finer than this level (near-Nyq
 uniform float antiTile;  // 1: mixed copies away from the tile; 0: plain repeat (review only)
 uniform float block;     // v29: 1 = the cut-away block (tile only, physics fields to the very edge, walls and floor)
 uniform float depth;     // v29: floor depth (the depth slider; the same value the physics uses)
+${BED_GLSL}${RIPPLE_GLSL}
 uniform highp int xCount;
 uniform vec4 x0[MAXX];   // amplitude, k, cos dir, sin dir
 uniform vec4 x1[MAXX];   // phase at the origin in turns, 1 for the chop band
@@ -474,19 +535,54 @@ void main() {
     sh.x *= wN.x * mix(kx, 1.0, wN.y);                          // across x-walls -> 0; along z-walls <= lim
     sh.y *= wN.y * mix(kz, 1.0, wN.x);
   }
+  // v30b foam volume: foam stands a little above the water (up to FOAM_LIFT m on fresh, dense foam).
+  h += FOAM_LIFT * clamp(vFoam, 0.0, 1.0) * (1.0 - 0.6 * clamp(vAge, 0.0, 1.0));
   vWorld = vec3(p.x + choppiness * sh.x, h, p.y + choppiness * sh.y);
+  // v30.19 leaning crest: where the crest is about to break / breaking (physL break + lip detector), the
+  // top of the wave is pushed forward (downwind) in proportion to its height, so the front face steepens
+  // and leans before the lip throws. Smooth in h and capped at 1.2 cells, so the mesh never folds.
+  if (LEAN_ON && meta.w > 0.5 && meta.w < 2.5) {
+    float lipS = clamp(max(4.0 * vBroken, vLip), 0.0, 1.0);
+    float lean = smoothstep(0.1, 0.6, lipS);
+    vec2 wd = length(foamDrift) > 1e-4 ? normalize(foamDrift) : vec2(1.0, 0.0);
+    vWorld.xz += wd * lean * min(0.35 * max(h, 0.0), 1.2 * fftL / float(physN));
+    vWorld.y += 0.08 * lean * max(h, 0.0);
+  }
+  // v30.22c curl: the lip itself is its own finely tessellated sheet (view.js createCurl), driven by the
+  // physics curl field (physC). The sea only darkens and hollows a little under an overhanging lip:
+  // physC.x = -1 - cavity on front-face cells (a smooth field, so no facets or wedges).
+  vCurl = vec3(0.0);
+  if (CURL_ON && meta.w > 0.5 && meta.w < 2.5 && curlU > 11.5) {
+    float sp = fftL / float(physN);
+    vec2 u = (p + 0.5 * fftL) / sp - 0.5; vec2 i0 = floor(u), f = u - i0; ivec2 c0 = ivec2(i0);
+    #define CAV(o) max(-1.0 - texelFetch(physC, ((c0 + o) % physN + physN) % physN, 0).x, 0.0)
+    float cav = mix(mix(CAV(ivec2(0, 0)), CAV(ivec2(1, 0)), f.x), mix(CAV(ivec2(0, 1)), CAV(ivec2(1, 1)), f.x), f.y);
+    if (block > 0.5) cav *= smoothstep(4.0, 14.0, 0.5 * fftL - max(abs(p.x), abs(p.y))); // it19: same wall fade as the lip sheet (no shadow without a lip)
+    if (cav > 0.0) {
+      vec2 wd = length(foamDrift) > 1e-4 ? normalize(foamDrift) : vec2(1.0, 0.0);
+      if (${typeof location !== "undefined" && new URLSearchParams(location.search).get("curlhol") === "0" ? "false" : "true"}) vWorld.xz -= wd * 0.35 * sp * cav; // the face under the lip steepens / hollows slightly (< 0.35 cell); ?curlhol=0 off (debug)
+      vCurl = vec3(0.0, 0.0, cav);
+    }
+  }
+  // v30.19.2: the flat crest lift (crestLift, up to 0.8 m) is gone: foam sits on the water. Only the
+  // actively breaking front of a crest gets a small smooth bump (<= 0.12 m, follows the lip detector, no plateau).
+  if (crestLift > 0.0 && meta.w < 2.5) {
+    float lipB = smoothstep(0.15, 0.8, clamp(max(4.0 * vBroken, vLip), 0.0, 1.0));
+    vWorld.y += 0.12 * lipB * lipB * smoothstep(0.0, 1.5, max(h, 0.0));
+  }
   // v29: wall-top vertices (meta.w 2) are computed exactly like the surface vertex at the same
   // x, z (same code path), so the wall top IS the surface edge; wall-bottom (3) and floor (4)
   // vertices sit at the floor depth. Nothing here is written back to the physics.
   vKind = meta.w > 3.5 ? 2.0 : meta.w > 1.5 ? 1.0 : 0.0;
+  if (meta.w < 2.5) vWorld.y += ripple(vWorld.xz).x; // v30.23 ripple touch / buoy wake (drawn only; not physics)
   // v29.1: the surface never dips through the floor (a 5 cm skin of water is always left); the
   // wall top follows the same clamp. A no-op at depth (troughs never reach -depth there).
-  if (block > 0.5) { h = max(h, -depth + 0.05); vWorld.y = max(vWorld.y, -depth + 0.05); }
+  if (block > 0.5) { float bedH = -depth + bedRelief(vWorld.xz, depth); h = max(h, bedH + 0.05); vWorld.y = max(vWorld.y, bedH + 0.05); } // v30.23 seabed relief
   vSurfY = h;
   // v29.1 fix2: the wall bottom (3) keeps the same horizontal shift as its wall-top vertex, so the
   // walls stay vertical under the stretched outline and the floor (a fan to those bottom vertices,
   // see buildBlockMesh) follows it: no gap, no sky under the water. The floor centre (4) stays put.
-  if (meta.w > 2.5) vWorld = (meta.w > 3.5 && meta.w < 4.5) ? vec3(p.x, -depth, p.y) : vec3(vWorld.x, -depth, vWorld.z);
+  if (meta.w > 2.5) vWorld = (meta.w > 3.5 && meta.w < 4.5) ? vec3(p.x, -depth + bedRelief(p, depth), p.y) : vec3(vWorld.x, -depth + bedRelief(vWorld.xz, depth), vWorld.z); // v30.23 relief
   if (meta.w < -0.5 && block < 0.5) {
     // skirt (see buildFftMesh): reaches outward under the coarser ring and a little down, so
     // the T-junction slivers are covered seen from above too (a vertical skirt has no area
