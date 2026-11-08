@@ -3,8 +3,8 @@
 // filled, the wave profile (256 samples, async GPU readback, 1 frame late, no smoothing) runs along its
 // top at true scale, the still-water line is dashed, the bed follows the seabed relief, and breaking
 // spans (physics break flags only) are marked.
-import { ui } from "./core.js?v=30.27";
-import { bedY } from "../../render/seabed.js?v=30.27";
+import { ui } from "./core.js?v=30.29";
+import { bedY } from "../../render/seabed.js?v=30.29";
 const T = ui.theme;
 const sec = (() => { try { const j = JSON.parse(ui.store.get("ocean.ui.section", "")); if (Array.isArray(j) && j.length === 4 && j.every(Number.isFinite)) { if (j.some((v) => Math.abs(v) > 0.5001)) { const q = j.map((v) => v / 250); const a = toPerimeter(q[0], q[1]), b = toPerimeter(q[2], q[3]); return [...a, ...b]; } return j; } } catch { /* default */ } return [-0.4, 0.5, 0.5, -0.3]; })(); // fractions of S (resize-proof)
 const save = () => ui.store.set("ocean.ui.section", JSON.stringify(sec.map((v) => Math.round(v * 1000) / 1000)));

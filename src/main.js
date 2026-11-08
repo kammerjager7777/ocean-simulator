@@ -6,7 +6,7 @@ import { createView } from "./render/view.js?v=30.22";
 import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=30.22";
 import { createBoat } from "./physics/boat.js?v=30.22";
 import { createPerf } from "./perf.js?v=30.22";
-import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js?v=30.27";
+import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js?v=30.29";
 
 // ?chopSpectrum=pm (or =elfouhaily) picks the chop band's spectrum for A/B comparison.
 // It only changes that band's scenario setting; nothing else reads it.

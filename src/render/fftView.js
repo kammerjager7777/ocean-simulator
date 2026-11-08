@@ -149,8 +149,8 @@ vec3 seaNormalPix(vec2 p, float lod) {
 }
 `;
 
-import { BED_GLSL } from "./seabed.js?v=30.27";
-import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.27";
+import { BED_GLSL } from "./seabed.js?v=30.29";
+import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
 export const VERT_FFT = `#version 300 es
 #define FOAM_LIFT ${Number(new URLSearchParams(globalThis.location?.search ?? "").get("foamlift") ?? 0).toFixed(3)}
 #define MAXX 64

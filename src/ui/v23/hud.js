@@ -1,23 +1,25 @@
 // v30.23 HUD, the Hairline layer (modern-ui-spec §6): settings column (Open / Minimised / Layers sheet; H, Esc),
 // pause button (Space), stats line (S, 2 Hz), version, toast. DOM only; the look is v23.css. The old glass panel
 // and strip stay hidden in the DOM because their inputs (#boat, #flags, #pause) and stat ids stay the source of truth.
-import { ui, LAYERS, store, $ } from "./core.js?v=30.27";
+import { ui, LAYERS, store, $ } from "./core.js?v=30.29";
 const hud = document.createElement("div"); hud.id = "v23-hud"; document.body.appendChild(hud);
 const vg = document.createElement("div"); vg.id = "v23-vignette"; document.body.appendChild(vg);
-const SVG_SET = `<svg width="40" height="40" viewBox="-20 -20 40 40" aria-hidden="true"><circle class="ring" r="15"/><path class="ic" d="M-7 -4H7M-7 0H7M-7 4H7"/><circle class="dot" cx="-3" cy="-4" r="1.8"/><circle class="dot" cx="3" cy="0" r="1.8"/><circle class="dot" cx="-1" cy="4" r="1.8"/></svg>`;
-const SVG_PAUSE = `<svg width="40" height="40" viewBox="-20 -20 40 40" aria-hidden="true"><circle class="ring" r="15"/><path class="bars" d="M-3.5 -5.5V5.5M3.5 -5.5V5.5"/><path class="play" d="M-4 -6L6 0L-4 6Z"/></svg>`;
+const SVG_SET = `<svg width="20" height="20" viewBox="-10 -10 20 20" aria-hidden="true"><path class="ic" d="M-7 -4H7M-7 0H7M-7 4H7"/><circle class="dot" cx="-3" cy="-4" r="1.35"/><circle class="dot" cx="3" cy="0" r="1.35"/><circle class="dot" cx="-1" cy="4" r="1.35"/></svg>`;
+const SVG_PAUSE = `<svg width="20" height="20" viewBox="-10 -10 20 20" aria-hidden="true"><path class="bars" d="M-3.2 -5.2V5.2M3.2 -5.2V5.2"/><path class="play" d="M-3.6 -5.4L6 0L-3.6 5.4Z"/></svg>`;
 const CHEV = `<svg class="chev" viewBox="0 0 8 10" aria-hidden="true"><path d="M2 1.5L6 5L2 8.5"/></svg>`;
 const BACK = `<svg class="chev" viewBox="0 0 8 10" aria-hidden="true" style="margin:0 6px 0 0"><path d="M6 1.5L2 5L6 8.5"/></svg>`;
 const row = (id, name, right, extra = "") => `<div class="hrow" id="${id}" role="switch" tabindex="0" ${extra}><span class="nm l1"><span class="plate">${name}</span></span>${right}</div>`;
 hud.innerHTML = `
-  <button class="hb" id="hb-set" type="button" aria-label="Settings" aria-expanded="true">${SVG_SET}</button>
-  <div id="hud-title" class="t1 plate">Ocean Simulator</div><div id="hud-cap" class="l2 plate">Settings</div>
+  <button class="hb" id="hb-set" type="button" aria-label="Settings" title="Settings" aria-expanded="true">${SVG_SET}</button>
+  <div id="hud-head"><div id="hud-title">Ocean Simulator</div></div>
   <div id="hud-rows">
     ${row("hr-boat", "Boat", '<span class="tg"></span>')}
     ${row("hr-flags", "Break flags", '<span class="tg"></span>')}
     <div class="hrow" id="hr-layers" role="button" tabindex="0" aria-label="Layers"><span class="nm l1"><span class="plate">Layers</span></span><span class="cnt n4 tx plate" id="hr-cnt">4/7</span>${CHEV}</div>
     ${row("hr-clean", "Clean view", '<span class="tg"></span>')}
     ${row("hr-stats", "Stats", '<span class="tg"></span>')}
+    <div class="hrow" id="hr-fit" role="button" tabindex="0"><span class="nm l1">Fit ocean</span></div>
+    <div class="hrow" id="hr-reset" role="button" tabindex="0"><span class="nm l1">Reset view</span></div>
     <div class="hrows-end"></div>
   </div>
   <div id="hud-sheet" class="sheet-off">
@@ -28,7 +30,7 @@ hud.innerHTML = `
   <button class="hb" id="hb-pause" type="button">${SVG_PAUSE}</button>
   <div id="hud-pl"><span class="l1 plate" id="hud-pause-l">Pause</span><span class="n4 plate">Space</span></div>
   <div id="hud-stats" class="plate"><span class="l1 mu">FPS</span> <span class="n3" id="hs-fps">--</span><span class="sep">·</span><span class="l1 mu">Foam</span> <span class="n3" id="hs-foam">--</span><span class="sep">·</span><span class="n3 ac" id="hs-f">F-</span></div>
-  <div id="hud-ver" class="n4 plate tx">v30.27</div>
+  <div id="hud-ver" class="n4 plate tx">v31</div>
   <div id="hud-toast" class="plate" role="status" aria-live="polite"><span class="l1 tx" id="ht-n"></span><span class="st" id="ht-s"></span></div>`;
 const q = (s) => hud.querySelector(s);
 // ---------- panel state: open | min, plus the Layers sheet ----------
@@ -49,6 +51,8 @@ const flip = (inp) => { inp.checked = !inp.checked; inp.dispatchEvent(new Event(
 act(q("#hr-boat"), () => flip(ui.inputs.boat)); act(q("#hr-flags"), () => flip(ui.inputs.flags));
 act(q("#hr-clean"), () => ui.setClean(!ui.clean));
 act(q("#hr-stats"), () => { window.__ui && window.__ui.setStripHidden(!document.body.classList.contains("ui-hidden-strip")); syncHud(); });
+act(q("#hr-fit"), () => { const cmd = globalThis.__oceanViewCmd; if (cmd) cmd.fit(); });
+act(q("#hr-reset"), () => { const cmd = globalThis.__oceanViewCmd; if (cmd) cmd.reset(); });
 for (const [k] of LAYERS) act(q("#hl-" + k), () => ui.setLayer(k, !ui.layers[k]));
 q("#hb-pause").addEventListener("click", () => ui.togglePause());
 // ---------- sync ----------

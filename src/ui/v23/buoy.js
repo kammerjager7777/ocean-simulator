@@ -5,10 +5,10 @@
 // 2x hull-radius ring on the water), and a click opens the §7.3 card (208 x 128, leader 28 px; shifts sideways off
 // the HUD regions, then flips below). A drag leaves wake ripples;
 // a fast drag (> 2 m/s) also lays a foam trail into the drawn foam field (gpuSurface foam-trail pass).
-import { ui, $ } from "./core.js?v=30.27";
-import { bedRelief } from "../../render/seabed.js?v=30.27";
-import { rippleHeight, addRipple } from "../../physics/ripples.js?v=30.27";
-import { elevAt } from "./sky.js?v=30.27";
+import { ui, $ } from "./core.js?v=30.29";
+import { bedRelief } from "../../render/seabed.js?v=30.29";
+import { rippleHeight, addRipple } from "../../physics/ripples.js?v=30.29";
+import { elevAt } from "./sky.js?v=30.29";
 const T = ui.theme, D2R = Math.PI / 180;
 const SCALE = Number(ui.P.get("buoyx") || 1.45), MASTH = 4.8, HULL_R = 1.5; // mesh: 3 m hull, 4.8 m mast; displayed hull ~4.4 m
 const pos = (() => { try { const j = JSON.parse(ui.store.get("ocean.ui.buoy", "")); if (j && Number.isFinite(j.x) && Number.isFinite(j.z)) return [j.x, j.z]; } catch { /* default */ } return [38, -26]; })();
@@ -128,12 +128,19 @@ const buoy = ui.register({
     // v30.24: the navigation light, Fl Y 4s (one 0.8 s yellow flash every 4 s, wall clock so it also blinks while paused);
     // its halo grows from day to dusk to night so the buoy is easy to find
     const e = elevAt(ui.todMin ?? 660) / D2R; const k = e >= 10 ? 0 : e <= -6 ? 1 : (10 - e) / 16;
-    const R = k < 0.5 ? 6 + (14 - 6) * (k / 0.5) : 14 + (22 - 14) * ((k - 0.5) / 0.5), A = k < 0.5 ? 0.25 + (0.6 - 0.25) * (k / 0.5) : 0.6 + (0.9 - 0.6) * ((k - 0.5) / 0.5);
     const lamp = ui.proj(pos[0], b.y + 4.4 * s, pos[1]);
-    if (lamp && lightOn(ui.now / 1000)) {
-      const gr = ctx.createRadialGradient(lamp[0], lamp[1], 0, lamp[0], lamp[1], R); gr.addColorStop(0, `rgba(255,226,122,${A})`); gr.addColorStop(1, "rgba(255,226,122,0)"); ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(lamp[0], lamp[1], R, 0, 7); ctx.fill();
-      ctx.fillStyle = k > 0.5 ? "#FFE27A" : "#FFF2B0"; ctx.beginPath(); ctx.arc(lamp[0], lamp[1], 1.8, 0, 7); ctx.fill();
-      if (e <= -6) { ctx.save(); ctx.globalAlpha *= 0.3; ctx.strokeStyle = "#FFE27A"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(base[0], base[1] + 4); ctx.lineTo(base[0] + 1, base[1] + 4 + 0.25 * (base[1] - lamp[1]) + 30); ctx.stroke(); ctx.restore(); }
+    // The halo follows the drawn mast, then stays inside a few pixels to a few dozen.
+    // A fixed 22 px night halo sat on a tiny far buoy like a flood, and a close view
+    // must not grow without a bound. The old night stroke under the hull is not drawn.
+    const mastPx = Math.hypot(mast[0] - base[0], mast[1] - base[1]);
+    const fit = Math.max(4, Math.min(28, mastPx * 0.42));
+    const R = fit * (0.45 + 0.55 * k);
+    const A = k < 0.5 ? 0.25 + (0.6 - 0.25) * (k / 0.5) : 0.6 + (0.9 - 0.6) * ((k - 0.5) / 0.5);
+    const inView = lamp && lamp[0] > -80 && lamp[0] < ui.V.cw + 80 && lamp[1] > -80 && lamp[1] < ui.V.ch + 80;
+    if (inView && lightOn(ui.now / 1000) && R > 0) {
+      const gr = ctx.createRadialGradient(lamp[0], lamp[1], 0, lamp[0], lamp[1], R); gr.addColorStop(0, `rgba(255,226,122,${A})`); gr.addColorStop(1, "rgba(255,226,122,0)"); ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(lamp[0], lamp[1], R, 0, Math.PI * 2); ctx.fill();
+      const dot = Math.max(1.2, Math.min(3.2, mastPx * 0.05));
+      ctx.fillStyle = k > 0.5 ? "#FFE27A" : "#FFF2B0"; ctx.beginPath(); ctx.arc(lamp[0], lamp[1], dot, 0, Math.PI * 2); ctx.fill();
     }
     // pop-up
     pop.classList.toggle("on", b.open);
@@ -161,7 +168,7 @@ const buoy = ui.register({
       else { const jx = Math.min(x + W - 12, Math.max(x + 12, dot[0])); T.line(ctx, [dot, [jx, y + H]], { color: T.accent, width: 1, alpha: 0.9 }); T.circle(ctx, dot[0], dot[1], 1.8, { fill: T.accent }); }
       ui.debug.buoyPop = { x, y, flipped, shift, depth: d, lo, hi };
     }
-    ui.debug.buoy = { c: [(g.box[0] + g.box[2]) / 2, (g.box[1] + g.box[3]) / 2], base, pos: pos.slice(), s: b.s, y: b.y, pitch: b.pitch / D2R, roll: b.roll / D2R, hullPx: 2 * hr, hullM: 2 * HULL_R * b.s, dragSpeed, trail: trail.length, Hs: b.Hs };
+    ui.debug.buoy = { c: [(g.box[0] + g.box[2]) / 2, (g.box[1] + g.box[3]) / 2], base, lamp, pos: pos.slice(), s: b.s, y: b.y, pitch: b.pitch / D2R, roll: b.roll / D2R, hullPx: 2 * hr, hullM: 2 * HULL_R * b.s, glowR: inView && lightOn(ui.now / 1000) ? R : 0, mastPx, dragSpeed, trail: trail.length, Hs: b.Hs };
   },
   hide() { pop.classList.remove("on"); },
 });

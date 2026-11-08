@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Ocean simulator</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230c1724'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="./src/ui/ui.css?v=30.27">
-  <link rel="stylesheet" href="./src/ui/v23/v23.css?v=30.27">
+  <link rel="stylesheet" href="./src/ui/ui.css?v=30.29">
+  <link rel="stylesheet" href="./src/ui/v23/v23.css?v=30.29">
 </head>
 <body>
   <canvas id="sea"></canvas>
@@ -14,7 +14,7 @@
     <header class="ph">
       <div class="ph-text">
         <h1 class="title"><span class="t-full">Ocean Simulator</span><span class="t-short">Ocean</span></h1>
-        <div class="subtitle">v30.27 · physical sea</div>
+        <div class="subtitle">v31 · physical sea</div>
       </div>
       <button id="panel-toggle" class="icon-btn" type="button" aria-expanded="true" aria-controls="panel-body" aria-label="Minimise controls">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -28,7 +28,7 @@
         <input id="spd" class="vh kb" type="range" min="0" max="25" step="0.5" value="12" aria-label="Wind speed (m/s)">
         <input id="chop" class="vh kb" type="range" min="0" max="2.5" step="0.1" value="1.5" aria-label="Choppiness">
         <input id="size" class="vh kb" type="range" min="100" max="1000" step="10" value="250" aria-label="Size (m)">
-        <input id="clarity" class="vh kb" type="range" min="3" max="40" step="any" value="22.3024" aria-label="Water clarity (Secchi depth, m)">
+        <input id="clarity" class="vh kb" type="range" min="3" max="40" step="any" value="22.3024" aria-label="Visibility, Secchi depth in metres">
         <input id="depth" class="vh kb" type="range" min="2" max="80" step="1" value="40" aria-label="Depth (m)">
         <select id="gust" class="vh" tabindex="-1" aria-hidden="true"><option value="continuous" selected>Continuous</option><option value="gusty">Gusty</option></select>
         <span id="dir-val" class="vh"></span><span id="spd-val" class="vh"></span><span id="chop-val" class="vh"></span><span id="size-val" class="vh"></span><span id="clarity-val" class="vh"></span><span id="depth-val" class="vh"></span>
@@ -61,8 +61,8 @@
     <!-- v29 text readouts: still written by main.js, not shown (GAD: strip shows numbers only) -->
     <div class="vh" aria-hidden="true"><p id="bands"></p><p id="readout"></p><p id="gravity"></p><p id="clock"></p><p id="camera"></p></div>
   </section>
-  <script type="module" src="./src/main.js?v=30.27"></script>
-  <script type="module" src="./src/ui/ui.js?v=30.27"></script>
-  <script type="module" src="./src/ui/v23/index.js?v=30.27"></script>
+  <script type="module" src="./src/main.js?v=30.29"></script>
+  <script type="module" src="./src/ui/ui.js?v=30.29"></script>
+  <script type="module" src="./src/ui/v23/index.js?v=30.29"></script>
 </body>
 </html>

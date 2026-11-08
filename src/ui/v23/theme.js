@@ -38,7 +38,7 @@ export function accent(min) {
 // v30.24 menu ink: no plates, no glow. The sky colour is only the fallback before the first probe.
 // core.js then picks dark or light ink from the sea pixels behind the words (bright close-up water included).
 // A 1 px hairline in the opposite ink is the only edge. ?ink=diff keeps the inversion look.
-import { skyAt } from "./sky.js?v=30.27";
+import { skyAt } from "./sky.js?v=30.29";
 export const INK = { light: "#F5F7FA", dark: "#0C1724" };
 const lumL = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 const lumH = (h) => lumL(hx(h).map(s2l));

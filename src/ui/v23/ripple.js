@@ -1,7 +1,7 @@
 // v30.27 ripple cursor plus the click's own ring. The ring is the packet on the water,
 // a few metres across, not a screen-space splash. Height and foam come from ripples.js.
-import { ui } from "./core.js?v=30.27";
-import { rippleRings } from "../../physics/ripples.js?v=30.27";
+import { ui } from "./core.js?v=30.29";
+import { rippleRings } from "../../physics/ripples.js?v=30.29";
 const T = ui.theme;
 function ringAt(x, z, r, y) {
   const pts = [];

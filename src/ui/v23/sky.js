@@ -43,16 +43,12 @@ export function skyAt(m) {
   if (night) { key.glit = K.night.glit; key.gi = K.night.gi; }
   return { e, key, night, morning };
 }
-// v30.24 (Michael, item 2): the sun / moon is a real object in the background sky, dragged along a set path that spans
-// the WHOLE sky. Default (Michael's pick): FIXED IN THE WORLD. The arc runs from the east horizon (sunrise, 06:00) over
-// the south to the west horizon (sunset, 18:00) at the sun's true azimuth, so it swings round when the camera orbits,
-// like the real sun; the moon rides the same arc 12 h apart. The orbit camera looks down ~30 deg, so the true sky is
-// above the frame: the backdrop shows the sky as a level wide-angle view, azimuth relative to the camera across the
-// width (+-90 deg = the edges, world-fixed), elevation up the height from a horizon at 0.66 H. Facing south, the whole
-// east-to-west arc spans the screen; facing east, sunrise is mid-screen and the arc climbs away behind you.
-// ?sunarc=screen (fallback): the screen-wide arc, left edge to right edge whatever the camera azimuth.
-// Either way the dome draws the disc on the view ray through the arc point; the light takes the world-fixed azimuth
-// (world) or that ray's azimuth (screen).
+// The sun and the moon are directions on the distant sky, fixed by the sundial.
+// The dome paints the disc on the view ray that matches that direction, so the
+// body has no distance: zooming or shifting the eye does not slide it or change
+// its angular size, and turning the camera moves it the way the sky moves.
+// A previous path rewrote the direction every frame so a stylized screen point
+// stayed put. That is what fought the orbit. ?sunarc=screen is the old fallback.
 export const SUNARC = typeof location !== "undefined" && new URLSearchParams(location.search).get("sunarc") === "screen" ? "screen" : "world"; // v30.24: Michael picked world (default)
 const EMAX = elevAt(720);
 
@@ -107,19 +103,12 @@ export function publish(m, enabled = true, VI = null) {
     const lm = night ? m + 720 : m; // full moon opposite the sun
     // the dome draws the true sky position (the light keeps the art-directed lower elevation)
     const de = elevAt(m), da = azW(m), me = elevAt(m + 720), ma = azW(m + 720);
-    Ldir = { sun: [Math.cos(de) * Math.cos(da), Math.sin(de), Math.cos(de) * Math.sin(da)], moon: [Math.cos(me) * Math.cos(ma), Math.sin(me), Math.cos(me) * Math.sin(ma)], sunOn: de > -0.02 ? 1 : 0, moonOn: me > -0.02 ? 1 : 0 };
-    let a = azW(lm); // the light keeps the arc azimuth (11:00 included: the visible sun lights the sea)
-    if (scr) { // the disc sits on the screen arc: the dome draws it on that pixel's view ray, the light takes its azimuth
+    Ldir = { sun: [Math.cos(de) * Math.cos(da), Math.sin(de), Math.cos(de) * Math.sin(da)], moon: [Math.cos(me) * Math.cos(ma), Math.sin(me), Math.cos(me) * Math.sin(ma)], sunOn: de > -0.02 ? 1 : 0, moonOn: me > -0.02 && de <= -0.02 ? 1 : 0, distant: true };
+    let a = azW(lm); // the light keeps the sundial azimuth, same clock as the disc
+    if (scr) { // explicit fallback: pin the disc to a screen arc. Not the default.
       const p = arcScreen(arcH(m), V.cw, V.ch), d = rayDir(p[0], p[1], V, VI); a = Math.atan2(d[2], d[0]);
-      if (isSunUp(m)) Ldir.sun = d; else Ldir.moon = d; Ldir.screen = p;
-    } else if (V && VI && V.cw > 0) {
-      const sp=worldArcScreen(m,V.cw,V.ch,V,VI),mp=worldArcScreen((m+720)%1440,V.cw,V.ch,V,VI);
-      if(sp)Ldir.sun=rayDir(...sp,V,VI);
-      if(mp)Ldir.moon=rayDir(...mp,V,VI);
-      // Exactly one rendered disc, on the same full-day path for each body.
-      // It must never flip on before the shared geometric horizon crossing.
-      const sunUp=elevAt(m)>=0;Ldir.sunOn=sunUp&&sp?1:0;Ldir.moonOn=!sunUp&&mp?1:0;
-      Ldir.screen=(sunUp?sp:mp)||null;
+      if (isSunUp(m)) Ldir.sun = d; else Ldir.moon = d;
+      Ldir.screen = p; Ldir.distant = false;
     }
     const el = Math.max(0.02, e0 * elevAt(lm) / elevAt(660));
     L = [Math.cos(el) * Math.cos(a) * l, Math.sin(el) * l, Math.cos(el) * Math.sin(a) * l];

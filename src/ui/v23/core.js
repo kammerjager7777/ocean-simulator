@@ -1,29 +1,28 @@
 // v30.23 on-sea UI core (behaviour; the look comes from theme.js). Layers v4 + migration, keys 1-7 / U /
 // Space, clean view, the pause button, the overlay canvas, world<->screen geometry, the pointer router
 // (on-object hits first, misses fall through to the camera) and the per-frame loop the objects hang on.
-import { theme, inkForLum } from "./theme.js?v=30.27";
-import { publish as publishSky } from "./sky.js?v=30.27";
-import { addRipple, publishSplash } from "../../physics/ripples.js?v=30.27";
-import { tick as coastTick, cancelAll } from "./coast.js?v=30.27";
+import { theme, inkForLum } from "./theme.js?v=30.29";
+import { publish as publishSky } from "./sky.js?v=30.29";
+import { addRipple, publishSplash } from "../../physics/ripples.js?v=30.29";
+import { tick as coastTick, cancelAll } from "./coast.js?v=30.29";
 export const P = new URLSearchParams(location.search);
 export const $ = (s) => document.querySelector(s);
 export const store = {
   get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
 };
-// [json key, layer name, default, key digit] (modern-ui-spec §6.4; first visit: 1, 4, 6, 7 ON)
-// v30.24 (Michael): the wind streaks layer is gone; the layers after it moved up one key (ripple 5, sky 6, handles 7)
-export const LAYERS = [["wind", "Wind arrow", true, 1], ["buoy", "Buoy", false, 2], ["section", "Cross-section", false, 3],
-  ["beaufort", "Beaufort", true, 4], ["ripple", "Ripple touch", false, 5], ["tod", "Sky & time", true, 6], ["tools", "Block handles", true, 7]];
-export function migrateLayers(raw) { // ocean.ui.layers v1 -> v2 -> v3 -> v4 (v3 added streaks, v5 defaults)
+// [json key, layer name, default, key digit]. Beaufort is not a layer: the wind card always shows it.
+export const LAYERS = [["wind", "Wind", true, 1], ["buoy", "Buoy", false, 2], ["section", "Cross-section", false, 3],
+  ["ripple", "Ripple touch", false, 4], ["tod", "Sky & time", true, 5], ["tools", "Block handles", true, 6]];
+export function migrateLayers(raw) {
   const d = Object.fromEntries(LAYERS.map(([k, , v]) => [k, v]));
   let j = null; try { j = JSON.parse(raw); } catch { return d; }
   if (!j || typeof j !== "object") return d;
-  if (j.v === 1) { const v2 = { v: 2 }; for (const k of ["wind", "section", "beaufort", "ripple", "tod"]) if (typeof j[k] === "boolean") v2[k] = j[k]; v2.buoy = j.probe === true || j.buoy === true; v2.tools = true; j = v2; }
+  if (j.v === 1) { const v2 = { v: 2 }; for (const k of ["wind", "section", "ripple", "tod"]) if (typeof j[k] === "boolean") v2[k] = j[k]; v2.buoy = j.probe === true || j.buoy === true; v2.tools = true; j = v2; }
   if (j.v === 2) { j = { ...j, v: 3 }; }
   if (j.v === 3) { const { streaks, ...rest } = j; j = { ...rest, v: 4 }; }
-  if (j.v === 4) j = { ...j, v: 5, beaufort: true, section: false };
-  if (j.v === 5) { for (const k of Object.keys(d)) if (typeof j[k] === "boolean") d[k] = j[k]; }
+  if (j.v === 4) j = { ...j, v: 5, section: false };
+  if (j.v === 5 || j.v === 6) { for (const k of Object.keys(d)) if (typeof j[k] === "boolean") d[k] = j[k]; }
   return d;
 }
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -31,7 +30,7 @@ const UI_OFF = P.get("ui") === "0";
 const layers = migrateLayers(store.get("ocean.ui.layers", ""));
 const LAYER_URL = P.get("layers"); // ?layers=all|none|wind,tod,... (timing and review only; not saved)
 if (LAYER_URL) { const want = LAYER_URL === "all" ? LAYERS.map((l) => l[0]) : LAYER_URL === "none" ? [] : LAYER_URL.split(","); for (const [k] of LAYERS) layers[k] = want.includes(k); }
-const saveLayers = () => { if (!LAYER_URL) store.set("ocean.ui.layers", JSON.stringify({ v: 5, ...layers })); };
+const saveLayers = () => { if (!LAYER_URL) store.set("ocean.ui.layers", JSON.stringify({ v: 6, ...layers })); };
 saveLayers();
 let clean = store.get("ocean.ui.clean", "off") === "on";
 const vis = {}; for (const [k] of LAYERS) vis[k] = layers[k] && !clean ? 1 : 0;
@@ -227,29 +226,19 @@ function frame(t) {
         if (r.width < 2 || r.height < 2) return;
         nodes.push({ el, x: r.left + Math.min(28, r.width * 0.45), y: r.top + r.height * 0.5 });
       };
-      for (const sel of ["#hb-set", "#hud-title", "#hud-cap", "#hb-pause", "#hud-pl", "#hud-stats", "#hud-ver"]) consider(hud.querySelector(sel));
+      for (const sel of ["#hb-set", "#hud-title", "#hb-pause", "#hud-pl", "#hud-stats", "#hud-ver"]) consider(hud.querySelector(sel));
       hud.querySelectorAll("#hud-rows .hrow, #hud-sheet .hrow").forEach((el) => {
         if (el.closest(".hidden-col, .sheet-off, .rows-left")) return;
         consider(el);
       });
       globalThis.__oceanLumWant = nodes.map((n) => [n.x, n.y]);
-      ui._inkMemo = ui._inkMemo || new WeakMap();
+      // The menu sits on its own plate, so one bright pixel must not flip a whole row.
+      // Ink stays the light colour written in v23.css. The probe is kept for checks.
       const applied = [];
       for (const n of nodes) {
         const L = ui.lumAt(n.x, n.y);
-        // Black type wins on any backdrop lighter than about 0.18 (the contrast
-        // crossover of #0C1724 and #F5F7FA). The 0.14–0.22 gap only stops a
-        // single crest from flipping the glyph.
-        let mode = ui._inkMemo.get(n.el);
-        if (Number.isFinite(L)) {
-          if (mode !== "dark" && mode !== "light") mode = L > 0.18 ? "dark" : "light";
-          else if (mode === "dark") mode = L < 0.14 ? "light" : "dark";
-          else mode = L > 0.22 ? "dark" : "light";
-          ui._inkMemo.set(n.el, mode);
-        } else mode = mode || "light";
-        n.el.classList.toggle("ink-on-light", mode === "dark");
-        n.el.classList.toggle("ink-on-dark", mode === "light");
-        applied.push({ id: n.el.id || n.el.className, mode, L: Number.isFinite(L) ? Math.round(L * 1000) / 1000 : null });
+        n.el.classList.remove("ink-on-light", "ink-on-dark");
+        applied.push({ id: n.el.id || n.el.className, mode: "plate", L: Number.isFinite(L) ? Math.round(L * 1000) / 1000 : null });
       }
       ui.debug.hudInk = applied;
     }

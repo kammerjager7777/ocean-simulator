@@ -4,6 +4,7 @@
 @font-face { font-family: "Barlow"; src: url("./fonts/Barlow-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
 @font-face { font-family: "Barlow"; src: url("./fonts/Barlow-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
 @font-face { font-family: "Geist Mono"; src: url("./fonts/GeistMono.ttf") format("truetype"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Instrument Serif"; src: url("./fonts/InstrumentSerif-Italic.ttf") format("truetype"); font-weight: 400; font-style: italic; font-display: swap; }
 :root { --accent: #BFE3F7; --accent-rgb: 191,227,247; --hud-text: #F5F7FA; --hud-muted: #C9D3DD; --hud-muted-rgb: 201,211,221; --card-rgb: 13,27,38; --scrim-rgb: 10,22,34; --plate-a: 0.65;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1); --k: 1;
   --sans: "Barlow", "Helvetica Neue", Arial, sans-serif; --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace; --tsh: none; --halo-rgb: 0,8,20; --ink-ac: #BFE3F7; }
@@ -33,14 +34,14 @@
 #v23-hud { position: fixed; inset: 0; pointer-events: none; z-index: 6; color: var(--hud-text); text-shadow: none; isolation: isolate; }
 :where(#v23-hud button) { all: unset; box-sizing: border-box; cursor: pointer; pointer-events: auto; }
 #v23-hud button:focus-visible, #v23-hud .hrow:focus-visible { outline: 1px solid var(--hud-text); outline-offset: 3px; }
-.hb { position: absolute; width: 40px; height: 40px; display: grid; place-items: center; }
+.hb { position: absolute; width: 44px; height: 44px; display: grid; place-items: center; }
 .hb svg { overflow: visible; }
 .hb .ring { fill: none; stroke: var(--hud-text); stroke-opacity: 0.9; stroke-width: 1.2; transition: stroke 120ms var(--ease), stroke-opacity 120ms var(--ease); }
 .hb:hover .ring { stroke: var(--hud-text); stroke-opacity: 1; stroke-width: 1.5; }
 .hb:active .ring { fill: rgba(var(--accent-rgb), 0.2); }
 .hb .ic { stroke: var(--hud-text); stroke-width: 1.2; stroke-linecap: round; fill: none; }
 .hb .dot { fill: var(--hud-text); }
-#hb-set { left: 24px; top: 24px; } #hb-pause { right: 24px; top: 24px; }
+#hb-set { left: 18px; top: 18px; } #hb-pause { right: 18px; top: 18px; }
 #hud-title { position: absolute; left: 70px; top: 28px; } #hud-cap { position: absolute; left: 70px; top: 45px; }
 #hud-title, #hud-cap { pointer-events: none; }
 #hud-rows, #hud-sheet { position: absolute; left: 24px; top: 76px; width: 184px; transition: opacity 240ms var(--ease), transform 240ms var(--ease); }
@@ -123,11 +124,125 @@
 .v23-card { background: rgba(5,17,29,.94); }
 .v23-card .r5 { display: block; letter-spacing: .35px; } /* numeric wave history follows; no vague, possibly-stale status */
 .world-chip { text-shadow: none; }
+.sea-inst { position: absolute; right: 28px; width: 200px; height: 88px; z-index: 9; overflow: hidden; border-radius: 18px; border: 1px solid rgba(255,255,255,.22); background: #000; color: #F6F8FF; pointer-events: none; opacity: 0; touch-action: none; transition: opacity 140ms var(--ease); }
+.sea-inst.on { opacity: 1; pointer-events: auto; }
+.sea-inst canvas { position: absolute; inset: 0; width: 200px; height: 88px; }
+.sea-inst:focus-visible { outline: 1px solid #F5F7FB; outline-offset: 3px; }
+#clar-inst { bottom: 222px; }
+#chop-inst { bottom: 318px; }
+#wind-inst { bottom: 414px; height: 112px; cursor: ns-resize; }
+#wind-inst canvas { height: 112px; }
+#onsea-ui.clean .sea-inst { opacity: 0; pointer-events: none; }
 #solar-dial { --solar-sky: #000; position: absolute; right: 28px; bottom: 58px; width: 200px; height: 156px; overflow: hidden; border-radius: 42px; border: 1px solid rgba(255,255,255,.22); background: #000; color: #F6F8FF; pointer-events: none; opacity: 0; cursor: ew-resize; touch-action: none; transition: opacity 140ms var(--ease); z-index: 8; }
 #solar-dial.on { opacity: 1; pointer-events: auto; }
 #solar-dial canvas { position: absolute; inset: 0; width: 200px; height: 156px; }
 #solar-dial .solar-time { position: absolute; top: 101px; left: 0; width: 200px; text-align: center; pointer-events: none; }
 #solar-dial .solar-clock { display: block; font: 400 25px/29px var(--mono); font-variant-numeric: tabular-nums; }
-#solar-dial .solar-phase { display: block; font: 500 9px/12px var(--sans); letter-spacing: 1.2px; text-transform: uppercase; }
+#solar-dial .solar-phase { display: block; font: 500 12px/15px var(--sans); letter-spacing: 0.3px; text-transform: uppercase; }
+/* v30.29: the menu is a stable plate. Type stays light on that plate, in normal case,
+   and a bright patch of sea cannot flip a whole row. No text outline or shadow. */
+#v23-hud, #v23-hud .tx, #v23-hud .mu, #v23-hud .ac, #v23-hud .l1, #v23-hud .l2, #v23-hud .t1, #v23-hud .n3, #v23-hud .n4 { color: #F5F7FB; text-shadow: none; }
+#v23-hud .t1, #v23-hud .l1, #v23-hud .l2 { text-transform: none; letter-spacing: 0.12px; }
+#hud-head { position: absolute; left: 74px; top: 18px; pointer-events: none; box-sizing: border-box; display: flex; align-items: center; min-height: 52px; max-height: 60px; padding: 8px 14px; background: rgba(15, 20, 28, 0.55); border-radius: 12px; backdrop-filter: none; }
+#hud-title { position: static; font-family: "Instrument Serif", "Iowan Old Style", Georgia, "Times New Roman", serif; font-weight: 400; font-style: italic; font-size: clamp(32px, 3.2vw, 44px); line-height: 1; letter-spacing: -0.01em; text-transform: none; color: #F5F7FB; font-synthesis: none; }
+#hb-set { left: 18px; top: calc(18px + (max(52px, clamp(32px, 3.2vw, 44px) + 16px) - 44px) / 2); width: 44px; height: 44px; }
+#hb-pause { right: 18px; top: calc(18px + (max(52px, clamp(32px, 3.2vw, 44px) + 16px) - 44px) / 2); width: 44px; height: 44px; }
+.hb { width: 44px; height: 44px; color: #F5F7FB; background: rgba(15, 20, 28, 0.6); }
+.hb svg { width: 20px; height: 20px; }
+.hb .ring { stroke: none; }
+.hb .ic, #hb-pause .bars { stroke: #F5F7FB; stroke-width: 1.75; }
+.hb .dot, #hb-pause .play { fill: #F5F7FB; }
+.hb:hover .ic, .hb:hover .bars { stroke: #F5F7FB; fill: none; }
+.hb:hover .dot, .hb:hover .play { fill: #F5F7FB; }
+.hb:focus-visible { outline: 1px solid #F5F7FB; outline-offset: 3px; }
+.paused #hb-pause { box-shadow: inset 0 0 0 1.5px #D7ECFF; }
+#hud-rows, #hud-sheet { top: 88px; width: 220px; box-sizing: border-box; background: rgba(8, 16, 28, 0.8); border-radius: 14px; padding: 4px 12px 8px 8px; }
+#hud-rows::before, #hud-sheet::before { border-top-color: transparent; }
+.hrow { height: 34px; }
+#v23-hud .hrow .l1 { font-size: 13px; line-height: 18px; }
+#v23-hud .hrow .n4, #v23-hud .hrow .dg { font-size: 11px; line-height: 14px; }
+.tg { width: 30px; height: 16px; }
+.tg::before { border-radius: 8px; }
+.tg::after { width: 10px; height: 10px; top: 2px; left: 2px; }
+.on .tg::after { transform: translateX(16px); }
+.hb { box-sizing: border-box; background: rgba(15, 20, 28, 0.85); border: 1.5px solid #F5F7FB; border-radius: 50%; }
+#hud-pl { background: rgba(8, 16, 28, 0.8); border-radius: 12px; padding: 6px 10px 7px; right: 72px; top: 18px; }
+#hud-pl .l1 { font-size: 13px; line-height: 16px; text-transform: none; letter-spacing: 0.12px; }
+#hud-stats, #hud-ver { background: rgba(8, 16, 28, 0.8); border-radius: 10px; padding: 5px 8px; }
+#hud-stats { font-size: 13px; }
+#hud-ver { font-size: 11px; }
 #solar-dial .solar-caption { display: none; }
 #onsea-ui.clean #solar-dial { opacity: 0; pointer-events: none; }
+
+/* v30.36: settings, stats, pause and the buoy card share the instrument panels.
+   Black fill, a fine light edge, compact sans labels, mono values, a sky tick.
+   The title stays Instrument Serif. No blur and no text outline. */
+#hud-head, #hud-rows, #hud-sheet, #hud-pl, #hud-stats, #hud-ver, #hud-toast, .v23-card {
+  background: #000;
+  border: 1px solid rgba(246, 248, 255, 0.62);
+  color: #F6F8FF;
+  backdrop-filter: none;
+}
+#hud-head { border-radius: 18px; }
+#hud-rows, #hud-sheet { border-radius: 18px; padding: 18px 12px 8px 12px; }
+#hud-rows::before, #hud-sheet::before {
+  left: 14px; right: auto; top: 10px; width: 22px; height: 0;
+  border: 0; border-top: 1.5px solid var(--accent);
+}
+.hrows-end { border: 0; }
+#v23-hud .hrow .l1 { font: 500 12px/16px var(--sans); letter-spacing: 0.02em; color: #F6F8FF; }
+#v23-hud .hrow .n4, #v23-hud .hrow .dg { font: 400 11px/14px var(--mono); color: #F6F8FF; }
+#v23-hud .hrow::after, .ink-dark #v23-hud .hrow::after {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px transparent;
+  border-radius: 8px;
+}
+#v23-hud .hrow:hover::after {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(246, 248, 255, 0.28);
+}
+#v23-hud .tg { width: 26px; height: 14px; }
+#v23-hud .tg::before { border-radius: 7px; border: 1px solid rgba(246, 248, 255, 0.45); background: transparent; }
+#v23-hud .tg::after { width: 8px; height: 8px; top: 3px; left: 3px; border-radius: 50%; border: 0; background: rgba(246, 248, 255, 0.85); }
+#v23-hud .on .tg::before { border-color: var(--accent); }
+#v23-hud .on .tg::after { transform: translateX(12px); background: var(--accent); }
+.hb {
+  background: #000;
+  border: 1px solid rgba(246, 248, 255, 0.85);
+  border-radius: 50%;
+}
+.hb:hover { border-color: var(--accent); }
+.hb .ic, #hb-pause .bars { stroke: #F6F8FF; stroke-width: 1.35; }
+.hb .dot, #hb-pause .play { fill: #F6F8FF; }
+.paused #hb-pause { box-shadow: none; border-color: var(--accent); }
+#hud-pl { border-radius: 14px; padding: 7px 10px 8px; }
+#hud-pl .l1, #hud-pl .n4 { display: inline; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+#hud-pl .n4 { margin-left: 8px; font-family: var(--mono); letter-spacing: 0.04em; }
+#hud-stats, #hud-ver { border-radius: 12px; }
+#hud-stats { font-size: 12px; }
+#hud-stats .l1 { font: 500 10px/14px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: rgba(220, 224, 230, 0.78); }
+#hud-stats .n3, #hud-ver { font: 400 12px/14px var(--mono); color: #F6F8FF; }
+#hud-stats::after { top: 8px; left: 10px; width: 18px; border-top: 1.5px solid var(--accent); }
+#hud-toast { border-radius: 12px; padding: 6px 10px; }
+#hud-toast::after { border-top-color: var(--accent); }
+.v23-card { border-radius: 18px; border-top: 1px solid rgba(246, 248, 255, 0.62); }
+.v23-card .r1 .ac { color: rgba(220, 224, 230, 0.9); letter-spacing: 0.12em; border-bottom: 1.5px solid var(--accent); }
+.v23-card, .v23-card .tx, .v23-card .mu, .v23-card .ac { color: #F6F8FF; }
+.v23-card .n1 { font-weight: 400; }
+#v23-hud .chev path, #v23-hud .hrow:hover .chev path { stroke: #F6F8FF; }
+#hud-rows, #hud-sheet { transition: opacity 160ms linear, transform 160ms linear; }
+.hidden-col { transform: translateY(-4px); }
+#v23-hud .hrow:active::after {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+#solar-dial.grab { box-shadow: inset 0 0 0 1.5px rgba(255, 246, 228, 0.9); }
+#solar-dial.settle { box-shadow: inset 0 0 0 1px rgba(255, 246, 228, 0.35); }
+@media (prefers-reduced-motion: reduce) {
+  #hud-rows, #hud-sheet, #solar-dial, .sea-inst, .v23-card, .v23c, #hud-toast, .tg::after, .hb {
+    transition: none !important;
+  }
+  .hidden-col, .sheet-off, .rows-left { transform: none !important; }
+}

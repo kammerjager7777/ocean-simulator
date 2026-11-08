@@ -1,7 +1,13 @@
 // Short, interruptible coast after a scalar drag. Depth, clarity, chop, wind
-// speed, direction and placement never register here, so they cannot overshoot.
+// speed and placement never register here. Direction may, on its own 360° circle.
 const jobs = new Map();
-const wrapPi = (d) => { let x = d; while (x <= -720) x += 1440; while (x > 720) x -= 1440; return x; };
+const wrapDelta = (d, period) => {
+  const half = period / 2;
+  let x = d;
+  while (x <= -half) x += period;
+  while (x > half) x -= period;
+  return x;
+};
 
 export function sample(id, value, now) {
   let j = jobs.get(id);
@@ -25,7 +31,7 @@ export function release(id, opt) {
   if (!a || !b || !(b.t > a.t)) { j.v = 0; return; }
   const dt = (b.t - a.t) / 1000;
   let vel = dt > 0.02 ? (b.v - a.v) / dt : 0;
-  if (opt.wrap) vel = wrapPi(b.v - a.v) / dt;
+  if (opt.wrap) vel = wrapDelta(b.v - a.v, opt.wrap) / dt;
   const cap = opt.maxAbs ?? 1e9;
   vel = Math.max(-cap, Math.min(cap, vel));
   const floor = opt.ignore ?? 0;

@@ -1,6 +1,6 @@
 // v30.23 render hooks (kept out of view.js so the v30.22g rebase stays small): the sky dome backdrop,
 // and the per-frame uniforms for the sky-keyed reflection/glitter, the ripples and the seabed relief.
-import { rippleUniforms, setRippleScale } from "../physics/ripples.js?v=30.27";
+import { rippleUniforms, setRippleScale } from "../physics/ripples.js?v=30.29";
 const SKY_VS = `#version 300 es
 out vec2 vNdc;
 void main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0; vNdc = p; gl_Position = vec4(p, 0.9999, 1.0); }`;

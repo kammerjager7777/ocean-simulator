@@ -1,15 +1,15 @@
 // v30.27 Apple-Watch-style Solar control. The full 24 h sine is centered in the card:
 // midnight at both padded ends, noon on the card center, 06:00 and 18:00 symmetric.
 // A short coast continues a flick, wraps at midnight, and stops at the next pointer.
-import { ui } from "./core.js?v=30.27";
-import { elevAt, isSunUp } from "./sky.js?v=30.27";
-import { sample, release, cancel, velocity } from "./coast.js?v=30.27";
+import { ui } from "./core.js?v=30.29";
+import { elevAt, isSunUp } from "./sky.js?v=30.29";
+import { sample, release, cancel, velocity } from "./coast.js?v=30.29";
 const D2R = Math.PI / 180, URL_T = ui.P.get("tod");
 const X0 = 28, X1 = 372, HY = 101, AMP = 64;
 ui.todMin = (() => { if (URL_T && /^\d{1,2}:\d{2}$/.test(URL_T)) { const [h, m] = URL_T.split(":").map(Number); return h * 60 + m; } const v = Number(ui.store.get("ocean.ui.tod", "660")); return Number.isFinite(v) && v >= 0 && v < 1440 ? v : 660; })();
 const fmt = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(Math.round(m % 60) % 60).padStart(2, "0")}`;
 function setT(m) { m = ((Math.round(m) % 1440) + 1440) % 1440; ui.todMin = m; if (!URL_T) ui.store.set("ocean.ui.tod", String(m)); drawDial(); kb.upd(); }
-let m0 = 660, x0 = 0, drag = null;
+let m0 = 660, x0 = 0, drag = null, settle = 0;
 const el = document.createElement("div"); el.id = "solar-dial"; el.setAttribute("role", "slider"); el.tabIndex = 0; el.setAttribute("aria-label", "Solar time: drag left or right through a full day");
 el.setAttribute("aria-valuemin", "0"); el.setAttribute("aria-valuemax", "1440");
 el.innerHTML = `<canvas width="400" height="312" aria-hidden="true"></canvas><div class="solar-time"><span class="solar-clock">11:00</span><span class="solar-phase">SUN 65°</span></div><div class="solar-caption">SOLAR · DRAG ↔ THROUGH 24 H</div>`;
@@ -120,14 +120,27 @@ function drawDial() {
   ctx.lineWidth = 1.15; ctx.strokeStyle = "rgba(186,190,198,.45)"; ctx.beginPath(); ctx.moveTo(X0, HY); ctx.lineTo(X1, HY); ctx.stroke();
   ctx.strokeStyle = "rgba(214,218,224,.72)"; ctx.lineWidth = 2.1; ctx.beginPath();
   for (let n = 0; n <= 240; n++) { const q = path(n * 6, n === 240); if (!n) ctx.moveTo(...q); else ctx.lineTo(...q); } ctx.stroke();
-  for (const [hour, label] of [[6, "6"], [18, "18"]]) { const q = path(hour * 60); ctx.fillStyle = "rgba(220,224,230,.7)"; ctx.font = "500 16px Barlow, sans-serif"; ctx.textAlign = "center"; ctx.fillText(label, q[0], 127); }
+  for (const [hour, label] of [[6, "6"], [12, "12"], [18, "18"]]) { const q = path(hour * 60); ctx.fillStyle = hour === 12 ? "rgba(244,247,251,.92)" : "rgba(220,224,230,.8)"; ctx.font = "500 22px Barlow, sans-serif"; ctx.textAlign = "center"; ctx.fillText(label, q[0], 132); }
   sunDot(...pOther, false, e);
   sunDot(...p, true, e);
+  if (drag) settle = 1;
+  else settle = ui.reduced ? 0 : settle * Math.exp(-(ui.dt || 0.016) / 0.32);
+  if (settle > 0.04) {
+    ctx.save();
+    ctx.strokeStyle = drag ? "rgba(255,246,228,0.95)" : `rgba(255,246,228,${0.55 * settle})`;
+    ctx.lineWidth = drag ? 2.4 : 1.6;
+    ctx.beginPath();
+    ctx.arc(p[0], p[1], drag ? 11 : 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+  el.classList.toggle("grab", !!drag);
+  el.classList.toggle("settle", !drag && settle > 0.2);
   clock.textContent = fmt(m); phase.textContent = Math.abs(e) < 4 ? (m < 720 ? "SUNRISE" : "SUNSET") : e >= 4 ? `SUN ${Math.round(e)}°` : m === 0 ? "NIGHT · MIDNIGHT" : `MOON ${Math.round(-e)}°`;
   el.setAttribute("aria-valuenow", String(Math.round(m))); el.setAttribute("aria-valuetext", `${fmt(m)}, ${e >= 0 ? "sun" : "night"}`);
   const p6 = path(360), p12 = path(720), p18 = path(1080), p0 = path(0), p24 = path(0, true);
   ui.debug.solar = {
-    m, x: p[0], y: p[1], sun: up, e, dial: true, inSkyDrag: false, coast: velocity("tod"),
+    m, x: p[0], y: p[1], sun: up, e, dial: true, inSkyDrag: false, coast: velocity("tod"), grab: !!drag, settle,
     noonX: p12[0], x6: p6[0], x18: p18[0], x0: p0[0], x24: p24[0], mid: 200,
     glow: g,
     dialRect: [el.offsetLeft, el.offsetTop, el.offsetWidth, el.offsetHeight],
@@ -148,7 +161,9 @@ el.addEventListener("pointermove", (ev) => {
   setT(m); sample("tod", m, performance.now());
 });
 const stop = (ev) => {
-  if (drag) release("tod", { wrap: 1440, maxAbs: 220, ignore: 30, tau: 0.22, stop: 8, on: setT });
+  // A little more carry than tau 0.22: the same speed cap and the same
+  // 30 min/s floor, so a slow drag still stops and a flick does not spin the day.
+  if (drag) release("tod", { wrap: 1440, maxAbs: 220, ignore: 30, tau: 0.34, stop: 8, on: setT });
   drag = null; ev.stopPropagation();
 };
 el.addEventListener("pointerup", stop); el.addEventListener("pointercancel", stop);
@@ -157,6 +172,16 @@ el.addEventListener("keydown", (ev) => {
   if (/Arrow(Left|Right)/.test(ev.key)) { cancel("tod"); ev.preventDefault(); ev.stopPropagation(); setT(ui.todMin + (ev.key === "ArrowRight" ? 1 : -1) * (ev.shiftKey ? 60 : 10)); }
 });
 addEventListener("keydown", (ev) => { if ((ev.key === "9" || ev.key === "0") && ev.target.tagName !== "INPUT") { cancel("tod"); ev.preventDefault(); setT(ui.todMin + (ev.key === "0" ? 30 : -30)); } });
-const solar = ui.register({ layer: "tod", draw(a) { el.classList.toggle("on", a > 0.5 && !ui.clean); drawDial(); kb.upd(); }, hide() { el.classList.remove("on"); } });
+const solar = ui.register({
+  layer: "tod",
+  draw(a) {
+    const on = a > 0.5 && !ui.clean;
+    if (!on && drag) { drag = null; cancel("tod"); }
+    el.classList.toggle("on", on);
+    drawDial();
+    kb.upd();
+  },
+  hide() { el.classList.remove("on"); drag = null; cancel("tod"); },
+});
 window.__setTod = (m) => { cancel("tod"); setT(m); };
 void solar;

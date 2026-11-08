@@ -2,9 +2,9 @@ import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftVie
 import { LOBE_GLSL } from "../physics/roughness.js?v=30.22";
 import { timed } from "../physics/passTimer.js?v=30.22";
 import { createBoatView, createBuoyView } from "./boatView.js?v=30.22";
-import { BED_GLSL } from "./seabed.js?v=30.27";
-import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.27";
-import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js?v=30.27";
+import { BED_GLSL } from "./seabed.js?v=30.29";
+import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
+import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js?v=30.29";
 import { SEABED_LUT } from "./seabedLut.js?v=30.22";
 import { CURL_SHAPE_GLSL, CURL_SLOTS, curlX } from "../physics/gpuSurface.js?v=30.22";
 const FAR_HALVE_DEFAULT = 0; // 05:16 horizon bar: quarter-density far rings flattened the sun25 silhouette (?farhalve=1 to test)
@@ -331,16 +331,40 @@ vec4 seafloorShade() {
     fr = F;
   }
   vec3 outc = sfEncode(mix(SF_UPWELL * c, SF_SKY, fr));
-  if (vWorld.y < -depth + bedRelief(vWorld.xz, depth) + SF_SLICE) outc = sfCap(outc);
-  else {
-    vec3 c3 = body3 * exp(-Kd3 * z);
+  // The bottom 0.4 m used to swap in the seabed lookup at the full depth. On a
+  // 40 m seabed that sample is already deep-blue fog for every Secchi depth the
+  // slider can set, so the strip stayed blue while the water above it changed.
+  // It now uses the same absorption as the wall, and shows the sand only as far
+  // as that light still gets through.
+  vec3 trKZ = exp(-Kd3 * z);
+  // The lower wall used to open onto the floor. The path sideways is only the
+  // last fraction of a metre, so the wall went transparent and the seabed
+  // lookup showed through. That lookup is already blue fog for every Secchi
+  // depth once the bed is deep, which is the bright strip. Where the column
+  // above has absorbed the light, keep this face opaque. Clearer shallow water
+  // still sees through. The floor drawn from above is a different pass.
+  float vertT = clamp(dot(trKZ, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+  wallA = mix(1.0, wallA, smoothstep(0.02, 0.45, vertT));
+  bool inSlice = vWorld.y < -depth + bedRelief(vWorld.xz, depth) + SF_SLICE;
+  if (inSlice) {
+    wallA = 1.0;
+    vec3 sand = SF_GAIN * sfAlbedo(vWorld.xz + vec2(vWorld.y));
+    vec3 linS = mix(body3 * trKZ, sand, clamp(trKZ, 0.0, 1.0));
+    linS = linS / (1.0 + 0.35 * linS);
+    outc = sfCap(pow(max(linS, 0.0), vec3(1.0 / 2.2)));
+  } else {
+    vec3 c3 = body3 * trKZ;
     vec3 lin3 = mix(c3, vec3(0.36, 0.70, 0.68), 0.6 * fr) * PHYS_EXPO;
     lin3 = lin3 / (1.0 + 0.35 * lin3);
     outc = pow(max(lin3, 0.0), vec3(1.0 / 2.2));
   }
-  // vertical block corners: a 1 px line at the wall colour x 1.25 (half a pixel on each face)
+  // A thin cool edge on the vertical corner, closer to the instrument hairline
+  // than a bright smear of the water colour. The water colour itself is unchanged.
   float ce = max(abs(pW.x), abs(pW.y)) - min(abs(pW.x), abs(pW.y));
-  if (ce < 0.5 * length(vec2(dFdx(ce), dFdy(ce)))) { outc = min(outc * 1.25, 1.0); wallA = 1.0; }
+  float edgeW = max(length(vec2(dFdx(ce), dFdy(ce))), 1e-4);
+  float corner = 1.0 - smoothstep(0.15 * edgeW, 0.7 * edgeW, ce);
+  outc = mix(outc, vec3(0.86, 0.89, 0.92), clamp(corner * 0.62, 0.0, 0.62));
+  if (corner > 0.65) wallA = 1.0;
   return vec4(max(outc, vec3(0.0)), wallA);
 }
 // Share of the surface pixel that lets the floor through: (1 - Fresnel) x the floor's own luma
@@ -1900,7 +1924,10 @@ void main() {
     img.src = "assets/foam-lace.png?v=30.22";
     return laceT;
   }
-  const camera = { yaw: 0.75, pitch: 0.5, distance: 560 };
+  // Editing frame. 560 left the block small under the sky; 320 starts to clip a
+  // handle. 460 keeps the fixed controls on screen at 1440 and 1024.
+  const OPEN_DIST = 460;
+  const camera = { yaw: 0.75, pitch: 0.5, distance: OPEN_DIST };
   // v30.22e: the curl size boost (curlx) follows the live camera distance, also when physics steps run without a draw (?nodraw=1)
   globalThis.__oceanCamDistFn = () => camera.distance * lastSizeK;
   let lastSizeK = 1;
@@ -1918,7 +1945,31 @@ void main() {
   // Opening distance frames the whole block plus the left-hand controls. 155 sat the
   // eye inside the 250 m footprint, so those controls filled the settings column.
   // Wheel zoom is unchanged (40..1400).
-  const sizeDistance = (oldSize, newSize) => (oldSize > 0 ? camera.distance : 560);
+  const sizeDistance = (oldSize, newSize) => (oldSize > 0 ? camera.distance : OPEN_DIST);
+  globalThis.__oceanViewCmd = {
+    reset() { camera.yaw = 0.75; camera.pitch = 0.5; camera.distance = OPEN_DIST; },
+    fit() {
+      const targetOf = () => {
+        const V = globalThis.__oceanView, P = globalThis.__oceanUI23 && globalThis.__oceanUI23.proj;
+        if (!V || !P) return 0;
+        const h = (V.size || 250) / 2;
+        const pts = [[-h, 0, -h], [-h, 0, h], [h, 0, -h], [h, 0, h]].map((p) => P(p[0], p[1], p[2])).filter(Boolean);
+        if (pts.length < 2) return 0;
+        const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+        return Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+      };
+      let guard = 0;
+      const step = () => {
+        const V = globalThis.__oceanView, span = targetOf();
+        if (!V || !span || guard++ > 8) return;
+        const ratio = span / (Math.min(V.cw, V.ch) * 0.58);
+        if (Math.abs(ratio - 1) < 0.05) return;
+        camera.distance = Math.max(CAM_MIN, Math.min(CAM_MAX, camera.distance * ratio));
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    },
+  };
   if (camFixed) camera.distance = Number(fftParams.get("camdist"));
   if (fftParams.has("campitch")) camera.pitch = Number(fftParams.get("campitch"));
   if (fftParams.has("camyaw")) camera.yaw = Number(fftParams.get("camyaw"));
