@@ -111,6 +111,11 @@ function drawChop() {
   chop.el.setAttribute("aria-valuemax", "2.5");
   chop.el.setAttribute("aria-valuenow", v.toFixed(1));
   chop.el.setAttribute("aria-valuetext", `${v.toFixed(1)} choppiness`);
+  const why = (window.__steep && window.__steep.why) || "";
+  ctx.font = "400 15px Geist Mono, ui-monospace, monospace";
+  ctx.textAlign = "left";
+  ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
+  ctx.fillText(why, 18, 166);
 }
 const COL = { x: 156, w: 88, top: 52, bot: 162 };
 function clarT(z = Number(ui.inputs.clarity.value)) { return clamp((z - 3) / 37, 0, 1); }

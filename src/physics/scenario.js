@@ -3,7 +3,12 @@
 
 export const scenario = {
   id: "open-ocean",
-  label: "Open ocean, straight fetch",
+  label: "Young wind-sea",
+  // 0 = a sea that has just been built, 1 = old swell after a long travel.
+  seaAge: 0.28,
+  // Current speed (m/s) and the direction it flows toward, radians.
+  current: 0,
+  currentDir: Math.PI / 2,
   depth: 40,
   size: 250,
   resolution: 192,

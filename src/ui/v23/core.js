@@ -34,7 +34,7 @@ const saveLayers = () => { if (!LAYER_URL) store.set("ocean.ui.layers", JSON.str
 saveLayers();
 let clean = store.get("ocean.ui.clean", "off") === "on";
 const vis = {}; for (const [k] of LAYERS) vis[k] = layers[k] && !clean ? 1 : 0;
-const inputs = { dir: $("#dir"), spd: $("#spd"), chop: $("#chop"), size: $("#size"), clarity: $("#clarity"), depth: $("#depth"), gust: $("#gust"), pause: $("#pause"), flags: $("#flags"), boat: $("#boat") };
+const inputs = { dir: $("#dir"), spd: $("#spd"), chop: $("#chop"), age: $("#age"), cur: $("#cur"), size: $("#size"), clarity: $("#clarity"), depth: $("#depth"), gust: $("#gust"), pause: $("#pause"), flags: $("#flags"), boat: $("#boat") };
 
 // ---------- geometry ----------
 function inv4(a) {

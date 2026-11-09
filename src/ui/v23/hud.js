@@ -18,6 +18,8 @@ hud.innerHTML = `
     <div class="hrow" id="hr-layers" role="button" tabindex="0" aria-label="Layers"><span class="nm l1"><span class="plate">Layers</span></span><span class="cnt n4 tx plate" id="hr-cnt">4/7</span>${CHEV}</div>
     ${row("hr-clean", "Clean view", '<span class="tg"></span>')}
     ${row("hr-stats", "Stats", '<span class="tg"></span>')}
+    <div class="hrow" id="hr-age" role="slider" tabindex="0" aria-label="Sea age"><span class="nm l1">Sea age</span><span class="n4" id="age-read">young</span></div>
+    <div class="hrow" id="hr-cur" role="slider" tabindex="0" aria-label="Current"><span class="nm l1">Current</span><span class="n4" id="cur-read">still</span></div>
     <div class="hrow" id="hr-fit" role="button" tabindex="0"><span class="nm l1">Fit ocean</span></div>
     <div class="hrow" id="hr-reset" role="button" tabindex="0"><span class="nm l1">Reset view</span></div>
     <div class="hrows-end"></div>
@@ -50,6 +52,25 @@ const flip = (inp) => { inp.checked = !inp.checked; inp.dispatchEvent(new Event(
 act(q("#hr-boat"), () => flip(ui.inputs.boat)); act(q("#hr-flags"), () => flip(ui.inputs.flags));
 act(q("#hr-clean"), () => ui.setClean(!ui.clean));
 act(q("#hr-stats"), () => { window.__ui && window.__ui.setStripHidden(!document.body.classList.contains("ui-hidden-strip")); syncHud(); });
+function dragRow(el, input, lo, hi, perPx) {
+  if (!el || !input) return;
+  let drag = null;
+  el.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    el.setPointerCapture(e.pointerId);
+    drag = { y: e.clientY, v: Number(input.value) };
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const v = Math.round((drag.v + (drag.y - e.clientY) * perPx) * 100) / 100;
+    ui.set(input.id === "age" ? "age" : "cur", String(Math.min(hi, Math.max(lo, v))));
+  });
+  const up = () => { drag = null; };
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+}
+dragRow(q("#hr-age"), ui.inputs.age, 0, 1, 0.004);
+dragRow(q("#hr-cur"), ui.inputs.cur, -3, 3, 0.02);
 act(q("#hr-fit"), () => { const cmd = globalThis.__oceanViewCmd; if (cmd) cmd.fit(); });
 act(q("#hr-reset"), () => { const cmd = globalThis.__oceanViewCmd; if (cmd) cmd.reset(); });
 for (const [k] of LAYERS) act(q("#hl-" + k), () => ui.setLayer(k, !ui.layers[k]));
@@ -78,6 +99,11 @@ setInterval(() => {
   if (hud.classList.contains("nostats")) return;
   const put = (id, v) => { const e = q(id); if (e.textContent !== v) e.textContent = v; };
   put("#hs-fps", txt("st-fps")); const f = txt("st-foam"); put("#hs-foam", f === "--" ? "--" : `${f}%`); put("#hs-f", txt("st-sea"));
+  const age = ui.inputs.age ? Number(ui.inputs.age.value) : 0.28;
+  const cur = ui.inputs.cur ? Number(ui.inputs.cur.value) : 0;
+  const ageEl = q("#age-read"), curEl = q("#cur-read");
+  if (ageEl) ageEl.textContent = age < 0.4 ? "young" : age < 0.72 ? "building" : "old";
+  if (curEl) curEl.textContent = Math.abs(cur) < 0.15 ? "still" : `${cur < 0 ? "against" : "with"} ${Math.abs(cur).toFixed(1)}`;
 }, 500);
 syncPanel(); syncHud();
 if (new URLSearchParams(location.search).get("notext") === "1") document.documentElement.classList.add("notext");
