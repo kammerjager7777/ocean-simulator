@@ -38,7 +38,7 @@ export function accent(min) {
 // v30.24 menu ink: no plates, no glow. The sky colour is only the fallback before the first probe.
 // core.js then picks dark or light ink from the sea pixels behind the words (bright close-up water included).
 // A 1 px hairline in the opposite ink is the only edge. ?ink=diff keeps the inversion look.
-import { skyAt } from "./sky.js?v=30.29";
+import { skyAt } from "./sky.js?v=31.9";
 export const INK = { light: "#F5F7FA", dark: "#0C1724" };
 const lumL = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 const lumH = (h) => lumL(hx(h).map(s2l));
@@ -53,6 +53,21 @@ export function inkForLum(samples) {
   return score(LUM_DARK) > score(LUM_LIGHT) ? "dark" : "light";
 }
 export function backdropLum(min) { const k = skyAt(min).key; const c = k.hor.map((v, i) => v * 0.58 + k.zen[i] * 0.14); return lumL(c); }
+function liftTo(hex, minL) {
+  let c = hex;
+  for (let i = 0; i < 6 && lumH(c) < minL; i++) c = mixOK(c, "#F7FAFF", 0.42);
+  return c;
+}
+function skyInk(ac, backL) {
+  let c = "#0C1724";
+  if (!(backL > 0.08)) return liftTo(ac, 0.5);
+  for (let w = 0.1; w <= 0.42; w += 0.08) {
+    const n = mixOK("#0C1724", ac, w);
+    if (contrast(backL, lumH(n)) < 4.6) break;
+    c = n;
+  }
+  return c;
+}
 const NEU = { text: ["#F5F7FA", "#E8EEF6"], muted: ["#C9D3DD", "#7F93AA"], card: ["#0D1B26", "#050B14"], scrim: ["#0A1622", "#03070C"] };
 const rgb = (h) => hx(h).join(",");
 export const theme = {
@@ -68,9 +83,16 @@ export const theme = {
     // vignette peak A and plate alpha: noon 58/65, warm 50/55, night 55/40 (noon<->warm by d above the horizon, warm<->night by n)
     const warmA = 0.5, warmP = 0.55, A = e >= 0 ? warmA + (0.58 - warmA) * d : warmA + (0.55 - warmA) * n, P = e >= 0 ? warmP + (0.65 - warmP) * d : warmP + (0.4 - warmP) * n;
     const bl = backdropLum(min), dark = contrast(bl, lumH(INK.dark)) > contrast(bl, lumH(INK.light)) && !DIFF;
-    const ink = dark ? INK.dark : INK.light, halo = dark ? "#FFFFFF" : "#000814", inkAc = dark ? mixOK(ac, "#140C02", 0.72) : ac;
-    Object.assign(this, { accent: ac, text: tx, muted: mu, card: cd, scrim: sc, night: n, plateA: P, vigA: A, ink, halo, inkAc, inkDark: dark, backLum: bl });
-    const vars = { "--accent": ac, "--accent-rgb": rgb(ac), "--hud-text": ink, "--hud-muted": ink, "--hud-muted-rgb": rgb(ink), "--ink-ac": inkAc, "--halo-rgb": rgb(halo), "--card-rgb": rgb(cd), "--scrim-rgb": rgb(sc), "--plate-a": P.toFixed(2) };
+    const ink = dark ? INK.dark : INK.light, halo = dark ? "#FFFFFF" : "#000814";
+    // Plate text tracks the sun accent but stays light on the black plates.
+    // Sky-sitting ink keeps a clean dark navy with only as much accent as contrast allows.
+    const face = liftTo(ac, 0.5);
+    const skyI = dark ? skyInk(ac, bl) : face;
+    const inkAc = face;
+    const glowN = e >= 28 ? 0.16 : e <= -8 ? 0.48 : 0.22 + 0.36 * (1 - d);
+    const glow = `0 0 0.6px rgba(${rgb(ac)},${Math.min(0.9, glowN).toFixed(3)}), 0 0 4px rgba(${rgb(ac)},${(glowN * 0.42).toFixed(3)})`;
+    Object.assign(this, { accent: ac, text: tx, muted: mu, card: cd, scrim: sc, night: n, plateA: P, vigA: A, ink, halo, inkAc, inkDark: dark, backLum: bl, hudFace: face, skyInk: skyI, glowA: glowN });
+    const vars = { "--accent": ac, "--accent-rgb": rgb(ac), "--hud-text": ink, "--hud-muted": ink, "--hud-muted-rgb": rgb(ink), "--ink-ac": inkAc, "--hud-face": face, "--sky-ink": skyI, "--hud-glow": glow, "--halo-rgb": rgb(halo), "--card-rgb": rgb(cd), "--scrim-rgb": rgb(sc), "--plate-a": P.toFixed(2) };
     document.documentElement.classList.toggle("ink-dark", dark);
     const r = document.documentElement.style;
     for (const [k, v] of Object.entries(vars)) if (this._last[k] !== v) { this._last[k] = v; r.setProperty(k, v); }

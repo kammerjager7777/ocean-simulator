@@ -1,9 +1,11 @@
 // Measurement handles. Chop is only the wave glyph: dragging that stroke changes choppiness live.
 // Clarity and depth stay on the two different corners arrange() assigned.
-import { ui } from "./core.js?v=30.29";
+import { ui } from "./core.js?v=31.9";
 import { arrange } from "./controls.js?v=30.29";
 import { textRow, inside, seaHides, showM } from "./geometry.js?v=30.29";
 import { cancel } from "./coast.js?v=30.29";
+import { bedY } from "../../render/seabed.js?v=30.29";
+import { rippleHeight } from "../../physics/ripples.js?v=30.29";
 const num = (k) => Number(ui.inputs[k].value), clamp = (v) => Math.min(1, Math.max(0, v)), T = ui.theme;
 export const zsdBand = (z) => z < 6 ? "Murky" : z < 15 ? "Coastal" : z < 30 ? "Open ocean" : "Clear tropical";
 export const zsdOfV = (v) => 3 * Math.pow(40 / 3, v), vOfZsd = (z) => Math.log(z / 3) / Math.log(40 / 3);
@@ -144,6 +146,149 @@ function diskParts(r, y) {
   return parts;
 }
 
+// v31.8: the size and depth grooves are gone. The four top edges of the domain are the
+// size affordance (a corner sets the one square size, 100..1000 m). The four vertical
+// corners are the depth affordance (2..80 m). Both follow the displaced surface.
+const EDGE_N = 32;
+const PROBE_EDGE = 84;
+let edgeCache = null, edgeFrame = -1;
+function cornerPx() { return ui.HIT > 18 ? 26 : 16; }
+function shaftPx() { return ui.HIT > 18 ? 18 : 11; }
+function domainEdges() {
+  if (edgeCache && edgeFrame === ui.now) return edgeCache;
+  edgeFrame = ui.now;
+  const S = ui.S(), D = ui.D(), h = S / 2;
+  const st = globalThis.__oceanState;
+  const pd = st && st.probe && st.probe.data;
+  const have = pd && pd.length >= PROBE_EDGE * 4 + 4 * EDGE_N;
+  const t = ui.simT();
+  const heightAt = (edge, i, x, z) => {
+    let y = 0;
+    if (have) y = pd[PROBE_EDGE * 4 + edge * EDGE_N + i];
+    y += rippleHeight(x, z, t);
+    return Math.max(y, bedY(x, z, S, D) + 0.05);
+  };
+  const place = (edge, i) => {
+    const u = i / (EDGE_N - 1);
+    let x = 0, z = 0;
+    if (edge === 0) { x = -h + 2 * h * u; z = h; }
+    else if (edge === 1) { x = h - 2 * h * u; z = -h; }
+    else if (edge === 2) { x = -h; z = h - 2 * h * u; }
+    else { x = h; z = -h + 2 * h * u; }
+    const y = heightAt(edge, i, x, z);
+    const w = [x, y, z];
+    return { w, p: seaHides(w) ? null : ui.proj(x, y, z), x, z, y };
+  };
+  const tops = [0, 1, 2, 3].map((e) => Array.from({ length: EDGE_N }, (_, i) => place(e, i)));
+  const pick = (edge, i) => tops[edge][i];
+  const corners = [[0, 0, -1, 1], [0, EDGE_N - 1, 1, 1], [1, 0, 1, -1], [1, EDGE_N - 1, -1, -1]]
+    .map(([edge, i, sx, sz]) => ({ ...pick(edge, i), sx, sz }));
+  const verts = corners.map((c) => {
+    const bed = bedY(c.x, c.z, S, D);
+    const w = [c.x, bed, c.z];
+    // The bed point sits inside the water column, so the hull test hides every
+    // wall. If the surface corner is on screen, the wall under it is the one to drag.
+    return { top: c, bed, bot: c.p ? ui.proj(c.x, bed, c.z) : null, w };
+  });
+  edgeCache = { tops, corners, verts, S, D };
+  ui.debug.edges = { have: !!have, corners: corners.map((c) => c.p), S, D };
+  return edgeCache;
+}
+function paintChain(ctx, pts, cursor, base, hot, width) {
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1].p, b = pts[i].p;
+    if (!a || !b) continue;
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    let w = 0;
+    if (cursor) { const d = Math.hypot(mx - cursor[0], my - cursor[1]); w = Math.exp(-(d * d) / (2 * 72 * 72)); }
+    const alpha = base + (hot - base) * w;
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.strokeStyle = `rgba(186, 192, 198, ${alpha})`;
+    ctx.lineWidth = width + 1.1 * w;
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+const SIZE_MIN = 100, SIZE_MAX = 1000;
+function snapSize(v, step) {
+  return Math.max(SIZE_MIN, Math.min(SIZE_MAX, Math.round(v / step) * step));
+}
+function rayOnPlane(sx, sy, level = 0) {
+  if (!ui.VI || !ui.V) return null;
+  const nx = (sx / ui.V.cw) * 2 - 1, ny = 1 - (sy / ui.V.ch) * 2, m = ui.VI;
+  const un = (z) => {
+    const w = m[3] * nx + m[7] * ny + m[11] * z + m[15];
+    return [(m[0] * nx + m[4] * ny + m[8] * z + m[12]) / w, (m[1] * nx + m[5] * ny + m[9] * z + m[13]) / w, (m[2] * nx + m[6] * ny + m[10] * z + m[14]) / w];
+  };
+  const a = un(-1), b = un(1);
+  const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+  const slope = Math.abs(dy) / Math.max(Math.hypot(dx, dz), 1e-6);
+  if (Math.abs(dy) < 1e-6) return { p: null, slope: 0 };
+  const t = (level - a[1]) / dy;
+  if (!(t >= 0)) return { p: null, slope };
+  return { p: [a[0] + dx * t, level, a[2] + dz * t], slope };
+}
+function paintDoubleArrow(ctx, a, b) {
+  if (!a || !b) return;
+  const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy);
+  if (l < 8) return;
+  const ux = dx / l, uy = dy / l;
+  ctx.save();
+  ctx.strokeStyle = "rgba(226, 230, 234, 0.92)";
+  ctx.fillStyle = "rgba(226, 230, 234, 0.92)";
+  ctx.lineWidth = 1.35;
+  ctx.beginPath();
+  ctx.moveTo(a[0] + ux * 6, a[1] + uy * 6);
+  ctx.lineTo(b[0] - ux * 6, b[1] - uy * 6);
+  ctx.stroke();
+  const head = (tip, dirx, diry) => {
+    const px = -diry, py = dirx;
+    ctx.beginPath();
+    ctx.moveTo(tip[0], tip[1]);
+    ctx.lineTo(tip[0] - dirx * 7 + px * 3.1, tip[1] - diry * 7 + py * 3.1);
+    ctx.lineTo(tip[0] - dirx * 7 - px * 3.1, tip[1] - diry * 7 - py * 3.1);
+    ctx.closePath();
+    ctx.fill();
+  };
+  head(b, ux, uy);
+  head(a, -ux, -uy);
+  ctx.restore();
+}
+function sizeCursor(sign) {
+  const h = ui.S() / 2;
+  const p0 = ui.proj(sign[0] * h, 0, sign[1] * h);
+  const p1 = ui.proj(sign[0] * (h + 24), 0, sign[1] * (h + 24));
+  if (!p0 || !p1) return "nwse-resize";
+  return (p1[0] - p0[0]) * (p1[1] - p0[1]) >= 0 ? "nwse-resize" : "nesw-resize";
+}
+function diagArrow(ctx, sign, half, y) {
+  const m = showM();
+  const reach = 16 * m;
+  const a = ui.proj(sign[0] * half - sign[0] * reach, y, sign[1] * half - sign[1] * reach);
+  const b = ui.proj(sign[0] * half + sign[0] * reach, y, sign[1] * half + sign[1] * reach);
+  paintDoubleArrow(ctx, a, b);
+}
+function ghostSquare(ctx, half) {
+  const w = [[-half, 0, -half], [half, 0, -half], [half, 0, half], [-half, 0, half]];
+  const s = w.map((p) => ui.proj(p[0], p[1], p[2]));
+  ctx.save();
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = "rgba(236, 239, 242, 0.78)";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let i = 0; i < 4; i++) {
+    const a = s[i], b = s[(i + 1) % 4];
+    if (!a || !b) continue;
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
 function make(o) {
   const st = { g: null };
   const kb = ui.slider(o.aria, () => [o.get(), o.vt(o.get())], (e) => {
@@ -152,121 +297,162 @@ function make(o) {
   const obj = ui.register({
     layer: "tools",
     key: o.key,
-    body(x, y) {
-      if (o.key === "clarity" || o.key === "chop") return null;
-      const g = st.g; if (!g) return null;
-      // The painted mark only. The knob disk is about 5.5 px; 8 px covers that disk.
-      if (o.key === "chop") return nearLine(x, y, g.hitWave, 4) ? "wave" : null;
-      if (o.key === "clarity" && g.diskScreen) {
-        if (g.diskWorld && seaHides(g.diskWorld)) return null;
-        if (g.diskScreen.some((poly) => poly.every(Boolean) && inside([x, y], poly))) return "icon";
-        if (g.diskAt && Math.hypot(x - g.diskAt[0], y - g.diskAt[1]) < 8) return "icon";
-      }
-      if (g.k && g.kw && !seaHides(g.kw) && Math.hypot(x - g.k[0], y - g.k[1]) < 12) return "k";
-      return null;
-    },
+    body(x, y) { return o.key === "size" || o.key === "depth" ? obj.hit(x, y) : null; },
     hit(x, y) {
-      if (o.key === "clarity" || o.key === "chop") return null;
-      const g = st.g; if (!g) return null;
-      if (o.key === "chop") return nearLine(x, y, g.hitWave, 18) ? "wave" : null;
-      if (o.key === "clarity") {
-        if (!g.diskScreen || (g.diskWorld && seaHides(g.diskWorld))) return null;
-        if (g.diskScreen.some((poly) => poly.every(Boolean) && inside([x, y], poly))) return "icon";
-        if (g.diskAt && Math.hypot(x - g.diskAt[0], y - g.diskAt[1]) < 14) return "icon";
+      if (o.key !== "size" && o.key !== "depth") return null;
+      const g = domainEdges();
+      if (o.key === "size") {
+        for (let i = 0; i < g.corners.length; i++) {
+          const p = g.corners[i].p;
+          if (p && Math.hypot(x - p[0], y - p[1]) <= cornerPx()) return "c" + i;
+        }
         return null;
       }
-      if (!g.a || !g.b || !g.wa || !g.wb) return null;
-      const nearKnob = g.k && Math.hypot(x - g.k[0], y - g.k[1]) < 12;
-      const nearTrack = ui.segDist([x, y], g.a, g.b) < 10;
-      if (!nearKnob && !nearTrack) return null;
-      const t = Math.min(1, Math.max(0, nearKnob && g.k ? ui.segT(g.k, g.a, g.b) : ui.segT([x, y], g.a, g.b)));
-      if (seaHides(worldAt(g.wa, g.wb, t))) return null;
-      return "k";
+      for (let i = 0; i < g.verts.length; i++) {
+        const v = g.verts[i];
+        if (!v.top.p || !v.bot) continue;
+        if (ui.segDist([x, y], v.top.p, v.bot) > shaftPx()) continue;
+        const t = Math.min(1, Math.max(0, ui.segT([x, y], v.top.p, v.bot)));
+        if (t < 0.22 && Math.hypot(x - v.top.p[0], y - v.top.p[1]) <= cornerPx()) continue;
+        return "v" + i;
+      }
+      return null;
     },
     down(h, x, y) {
       ui.drag.key = o.key; st.dragging = h; st.value = o.get(); st.y = y; st.x = x;
-      st.clar = null;
-      if (o.key === "clarity" && st.g && st.g.a && st.g.b) {
-        const dx = st.g.b[0] - st.g.a[0], dy = st.g.b[1] - st.g.a[1];
-        const span = Math.hypot(dx, dy);
-        // Under a pixel the column is edge-on and has no direction. Do not invent one.
-        if (span >= 1) st.clar = { ux: dx / span, uy: dy / span, span, v0: vOfZsd(st.value) };
+      const g = domainEdges();
+      if (o.key === "size") {
+        const i = Number(String(h).slice(1));
+        const c = g.corners[i];
+        st.sign = c ? [c.sx, c.sz] : [1, 1];
+        st.shown = o.get();
+        st.target = o.get();
+        st.grabSize = o.get();
+        st.grabX = x; st.grabY = y;
+        const half = o.get() / 2;
+        const p0 = ui.proj(st.sign[0] * half, 0, st.sign[1] * half);
+        const p1 = ui.proj(st.sign[0] * (half + 40), 0, st.sign[1] * (half + 40));
+        let ux = 1, uy = 0, mPerPx = 0.8;
+        if (p0 && p1) {
+          const dx = p1[0] - p0[0], dy = p1[1] - p0[1], l = Math.hypot(dx, dy) || 1;
+          ux = dx / l; uy = dy / l; mPerPx = 40 / l;
+        }
+        st.screen = [ux, uy];
+        st.mPerPx = mPerPx;
+        const hit = rayOnPlane(x, y, 0);
+        st.mode = hit && hit.p && hit.slope >= 0.12 ? "plane" : "pixel";
+      } else if (o.key === "depth") {
+        const i = Number(String(h).slice(1));
+        const v = g.verts[i];
+        st.axis = null;
+        if (v && v.top.p && v.bot) {
+          const dx = v.bot[0] - v.top.p[0], dy = v.bot[1] - v.top.p[1];
+          const span = Math.hypot(dx, dy);
+          st.axis = { ux: span >= 4 ? dx / span : 0, uy: span >= 4 ? dy / span : 1, px: Math.max(span, 78) / Math.max(st.value, 2) };
+        }
       }
     },
-    move(h, x, y) {
-      if (o.key === "chop" && (h === "wave" || h === "k")) {
-        o.set(st.value + (st.y - y) / CHOP_PX); kb.upd(); return;
-      }
-      const g = st.g; if (!g || !g.a || !g.b) return;
-      if (o.key === "depth") {
-        let best = num("depth"), err = Infinity;
-        for (let i = 0; i <= 156; i++) {
-          const d = 2 + (78 * i) / 156, w = [g.wx, -d, g.wz];
-          if (seaHides(w)) continue;
-          const p = ui.proj(w[0], w[1], w[2]);
-          if (!p) continue;
-          const e = Math.hypot(p[0] - x, p[1] - y);
-          if (e < err) { err = e; best = d; }
+    move(h, x, y, e) {
+      if (o.key === "size" && st.sign) {
+        const step = e && e.shiftKey ? 1 : 10;
+        st.fine = step === 1;
+        const hit = rayOnPlane(x, y, 0);
+        let raw;
+        if (hit && hit.p && hit.slope >= 0.12) {
+          const half = (st.sign[0] * hit.p[0] + st.sign[1] * hit.p[2]) / 2;
+          raw = half * 2;
+          st.mode = "plane";
+        } else {
+          const along = (x - st.grabX) * st.screen[0] + (y - st.grabY) * st.screen[1];
+          const delta = Math.max(-140, Math.min(140, along * st.mPerPx * 0.35));
+          raw = st.grabSize + delta;
+          st.mode = "pixel";
         }
-        ui.set("depth", Math.max(2, Math.min(80, Math.round(best))));
-      } else if (o.key === "clarity") {
-        // Same projected axis the column draws, surface toward the deep end.
-        // Screen-up is not a direction. A short column uses CLAR_DRAG_PX for the
-        // full range so the value can still be set; the disk stays on the column.
-        const c = st.clar; if (!c) return;
-        const along = (x - st.x) * c.ux + (y - st.y) * c.uy;
-        ui.set("clarity", Math.round(zsdOfV(clamp(c.v0 + along / Math.max(c.span, CLAR_DRAG_PX)))));
-      }
-      else if (o.key === "size") {
-        ui.set("size", Math.round((100 + 900 * clamp(ui.segT([x, y], g.a, g.b))) / 10) * 10);
+        st.target = snapSize(raw, step);
+      } else if (o.key === "depth" && st.axis) {
+        const along = (x - st.x) * st.axis.ux + (y - st.y) * st.axis.uy;
+        const next = st.value + along / st.axis.px;
+        ui.set("depth", Math.max(2, Math.min(80, Math.round(next))));
       }
       kb.upd();
     },
     up() {
+      if (o.key === "size" && st.target != null) {
+        ui.set("size", snapSize(st.target, st.fine ? 1 : 10));
+        st.shown = st.target;
+      }
       if (o.key === "size" || o.key === "depth") cancel(o.key);
       if (st.dragging) st.fade = 1;
       st.dragging = null;
     },
-    cursor: () => (o.key === "chop" ? "ns-resize" : "grab"),
+    cursor: (h) => {
+      if (o.key === "depth" || (h && String(h)[0] === "v")) return "ns-resize";
+      if (o.key === "size" && h && String(h)[0] === "c") {
+        const c = domainEdges().corners[Number(String(h).slice(1))];
+        if (c) return sizeCursor([c.sx, c.sz]);
+      }
+      return "grab";
+    },
     draw() {
-      const laid = arrange();
-      const q = laid.objects[o.key];
-      if (!q) { st.g = null; delete ui.debug[o.key]; return; }
-      st.g = q;
-      const value = o.get();
-      const hot = st.dragging ? "drag" : "idle";
-      const S = ui.S();
-      if (o.key === "chop" || o.key === "clarity") { st.g = null; delete ui.debug[o.key]; return; }
-      if (!q.a || !q.b) {
-        ui.debug[o.key] = { corner: q.corner, wa: q.wa, wb: q.wb, fixedPlane: true, v: value };
-        return;
-      }
-      const t = o.key === "size" ? (num("size") - 100) / 900 : 1;
-      q.kw = worldAt(q.wa, q.wb, t);
-      q.k = ui.proj(q.kw[0], q.kw[1], q.kw[2]);
-      const samples = [];
-      for (let i = 0; i <= 24; i++) {
-        const w = worldAt(q.wa, q.wb, i / 24);
-        samples.push(!seaHides(w) ? ui.proj(w[0], w[1], w[2]) : null);
-      }
+      if (o.key !== "size" && o.key !== "depth") { delete ui.debug[o.key]; return; }
+      const g = domainEdges();
       const live = st.dragging ? "drag" : (ui.hover && ui.hover.obj === obj) ? "hover" : "idle";
       if (live === "drag") st.fade = 1;
       else if (ui.reduced) st.fade = 0;
       else if (st.fade > 0) st.fade *= Math.exp(-(ui.dt || 0.016) / 0.28);
-      seam(ui.ctx, samples, live);
-      if (q.k && q.a && q.b && !seaHides(q.kw)) {
-        flatGrip(ui.ctx, q.k[0], q.k[1], q.b[0] - q.a[0], q.b[1] - q.a[1], live);
-        if (st.fade > 0.04) dragValue(ui.ctx, q.k[0], q.k[1], o.val(), st.fade);
+      const cursor = ui.mouse || null;
+      const ctx = ui.ctx;
+      if (o.key === "size" && st.dragging && st.target != null) {
+        const dt = ui.dt || 0.016;
+        if (ui.reduced) st.shown = st.target;
+        else st.shown += (st.target - st.shown) * (1 - Math.exp(-dt / 0.05));
+        const applied = snapSize(st.shown, st.fine ? 1 : 10);
+        if (applied !== num("size")) ui.set("size", applied);
       }
-      ui.debug[o.key] = {
-        a: q.a, b: q.b, k: q.k, v: value, corner: q.corner, fixedPlane: true,
-        world: { o: q.world.o, u: q.world.u, v: q.world.v },
-        icon: o.key === "clarity" ? q.diskScreen && q.diskScreen.flat() : null,
-        disk: q.diskAt || null, hidden: q.kw ? seaHides(q.kw) : false,
-        dimA: q.dimA && !seaHides(q.dimA) ? ui.proj(q.dimA[0], q.dimA[1], q.dimA[2]) : null,
-        dimB: q.dimB && !seaHides(q.dimB) ? ui.proj(q.dimB[0], q.dimB[1], q.dimB[2]) : null,
-        live, fade: st.fade || 0,
-      };
+      if (o.key === "size") {
+        const base = live === "drag" ? 0.34 : 0.16;
+        for (const chain of g.tops) paintChain(ctx, chain, cursor, base, live === "drag" ? 0.78 : 0.72, 1.15);
+        let idx = null;
+        if (st.dragging && String(st.dragging)[0] === "c") idx = Number(String(st.dragging).slice(1));
+        else if (live === "hover" && ui.hover && ui.hover.h && ui.hover.h[0] === "c") idx = Number(ui.hover.h.slice(1));
+        if (idx != null && g.corners[idx]) {
+          const c = g.corners[idx];
+          diagArrow(ctx, [c.sx, c.sz], num("size") / 2, c.y || 0);
+        }
+        if (st.dragging && st.target != null) {
+          ghostSquare(ctx, st.target / 2);
+          if (cursor) dragValue(ctx, cursor[0], cursor[1], `${Math.round(st.target)} m`, 1);
+        }
+        const half = num("size") / 2;
+        const cp = st.sign ? ui.proj(st.sign[0] * half, 0, st.sign[1] * half) : null;
+        const err = cp && cursor ? Math.hypot(cursor[0] - cp[0], cursor[1] - cp[1]) : null;
+        ui.debug.sizeDrag = { mode: st.mode || "idle", target: st.target, shown: st.shown, err, step: st.fine ? 1 : 10, live };
+      } else {
+        g.verts.forEach((v, i) => {
+          if (!v.top.p || !v.bot) return;
+          const mine = st.dragging === "v" + i || (live === "hover" && ui.hover && ui.hover.h === "v" + i);
+          const mid = [(v.top.p[0] + v.bot[0]) / 2, (v.top.p[1] + v.bot[1]) / 2];
+          let w = 0;
+          if (cursor) { const d = Math.hypot(mid[0] - cursor[0], mid[1] - cursor[1]); w = Math.exp(-(d * d) / (2 * 64 * 64)); }
+          const alpha = (mine ? 0.5 : 0.14) + (0.8 - (mine ? 0.5 : 0.14)) * w;
+          ctx.save();
+          ctx.lineCap = "round";
+          ctx.strokeStyle = `rgba(176, 182, 188, ${alpha})`;
+          ctx.lineWidth = (mine ? 1.8 : 1.1) + w;
+          ctx.beginPath();
+          ctx.moveTo(v.top.p[0], v.top.p[1]);
+          ctx.lineTo(v.bot[0], v.bot[1]);
+          ctx.stroke();
+          ctx.restore();
+          if (mine) {
+            const my = (v.top.y + v.bed) / 2;
+            const span = 7 * showM();
+            paintDoubleArrow(ctx, ui.proj(v.top.x, my + span, v.top.z), ui.proj(v.top.x, my - span, v.top.z));
+          }
+        });
+      }
+      if (o.key !== "size" && st.fade > 0.04 && cursor) dragValue(ctx, cursor[0], cursor[1], o.val(), st.fade);
+      ui.debug[o.key] = { v: o.get(), live, mode: o.key === "size" ? (st.mode || "edge") : "edge" };
     },
   });
   return obj;

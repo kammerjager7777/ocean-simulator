@@ -5,7 +5,7 @@
 // 2x hull-radius ring on the water), and a click opens the §7.3 card (208 x 128, leader 28 px; shifts sideways off
 // the HUD regions, then flips below). A drag leaves wake ripples;
 // a fast drag (> 2 m/s) also lays a foam trail into the drawn foam field (gpuSurface foam-trail pass).
-import { ui, $ } from "./core.js?v=30.29";
+import { ui, $ } from "./core.js?v=31.9";
 import { bedRelief } from "../../render/seabed.js?v=30.29";
 import { rippleHeight, addRipple } from "../../physics/ripples.js?v=30.29";
 import { elevAt } from "./sky.js?v=30.29";
@@ -121,7 +121,7 @@ const buoy = ui.register({
     const dragging = ui.drag && ui.drag.obj === buoy && ui.drag.moved;
     if (dragging && performance.now() / 1000 - lastDragT > 0.15) dragSpeed *= Math.exp(-ui.dt / 0.15); // held still: the speed falls away
     if (dragging && ui.now - lastWake > 150) { const sp = Math.min(1, dragSpeed / 8); if (dragSpeed > 0.3) { addRipple(pos[0], pos[1], simT, 0.25 + 0.75 * sp); lastWake = ui.now; } }
-    if (dragging && dragSpeed > 2) layTrail(simT);
+    if (dragging && dragSpeed > 2) layTrail(simT, dragSpeed); // stops as soon as the drag is no longer disturbing the water
     // v30.24 item 9: no constant glow; only a slight shine (and a thin ring on the water) while hovered or dragged
     const st = ui.state(buoy), held = st === "drag", hc = [(base[0] + mast[0]) / 2, (base[1] + mast[1]) / 2];
     if (st !== "idle") { T.shine(ctx, hc[0], hc[1], Math.max(4, hr * 1.6), held ? 0.2 : 0.13); const ring = []; for (let i = 0; i < 32; i++) { const an = (i / 32) * 2 * Math.PI; const p = ui.proj(pos[0] + 2 * HULL_R * s * Math.cos(an), 0, pos[1] + 2 * HULL_R * s * Math.sin(an)); if (p) ring.push(p); } T.line(ctx, ring, { color: T.white, width: 1, alpha: held ? 0.8 : 0.5, close: true }); }
@@ -173,14 +173,17 @@ const buoy = ui.register({
   hide() { pop.classList.remove("on"); },
 });
 // ---------- foam trail: points along the fast-drag path, read by the gpuSurface foam-trail pass ----------
-function layTrail(t) {
+function layTrail(t, speed) {
   const hullD = 2 * HULL_R * b.s, last = trail[trail.length - 1];
   const sp = 0.35 * hullD, dist = last ? Math.hypot(pos[0] - last.x, pos[1] - last.z) : sp;
   if (dist < sp) return;
   const dir = last ? [pos[0] - last.x, pos[1] - last.z] : [1, 0]; const l = Math.hypot(...dir) || 1;
-  // a slow frame moves the hull far: fill the gap at the fixed spacing (ages spread over the frame) so the trail has no holes
+  // Disturbance is speed through the water, not how long the hull sat on a cell.
+  // The ribbon width stays on the hull. The normal's length carries the disturbance
+  // (0.55 just over the threshold, 1 at 12 m/s) so a faster pass is not a whiter, wider stroke.
+  const disturb = 0.55 + 0.45 * Math.min(1, Math.max(0, (speed - 2) / 10));
   const n = Math.min(24, Math.floor(dist / sp)), x0 = last ? last.x : pos[0], z0 = last ? last.z : pos[1], t0 = last ? last.t : t;
-  for (let k = 1; k <= n; k++) { const f = last ? (k * sp) / dist : 1; trail.push({ x: x0 + (pos[0] - x0) * f, z: z0 + (pos[1] - z0) * f, t: t0 + (t - t0) * f, nx: -dir[1] / l, nz: dir[0] / l, w: hullD * (1.0 + 0.5 * Math.random()) }); }
+  for (let k = 1; k <= n; k++) { const f = last ? (k * sp) / dist : 1; trail.push({ x: x0 + (pos[0] - x0) * f, z: z0 + (pos[1] - z0) * f, t: t0 + (t - t0) * f, nx: -dir[1] / l * disturb, nz: dir[0] / l * disturb, w: hullD * (0.85 + 0.3 * Math.random()) }); }
   // keep at most 8 hull lengths of path
   let len = 0; for (let i = trail.length - 1; i > 0; i--) { len += Math.hypot(trail[i].x - trail[i - 1].x, trail[i].z - trail[i - 1].z); if (len > 8 * hullD) { trail.splice(0, i); break; } }
   if (trail.length > 64) trail.splice(0, trail.length - 64);
@@ -193,4 +196,5 @@ function publishTrail() {
   globalThis.__oceanFoamTrail = { pts: trailBuf, nrm: trailN, n: trail.length };
 }
 ui.slider("Buoy position", () => [Math.round(pos[0]), `x ${pos[0].toFixed(0)} m, z ${pos[1].toFixed(0)} m`], (e) => { if (e.key === "Enter") { b.open = !b.open; return true; } const st = e.shiftKey ? 10 : 1, k = { ArrowLeft: [-st, 0], ArrowRight: [st, 0], ArrowUp: [0, -st], ArrowDown: [0, st] }[e.key]; if (!k) return false; const c = clampPos([tgt[0] + k[0], tgt[1] + k[1]]); tgt[0] = c[0]; tgt[1] = c[1]; return true; });
-ui.buoyApi = { pos, tgt, b, trail, open: (v) => { b.open = v; } };
+ui.buoyApi = { pos, tgt, b, trail, open: (v) => { b.open = v; }, lay: (speed) => layTrail(ui.simT(), speed) };
+globalThis.__oceanBuoyApi = ui.buoyApi;

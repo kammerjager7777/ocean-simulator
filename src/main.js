@@ -2,8 +2,8 @@ import { GRAVITY_NOTE } from "./physics/gravity.js";
 import { scenario } from "./physics/scenario.js?v=30.22";
 import { createWind } from "./physics/wind.js";
 import { createSurface } from "./physics/surface.js?v=30.22";
-import { createView } from "./render/view.js?v=30.22";
-import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=30.22";
+import { createView } from "./render/view.js?v=31.9";
+import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=31.8";
 import { createBoat } from "./physics/boat.js?v=30.22";
 import { createPerf } from "./perf.js?v=30.22";
 import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js?v=30.29";
@@ -16,6 +16,9 @@ if (chopSpectrum === "pm" || chopSpectrum === "elfouhaily") {
 }
 const params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
 const wind = createWind({ direction: Math.PI / 2, speed: 12, gust: "continuous" });
+// ?fixtest=1: developer fixture only. The first step is already flat (no wind-12 startup).
+const FIXTEST = typeof location !== "undefined" && new URLSearchParams(location.search).get("fixtest") === "1";
+if (FIXTEST) { wind.speed = 0; scenario.choppiness = 0; }
 const canvas = document.querySelector("#sea");
 const view = createView(canvas);
 // Physics on the graphics card by default (gpuSurface.js); ?physics=cpu runs the v26 CPU
@@ -48,6 +51,7 @@ const spd = document.querySelector("#spd");
 const gust = document.querySelector("#gust");
 const depthInput = document.querySelector("#depth");
 const chopInput = document.querySelector("#chop");
+if (FIXTEST) { spd.value = "0"; chopInput.value = "0"; wind.speed = 0; scenario.choppiness = 0; }
 const sizeInput = document.querySelector("#size");
 const flags = document.querySelector("#flags");
 const pause = document.querySelector("#pause");

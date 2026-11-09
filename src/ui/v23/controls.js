@@ -17,7 +17,7 @@
 // the domain, so a display length keeps its apparent size. The size edge and
 // the depth column stay in raw metres: they are the thing being measured.
 // The visibility disk does not. A shallow bed must not shrink that gauge.
-import { ui } from "./core.js?v=30.29";
+import { ui } from "./core.js?v=31.9";
 import { plane, showM } from "./geometry.js?v=30.29";
 
 const LMAX = 18 + 25 * 3.5;

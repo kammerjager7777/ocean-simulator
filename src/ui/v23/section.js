@@ -3,7 +3,7 @@
 // filled, the wave profile (256 samples, async GPU readback, 1 frame late, no smoothing) runs along its
 // top at true scale, the still-water line is dashed, the bed follows the seabed relief, and breaking
 // spans (physics break flags only) are marked.
-import { ui } from "./core.js?v=30.29";
+import { ui } from "./core.js?v=31.9";
 import { bedY } from "../../render/seabed.js?v=30.29";
 const T = ui.theme;
 const sec = (() => { try { const j = JSON.parse(ui.store.get("ocean.ui.section", "")); if (Array.isArray(j) && j.length === 4 && j.every(Number.isFinite)) { if (j.some((v) => Math.abs(v) > 0.5001)) { const q = j.map((v) => v / 250); const a = toPerimeter(q[0], q[1]), b = toPerimeter(q[2], q[3]); return [...a, ...b]; } return j; } } catch { /* default */ } return [-0.4, 0.5, 0.5, -0.3]; })(); // fractions of S (resize-proof)
@@ -58,14 +58,48 @@ const wall = ui.register({
       const w = chip.w || 170, x = g.b[0] + 20 + w > ui.V.cw - 24 ? g.b[0] - 20 - w : g.b[0] + 20; chip.place(x, Math.max(24, Math.min(ui.V.ch - 24 - 32, g.b[1] - 14)));
     }
     chip.show(!!show);
-    let curOn = false;
-    if (st === "hover" && ui.mouse && have) { // vertical cursor + height at x
-      const t = Math.min(1, Math.max(0, ui.segT(ui.mouse, still[0], still[still.length - 1]))); const j = Math.round(t * 127), i = Math.round(t * 255);
-      if (top[j] && bed[j]) { T.line(ctx, [top[j], bed[j]], { color: T.white, width: 1 }); cur.set(`<span class="plate"><span class="n3 tx">${prof[i] >= 0 ? "+" : "−"}${Math.abs(prof[i]).toFixed(2)}</span><span class="l2 tx"> m</span></span>`).place(top[j][0] + 8, top[j][1] - 22); curOn = true; }
+    let curOn = false, cursor = null;
+    if (st === "hover" && ui.mouse && have) {
+      // The cursor ray meets the vertical section plane. A screen fraction along
+      // the still-water chord is not that station: perspective packs the far end,
+      // so the old line sat off the pointer (to the left in the usual view).
+      const u = sectionStation(ui.mouse[0], ui.mouse[1], x0, z0, x1, z1);
+      if (u !== null) {
+        const x = x0 + (x1 - x0) * u, z = z0 + (z1 - z0) * u;
+        const s = u * 255, i0 = Math.min(254, Math.max(0, Math.floor(s))), f = s - i0;
+        const hgt = prof[i0] * (1 - f) + prof[i0 + 1] * f;
+        const pt = ui.proj(x, hgt, z), pb = ui.proj(x, bedY(x, z, S, D), z);
+        if (pt && pb) {
+          T.line(ctx, [pt, pb], { color: T.white, width: 1 });
+          cur.set(`<span class="plate"><span class="n3 tx">${hgt >= 0 ? "+" : "−"}${Math.abs(hgt).toFixed(2)}</span><span class="l2 tx"> m</span></span>`).place(pt[0] + 8, pt[1] - 22);
+          curOn = true;
+          cursor = { u, h: hgt, x: pt[0], y: pt[1], bed: pb };
+        }
+      }
     }
     cur.show(curOn);
-    ui.debug.section = { cov, a: g.a, b: g.b, mid: top[64], have, crest: cr, trough: tr, span, poly };
+    ui.debug.section = { cov, a: g.a, b: g.b, mid: top[64], have, crest: cr, trough: tr, span, poly, cursor };
   },
   hide() { chip.show(false); cur.show(false); },
 });
 function pointIn(p, poly) { let c = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const a = poly[i], b = poly[j]; if ((a[1] > p[1]) !== (b[1] > p[1]) && p[0] < ((b[0] - a[0]) * (p[1] - a[1])) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+function sectionStation(sx, sy, x0, z0, x1, z1) {
+  const V = ui.V, m = ui.VI;
+  if (!V || !m) return null;
+  const dx = x1 - x0, dz = z1 - z0, len2 = dx * dx + dz * dz;
+  if (len2 < 1e-8) return null;
+  const nx = (sx / V.cw) * 2 - 1, ny = 1 - (sy / V.ch) * 2;
+  const un = (z) => {
+    const x = m[0] * nx + m[4] * ny + m[8] * z + m[12], y = m[1] * nx + m[5] * ny + m[9] * z + m[13];
+    const zz = m[2] * nx + m[6] * ny + m[10] * z + m[14], w = m[3] * nx + m[7] * ny + m[11] * z + m[15];
+    return [x / w, y / w, zz / w];
+  };
+  const a = un(-1), b = un(1), dirx = b[0] - a[0], dirz = b[2] - a[2];
+  const denom = dz * dirx - dx * dirz;
+  if (Math.abs(denom) < 1e-8) return null;
+  const t = (dz * (x0 - a[0]) - dx * (z0 - a[2])) / denom;
+  if (!(t >= 0)) return null;
+  const hx = a[0] + dirx * t, hz = a[2] + dirz * t;
+  const u = ((hx - x0) * dx + (hz - z0) * dz) / len2;
+  return u >= 0 && u <= 1 ? u : null;
+}

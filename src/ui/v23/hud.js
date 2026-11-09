@@ -1,7 +1,7 @@
 // v30.23 HUD, the Hairline layer (modern-ui-spec §6): settings column (Open / Minimised / Layers sheet; H, Esc),
 // pause button (Space), stats line (S, 2 Hz), version, toast. DOM only; the look is v23.css. The old glass panel
 // and strip stay hidden in the DOM because their inputs (#boat, #flags, #pause) and stat ids stay the source of truth.
-import { ui, LAYERS, store, $ } from "./core.js?v=30.29";
+import { ui, LAYERS, store, $ } from "./core.js?v=31.9";
 const hud = document.createElement("div"); hud.id = "v23-hud"; document.body.appendChild(hud);
 const vg = document.createElement("div"); vg.id = "v23-vignette"; document.body.appendChild(vg);
 const SVG_SET = `<svg width="20" height="20" viewBox="-10 -10 20 20" aria-hidden="true"><path class="ic" d="M-7 -4H7M-7 0H7M-7 4H7"/><circle class="dot" cx="-3" cy="-4" r="1.35"/><circle class="dot" cx="3" cy="0" r="1.35"/><circle class="dot" cx="-1" cy="4" r="1.35"/></svg>`;
@@ -11,7 +11,7 @@ const BACK = `<svg class="chev" viewBox="0 0 8 10" aria-hidden="true" style="mar
 const row = (id, name, right, extra = "") => `<div class="hrow" id="${id}" role="switch" tabindex="0" ${extra}><span class="nm l1"><span class="plate">${name}</span></span>${right}</div>`;
 hud.innerHTML = `
   <button class="hb" id="hb-set" type="button" aria-label="Settings" title="Settings" aria-expanded="true">${SVG_SET}</button>
-  <div id="hud-head"><div id="hud-title">Ocean Simulator</div></div>
+  <div id="hud-head"><div id="hud-title">Ocean Simulator</div><div id="hud-ver">V31.9</div></div>
   <div id="hud-rows">
     ${row("hr-boat", "Boat", '<span class="tg"></span>')}
     ${row("hr-flags", "Break flags", '<span class="tg"></span>')}
@@ -30,7 +30,6 @@ hud.innerHTML = `
   <button class="hb" id="hb-pause" type="button">${SVG_PAUSE}</button>
   <div id="hud-pl"><span class="l1 plate" id="hud-pause-l">Pause</span><span class="n4 plate">Space</span></div>
   <div id="hud-stats" class="plate"><span class="l1 mu">FPS</span> <span class="n3" id="hs-fps">--</span><span class="sep">·</span><span class="l1 mu">Foam</span> <span class="n3" id="hs-foam">--</span><span class="sep">·</span><span class="n3 ac" id="hs-f">F-</span></div>
-  <div id="hud-ver" class="n4 plate tx">v31</div>
   <div id="hud-toast" class="plate" role="status" aria-live="polite"><span class="l1 tx" id="ht-n"></span><span class="st" id="ht-s"></span></div>`;
 const q = (s) => hud.querySelector(s);
 // ---------- panel state: open | min, plus the Layers sheet ----------

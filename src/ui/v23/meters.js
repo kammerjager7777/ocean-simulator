@@ -1,6 +1,6 @@
 // Two fixed screen instruments above the time dial. They are not on the ocean,
 // so a drag cannot orbit the camera, and they do not change size with the sea.
-import { ui } from "./core.js?v=30.29";
+import { ui } from "./core.js?v=31.9";
 import { skyAt } from "./sky.js?v=30.29";
 
 const W = 400, H = 176;
@@ -40,7 +40,7 @@ function caption(ctx, name, value) {
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, W, H);
   ctx.font = "500 20px Barlow, sans-serif";
-  ctx.fillStyle = "rgba(220,224,230,0.82)";
+  ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillText(name, 18, 32);
@@ -51,7 +51,7 @@ function caption(ctx, name, value) {
   ctx.lineTo(18 + Math.min(86, ctx.measureText(name).width), 42);
   ctx.stroke();
   ctx.font = "400 24px Geist Mono, ui-monospace, monospace";
-  ctx.fillStyle = "#F6F8FF";
+  ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
   ctx.textAlign = "right";
   ctx.fillText(value, W - 18, 34);
 }

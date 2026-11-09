@@ -1,12 +1,12 @@
 import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=30.22";
 import { LOBE_GLSL } from "../physics/roughness.js?v=30.22";
 import { timed } from "../physics/passTimer.js?v=30.22";
-import { createBoatView, createBuoyView } from "./boatView.js?v=30.22";
+import { createBoatView, createBuoyView } from "./boatView.js?v=31.8";
 import { BED_GLSL } from "./seabed.js?v=30.29";
 import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
 import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js?v=30.29";
 import { SEABED_LUT } from "./seabedLut.js?v=30.22";
-import { CURL_SHAPE_GLSL, CURL_SLOTS, curlX } from "../physics/gpuSurface.js?v=30.22";
+import { CURL_SHAPE_GLSL, CURL_SLOTS, curlX } from "../physics/gpuSurface.js?v=31.8";
 const FAR_HALVE_DEFAULT = 0; // 05:16 horizon bar: quarter-density far rings flattened the sun25 silhouette (?farhalve=1 to test)
 const CHUNK_DEFAULT = 1; // v28 chunk (Michael 09:23): only the one square tile of sea (size slider), no horizon rings (?chunk=0 for the full sea)
 const ONE_COPY_DEFAULT = 0; // GAD 01:08: onecopy=0 (all three FFT copies at every distance)
@@ -394,7 +394,7 @@ export function waterFromZsd(z) {
   let lo = 0.05, hi = 10; for (let i = 0; i < 60; i++) { const m = 0.5 * (lo + hi); if (aG * m + bG * Math.pow(m, pw) > K) hi = m; else lo = m; }
   const sa = 0.5 * (lo + hi); return { t, sa, sb: Math.pow(sa, pw), K };
 }
-const PHYS_DECL = `uniform highp sampler2D sceneTex;\nuniform mat4 viewProj;\nuniform float sceneOn;\nuniform highp sampler2D physK;\nuniform highp sampler2D physA;\nuniform vec2 foamOff;\nuniform float waterTurb;\nuniform vec2 waterSc;\nuniform highp sampler2D foamLace;\nuniform float foamT;\nuniform highp sampler2DArray physS;\nuniform float strandsOn;\nuniform float fineWin;\nuniform vec2 fineCam;\n#define WATER_TURB waterTurb\n#define WATER_SA waterSc.x\n#define WATER_SB waterSc.y\n#define SAND_ALBEDO vec3(${PQ("sandr", 0.26)}, ${PQ("sandg", 0.42)}, ${PQ("sandb", 0.34)})\n#define SAND_K ${PQ("sandk", 1.2)}\n#define WATER_E ${PQ("wate", 1.0)}\n#define PHYS_EXPO ${PQ("expo", 0.86)}\n#define PHYS_GLINT ${PQ("glk", 0.35)}\n#define FOAM_CELL ${PQ("fcell", 2.2)}\n#define WC_D ${PQ("wcd", 0.8)}\n#define WC_G ${PQ("wcg", 0.15)}\n#define WC_GE ${PQ("wcge", 0.8)}\n#define WC_HW ${PQ("wchw", 0.9)}\n#define WC_T0 ${PQ("wct0", 0.6)}\n#define WC_T1 ${PQ("wct1", 0.1)}\n#define LACE_FAR ${PQ("flf", PHYS_Q.get("fcov") === "0" ? 0.04 : 2.0)}\n#define FOAM_NEW ${PHYS_Q.get("fcov") === "0" ? "false" : "true"}\n#define LACE_YLO ${PQ("fly", 0.12)}\n#define LACE_SOFT ${PQ("lsoft", 0.8)}\n#define FAR_STREAK ${PQ("fstreak", 1.0)}\n#define FAR_MILK ${PQ("fmilk", PHYS_Q.get("fcov") === "0" ? 0.85 : 0.2)}\n#define WC_ON ${PHYS_Q.get("wc") === "0" ? "false" : "true"}\n#define FOAM_DEBUG ${PHYS_Q.get("foamdebug") === "1" ? "true" : "false"}\n`;
+const PHYS_DECL = `uniform highp sampler2D sceneTex;\nuniform mat4 viewProj;\nuniform float sceneOn;\nuniform highp sampler2D physK;\nuniform highp sampler2D physA;\nuniform vec2 foamOff;\nuniform float waterTurb;\nuniform vec2 waterSc;\nuniform highp sampler2D foamLace;\nuniform float foamT;\nuniform highp sampler2DArray physS;\nuniform float strandsOn;\nuniform float uAirOn;\nuniform float fineWin;\nuniform vec2 fineCam;\n#define WATER_TURB waterTurb\n#define WATER_SA waterSc.x\n#define WATER_SB waterSc.y\n#define SAND_ALBEDO vec3(${PQ("sandr", 0.26)}, ${PQ("sandg", 0.42)}, ${PQ("sandb", 0.34)})\n#define SAND_K ${PQ("sandk", 1.2)}\n#define WATER_E ${PQ("wate", 1.0)}\n#define PHYS_EXPO ${PQ("expo", 0.86)}\n#define PHYS_GLINT ${PQ("glk", 0.35)}\n#define FOAM_CELL ${PQ("fcell", 2.2)}\n#define WC_D ${PQ("wcd", 0.8)}\n#define WC_G ${PQ("wcg", 0.15)}\n#define WC_GE ${PQ("wcge", 0.8)}\n#define WC_HW ${PQ("wchw", 0.9)}\n#define WC_T0 ${PQ("wct0", 0.6)}\n#define WC_T1 ${PQ("wct1", 0.1)}\n#define LACE_FAR ${PQ("flf", PHYS_Q.get("fcov") === "0" ? 0.04 : 2.0)}\n#define FOAM_NEW ${PHYS_Q.get("fcov") === "0" ? "false" : "true"}\n#define LACE_YLO ${PQ("fly", 0.12)}\n#define LACE_SOFT ${PQ("lsoft", 0.8)}\n#define FAR_STREAK ${PQ("fstreak", 1.0)}\n#define FAR_MILK ${PQ("fmilk", PHYS_Q.get("fcov") === "0" ? 0.85 : 0.2)}\n#define WC_ON ${PHYS_Q.get("wc") === "0" ? "false" : "true"}\n#define FOAM_DEBUG ${PHYS_Q.get("foamdebug") === "1" ? "true" : "false"}\n`;
 const PHYS_SEA = String.raw`
   // ===== v30c physical sea colour + physics foam (replaces the v30a grade and v30b foam look) =====
   {
@@ -468,51 +468,60 @@ const PHYS_SEA = String.raw`
     // raise the backscatter, so light comes back up after a short path: red still absorbed, green-blue
     // kept -> lighter turquoise, through the same Beer-Lambert. Mottled at metre scale.
     {
-      float air = smoothstep(0.05, 0.4, K.w / jv) * (0.6 + 0.8 * valueNoise(pk / 3.5 + 77.0)); // faint, old plume fades out
-      vec3 bbA = bb + air * vec3(0.04, 0.3, 0.26); // observed bubble-cloud colour: green-cyan (red still absorbed over the return path)
+      // Underwater bubbles, separate from the white surface foam drawn below.
+      // K.w is the stored plume: it tracks break intensity, then decays. The tint
+      // is a lift of this water's own backscatter, scaled by that amount, so a
+      // weak crash stays a small lightening and a strong one lifts further.
+      // No noise gate, no foam-occupancy paint, no extra lip term (that term
+      // flattened every real lip toward the same colour).
+      float aer = clamp(K.w, 0.0, 1.0) * uAirOn;
+      vec3 bbA = bb + aer * vec3(0.02, 0.16, 0.13) * (0.35 + 0.65 * aer);
       vec3 RinfA = 0.33 * bbA / (1.15 * aW + bbA);
-      Rw = mix(Rw, RinfA, clamp(2.5 * air, 0.0, 1.0) * (1.0 - exp(-2.0 * Kd * 2.0)));
-      // v30.7: residual foam sits in milky aerated water (bubbles just below the film)
-      float milk = 0.5 * dense; // v30.8b: turquoise only in the plume under/behind active foam
-      // v30.15 bubble plume under and just behind the whitewater: the recent whitecap trail (G) blurred
-      // a few metres (bubbles spread as they rise); brightest at the front, gone as the trail e-folds.
-      if (strandsOn > 0.5 && WC_STRANDS) {
-        float pl = clamp(5.0 * textureLod(physS, vec3(stUv, 0.0), 3.3).g / jv + 2.5 * Sb.g / jv, 0.0, 1.0);
-        pl *= 0.75 + 0.5 * valueNoise(pk / 2.5 + 31.0);
-        vec3 bbP = bb + pl * vec3(0.05, 0.45, 0.38);
-        Rw = mix(Rw, 0.33 * bbP / (1.15 * aW + bbP), clamp(1.6 * pl, 0.0, 0.85));
-      }
-      // v30.18.5 turquoise under the lip and in the steep face: light through the thin, aerated lip water.
-      // Lip/break strength from the same detector as the lip and the foam spawn (physL), soft 5-tap.
-      {
-        // v30.18.5b: from the vertex varyings (physL read in the vertex shader); a 17th fragment sampler broke Macs (16-unit limit)
-        float lipV = clamp(max(4.0 * vBroken, vLip), 0.0, 1.0);
-        float lt = smoothstep(0.2, 0.7, lipV) * smoothstep(0.15, 1.2, vWorld.y) * (0.8 + 0.4 * valueNoise(pk / 1.8 + 13.0)); // v30.19: only big breakers glow
-        vec3 bbL = bb + lt * vec3(0.02, 0.3, 0.24);
-        Rw = mix(Rw, 0.33 * bbL / (1.15 * aW + bbL) * 1.25, clamp(0.75 * lt, 0.0, 0.75));
-      }
-      Rw = mix(Rw, 0.33 * (bb + vec3(0.25, 0.3, 0.3)) / (1.15 * aW + bb + vec3(0.25, 0.3, 0.3)), 0.45 * milk);
+      Rw = mix(Rw, RinfA, aer * 0.75 * (1.0 - exp(-2.0 * Kd * 2.0)));
     }
     float cosV = clamp(dot(n, V), 0.0, 1.0); float cosV0 = cosV;
     float Fr = 0.02 + 0.98 * pow(1.0 - cosV, 5.0);
     vec3 Rr = reflect(-V, n);
     vec3 skyLin = mix(vec3(0.36, 0.70, 0.68) * uSkyHorM, vec3(0.05, 0.35, 0.37) * uSkyZenM, sqrt(clamp(Rr.y, 0.0, 1.0))); // v30.24: sky-keyed (was fixed teal: no sunset colour)
+    // v31.9: uWarm.rgb is the live horizon divided by the noon horizon, so this is the
+    // actual low sky in linear light. uWarm.w is 0 at 11:00 and at night, and the noon
+    // reflection above is left as it was. Fresnel (Fr) still weights it, strongest
+    // when the view grazes the surface.
+    vec3 horSky = uWarm.rgb * vec3(0.578, 0.723, 0.831);
+    float lowSun = clamp(uWarm.w, 0.0, 1.0);
+    vec3 skyWarm = mix(horSky, uSkyZenM * vec3(0.06, 0.16, 0.32), sqrt(clamp(Rr.y, 0.0, 1.0)));
+    skyLin = mix(skyLin, skyWarm, lowSun);
     float seen = smoothstep(-0.02, 0.06, Rr.y);
     vec3 body = 0.54 * Rw * WATER_E * mix(vec3(1.0), uSunC, 0.2); // v30.24 item 11: the upwelling is lit by the sun's colour
+    // The noon body is a dark intrinsic reflectance. Under a low sun the diffuse
+    // light is the horizon, so the body goes dim and warm instead of staying a
+    // teal that the exposure multiply then turns black.
+    body = mix(body, body * vec3(0.72, 0.5, 0.32) + horSky * (0.05 + 0.035 * Fr), lowSun);
     // v30.6 top-down relief: (a) upwelling depends on how the facet faces the sun (more light enters
     // and returns on sun-facing faces), (b) wave-face subsurface glow on raised crests, strongest
     // looking toward the sun, (c) troughs darkened (less light reaches them, the next wave occludes).
     float sunFace = clamp(dot(n, L) / max(L.y, 0.25), 0.4, 1.8);
-    body *= mix(1.0, sunFace, 0.65);
+    body *= mix(1.0, sunFace, 0.65 * (1.0 - 0.8 * lowSun));
     float crestH = max(vWorld.y, 0.0), troughH = max(-vWorld.y, 0.0);
     body += WATER_E * vec3(0.004, 0.028, 0.026) * crestH * (0.4 + 0.6 * pow(max(dot(V, -L), 0.0), 4.0) + 0.4 * (1.0 - cosV0));
     body *= 1.0 - 0.38 * smoothstep(0.0, 1.6, troughH);
-    // v30.15 light through thin steep crests: a steep face near the crest top is a thin water sheet;
-    // sunlight through it comes out green-turquoise, strongest looking toward the sun.
-    if (WC_STRANDS) {
-      float steepC = smoothstep(0.18, 0.5, 1.0 - n.y) * smoothstep(0.2, 1.2, crestH);
-      float back = 0.35 + 0.65 * pow(max(dot(V, -L), 0.0), 3.0);
-      body += WATER_E * vec3(0.004, 0.05, 0.04) * steepC * back;
+    // v31.8 crest transmission. The old term was a hard strip: steepness had to clear
+    // smoothstep(0.18, 0.5) and height had to clear smoothstep(0.2, 1.2), so the colour
+    // switched on along a nearly horizontal elevation contour and sat apart from the face.
+    // A heightfield still cannot see the true sheet thickness (3D curls come later). This
+    // stand-in is continuous in face slope, height above still water, the physics lip
+    // transmission (vThin), and the light direction. Flat water and troughs stay dark.
+    // Foam is applied later and is not part of this term.
+    {
+      float slope = length(n.xz) / max(n.y, 0.12);
+      float above = crestH / (crestH + 0.6);
+      float geo = exp(-1.2 / max(slope, 0.05)) * above;
+      float sheet = geo + clamp(vThin, 0.0, 1.0) * (1.0 - geo);
+      vec3 Ls = normalize(L);
+      float sunEl = clamp(Ls.y, 0.0, 1.0);
+      float intoSun = pow(max(dot(V, -Ls), 0.0), 2.0);
+      float through = (0.08 + sunEl * (0.15 + 0.95 * intoSun)) * sheet;
+      body += WATER_E * vec3(0.004, 0.046, 0.038) * through;
     }
     // reflections aimed below the horizon see the next wave's face (the water body), not black
     vec3 lin = (1.0 - Fr) * body + Fr * mix(body * 1.4 + vec3(0.004, 0.012, 0.02), skyLin, seen);
@@ -541,16 +550,11 @@ const PHYS_SEA = String.raw`
     float age = clamp(resid / max(resid + dense, 1e-3), 0.0, 1.0);
     vec2 dd = length(foamDrift) > 1e-4 ? normalize(foamDrift) : vec2(1.0, 0.0);
     // FOAM_FLOW_BEGIN
-    // v30.6 step 4: lace coordinates follow the eddy flow (dual-phase flow map, Vlachos 2010): two
-    // copies displaced by the local eddy velocity over a sawtooth of period 8 s, half a period apart,
-    // cross-faded so neither resets visibly. The eddies are strongest in the churned (aerated) water.
+    // v31.1: the lace used to scroll on a prescribed eddy (not the simulated orbital
+    // motion). It is world-locked now, so a patch does not swim under a fixed camera.
     float airF = clamp(K.w / jv, 0.0, 1.0);
-    vec2 pq = qd / 7.0;
-    float p0 = valueNoise(pq), px = valueNoise(pq + vec2(0.05, 0.0)), pz = valueNoise(pq + vec2(0.0, 0.05));
-    vec2 uf = vec2(pz - p0, -(px - p0)) / 0.05 * (0.25 + 1.2 * airF);  // m/s-ish, divergence free
-    float ph = fract(foamT / 8.0), ph2 = fract(ph + 0.5);
-    vec2 qf = qd - uf * (ph - 0.5) * 8.0 * 0.12, qf2 = qd - uf * (ph2 - 0.5) * 8.0 * 0.12 + 0.37;
-    float flowW = 1.0 - abs(2.0 * ph - 1.0);
+    vec2 qf = qd + 0.0 * airF, qf2 = qd;
+    float flowW = 1.0;
     // FOAM_FLOW_END
     // stretched along the flow as the foam ages (accumulated strain, capped)
     float stx = clamp(mix(1.0, 0.7, age) * sqrt(jv), 0.5, 1.0); // v30.8.2: stretch by age and the local surface strain (converging J<1 squeezes, diverging opens), max 2:1, world space along the wind // v30.8b: residual stretched downwind into streaks as it ages
@@ -575,7 +579,7 @@ const PHYS_SEA = String.raw`
     float sl = 0.0, sM = s;
     if (strandsOn > 0.5) {
       float ysh = clamp(0.5 * Sb.g / max(Sd.r + 0.5 * Sb.g, 1e-4), 0.0, 1.0); // v30.22f: young (dense-phase) share: its lace mask is lower (holed patch, not specks)
-      sl = (Sd.r + 0.5 * Sb.g) / jv /* v30.18.4: dense part from the blurred layer (no crack lines inside whitecaps) */ * (1.0 + 2.5 * smoothstep(0.15, 0.6, fpM)); // mips dilute thin lines at distance
+      sl = (Sd.r + 0.5 * Sb.g) / jv;
       float dns_ = smoothstep(0.1, 0.5, Sb.r / jv), dth_ = FOAM_NEW ? (1.5 + 0.25 * (1.0 - smoothstep(1.5, 3.0, length(foamDrift)))) * 0.25 * dns_ : 0.0; // v30.22g/h: denser strand foam lowers the lace threshold (connected lace, not twig fragments); a little more at low wind (~1% at 10 m/s)
       sM = s; if (FOAM_NEW) { vec2 qk = vec2(qs.x * 0.3, qs.y); sM = clamp(0.55 * texture(foamLace, qk / 10.0 + 0.43).g + 0.6 * texture(foamLace, R2 * qk / 4.0 + 0.11).g * (1.0 - 0.5 * smoothstep(0.08, 0.3, fpM)), 0.0, 1.0);
         // v30.24 item 12 (Michael 0bd581d5: big crack / line patterns across the foam patches): the lace (G) is a net of
@@ -583,8 +587,15 @@ const PHYS_SEA = String.raw`
         // blurred bubble-pit field (A, mip 3: median 0.39, 5-95% 0.05-0.72): blotches and holes, no lines;
         // LACE_SOFT (?lsoft=, 0 = v30.22h) is its share
         float sMb = 0.5 * (texture(foamLace, qk / 10.0 + 0.43, 3.0).a + texture(foamLace, R2 * qk / 3.0 + 0.11, 2.5).a);
-        sM = mix(sM, clamp(1.4 * (sMb - 0.26), 0.0, 1.0), LACE_SOFT); } // v30.22g test: wind-stretched lace (streaks) for the strand foam
-      aR = (1.0 - exp(-2.5 * sl)) * /* v30.18.2: non-saturating, opacity follows strand age */ mix(0.8, 1.0, t2.b) * mix(smoothstep(max(mix(0.35, LACE_YLO, ysh) - dth_, 0.0), max(mix(0.6, LACE_YLO + 0.25, ysh) - dth_, FOAM_NEW ? mix(0.12, 0.22, smoothstep(1.5, 2.5, length(foamDrift))) : -1.0), sM), 1.0, smoothstep(LACE_FAR, LACE_FAR > 0.1 ? LACE_FAR + 0.6 : 0.25, fpM)); // v30.22f: the lace mask holds out to ?flf= m/px (v30.22g: 2.0, i.e. always at medium range)
+        sM = mix(sM, clamp(1.4 * (sMb - 0.26), 0.0, 1.0), LACE_SOFT);
+      }
+      // v31.1 zoom: the old far end of this mix was 1.0, so once a pixel was coarser than
+      // LACE_FAR the holes were discarded and the mip average read as a white sheet.
+      // t1.a is the coarse lace sample already taken above (qs/40). A second fetch at qs/32,
+      // plus the web/rem pair, ran on every water pixel and the age mix replaced the lace
+      // as soon as the dense phase ended, which is why a 6 s trail collapsed to specks.
+      float gapKeep = smoothstep(0.08, 0.52, clamp(t1.a, 0.0, 1.0));
+      aR = (1.0 - exp(-2.5 * sl)) * /* v30.18.2: non-saturating, opacity follows strand age */ mix(0.8, 1.0, t2.b) * mix(smoothstep(max(mix(0.35, LACE_YLO, ysh) - dth_, 0.0), max(mix(0.6, LACE_YLO + 0.25, ysh) - dth_, FOAM_NEW ? mix(0.12, 0.22, smoothstep(1.5, 2.5, length(foamDrift))) : -1.0), sM), gapKeep, smoothstep(LACE_FAR, LACE_FAR > 0.1 ? LACE_FAR + 0.6 : 0.25, fpM));
       if (FOAM_NEW) aR *= smoothstep(0.05, 0.15, Sb.r / jv); // v30.22g: an isolated strand line (low blurred lace) is not drawn (white twig specks) (was 0.04: flat pale fill at medium range) // close up the splatted strand (0.4 m cells) breaks into the fine lace walls
     }
     float denseR = strandsOn > 0.5 ? dW : dense;
@@ -614,13 +625,24 @@ const PHYS_SEA = String.raw`
       float eL = smoothstep(0.75 - 0.5 * eG, 1.05 - 0.4 * eG, 0.55 * s + 0.45 * m1 + 0.25 * m0);
       wcM = smoothstep(thr - w, thr + w, st) * eG * mix(eL, 1.0, eG * eG);
       float far = smoothstep(0.3, 0.9, fpM);                            // v30.20: strands kept much farther out (was 0.08-0.5)
-      vec2 qsF = mix(qs, vec2(qs.x * 0.3, qs.y * 1.6), FAR_STREAK); // v30.24 item 12 (b9408d72: far foam in solid blocks): far cells stretched ~5:1 along the wind -> streaks
+      vec2 qsF = qs; // v31.7: the 5:1 far resample reshaped the same lace when the camera pulled back. Holes stay on the world coordinate.
       float lfW = texture(foamLace, qsF / 160.0 + 0.19).g;             // v30.20: 160 m lace cells break up far whitecap blobs
-      wcM = mix(wcM, smoothstep(0.22, 0.5, dn * mix(0.6, 1.3, smoothstep(0.15, 0.75, 0.6 * lfW + 0.4 * m0))), far);
+      // v31.1: do not replace the whitecap with a filled coverage blob when the pixel gets coarse.
+      // Keep the near shape and only open the same world-locked gaps.
+      wcM *= mix(1.0, smoothstep(0.2, 0.7, 0.6 * lfW + 0.4 * t1.g), far);
       if (FOAM_NEW) { float dWr = Sb.g * 4.0 / jv; wcM *= smoothstep(0.08, 0.33, sM + 0.1 * smoothstep(2.0, 5.0, dWr)); } // v30.22h: whitecap frays into the streak lace (no round discs)
       aD = wcM * mix(mix(0.5, WC_HW, wkF), 1.0, smoothstep(0.25, 0.95, 0.6 * m0 + 0.5 * m1 + 0.3 * D)); // v30.19.2 mottled interior; v30.19.3 less mottle in strong wind
     }
     float edgeZone = (WC_STRANDS && strandsOn > 0.5 ? 0.35 : 1.0) * smoothstep(0.05, 0.25, dn) * (1.0 - aD);
+    // v31.1 edges: dense foam stays crisp, thin foam stays soft, and the rim is clumpy
+    // rather than a single feathered outline. A few detached flecks sit just outside.
+    { float crisp = smoothstep(0.08, 0.5, max(denseR, aD));
+      float rim = smoothstep(0.04, 0.4, aR) * (1.0 - smoothstep(0.45, 0.9, aR));
+      float rimN = valueNoise(qd / 4.5 + 12.0);
+      aR *= mix(1.0, smoothstep(0.3, 0.62, rimN), rim * (1.0 - crisp));
+      float fleckN = valueNoise(qd / 1.5 + 33.0);
+      float fleck = (1.0 - smoothstep(0.02, 0.22, max(aR, aD))) * smoothstep(0.84, 0.94, fleckN) * smoothstep(0.03, 0.14, sl) * (1.0 - crisp);
+      aR = clamp(aR + fleck, 0.0, 1.0); }
     float fa = clamp(max(aD, aR) + edgeZone * s, 0.0, 1.0);
     // Lighting: wrap-Lambert on the wave normal plus the foam height bump (B channel), sun and sky;
     // contact darkening at the thin strand edges, thin foam shows the water colour under it.
@@ -636,15 +658,16 @@ const PHYS_SEA = String.raw`
     vec3 nR = normalize(cross(dFdx(pF), dFdy(pF))); if (nR.y < 0.0) nR = -nR;
     vec3 nF = normalize(mix(n, nR, 0.85) + vec3(bh - bhx, 0.0, bh - bhz) * 3.0 * o2);
     float sunT = clamp(dot(nF, L), 0.0, 1.0);
-    vec3 foamC = mix(vec3(0.66, 0.76, 0.85), vec3(0.98, 0.99, 1.0) * mix(vec3(1.0), uSunC, 0.45), 0.4 + 0.6 * sunT);   // blue sky-lit shade -> white (v30.24: sun-coloured side)
+    vec3 foamC = mix(vec3(0.84, 0.87, 0.89), vec3(0.98, 0.99, 1.0) * mix(vec3(1.0), uSunC, 0.45), 0.55 + 0.45 * sunT);
     foamC = mix(foamC, foamC * (0.55 + 0.9 * uWarm.rgb * vec3(0.58, 0.72, 0.83)), 0.3 * uWarm.w); // v30.24: a pink/orange cast at sunset
-    foamC *= mix(0.8, 1.05, aD * mix(0.78, 1.0, fr)) * mix(0.92, 1.0, s); // roller lead edge brightest, trail greys to ~0.7, lace walls ~0.66
+    foamC *= mix(0.96, 1.04, aD * mix(0.78, 1.0, fr));
     foamC *= 1.0 - 0.22 * t3.a * aD * o3;                               // 1-3 cm bubble pits
+    vec3 foamWhite = foamC; // lit surface foam, before thin foam shows the water through it
     // v30.15: thin foam shows bubbly (milky turquoise) water under it, never a grey film
     vec3 milkyW = mix(water, vec3(0.60, 0.86, 0.85), 0.6);
-    foamC = max(foamC, mix(milkyW, vec3(0.85, 0.93, 0.95), 0.4));
-    foamC = mix(mix(milkyW, foamC, 0.75), foamC, max(max(smoothstep(0.1, 0.6, dn), smoothstep(0.3, 0.9, s)), smoothstep(0.08, 0.35, sl)));  // thin = translucent
-    foamC *= mix(0.9, 1.0, smoothstep(0.0, 0.6, fa));                    // v30.19.2: faint contact line (no hard outline)
+    float thick = max(max(smoothstep(0.04, 0.22, dn), smoothstep(0.04, 0.18, sl)), smoothstep(0.12, 0.4, aR));
+    foamC = mix(mix(milkyW, foamC, 0.5), foamC, thick);
+    foamC *= mix(0.94, 1.0, smoothstep(0.0, 0.6, fa));
     color = mix(water, foamC, fa);
     // v30.14 distance LOD: where strands are sub-pixel the mip average is a foam FRACTION, not a line;
     // draw it as brighter milky turquoise (bubbly water), not as grey translucent shapes. Whitecaps stay white.
@@ -652,20 +675,22 @@ const PHYS_SEA = String.raw`
       float farW = smoothstep(0.25, 0.8, fpM);   // v30.20: lace kept to ~4x farther (was 0.04-0.3: flat 'leopard' blobs at mid distance)
       if (farW > 0.0 && strandsOn > 0.5) {
         float covF = clamp((1.4 * Sd.r + 0.6 * Sb.g) / jv, 0.0, 1.0);
-        vec3 milky = mix(water, vec3(0.60, 0.86, 0.85), 0.55);
-        float wcF = smoothstep(0.35, 0.7, dW);                      // only dense whitecaps stay white
-        // v30.19.2: no flat cut-out sheets: the coverage is broken up by the lace (holes, mottled interior)
-        // and fades in over a wide range, so the patch rim frays instead of ending in a pale outline.
-        float covL = (covF + 0.5 * aR) * mix(mix(0.35, WC_HW, smoothstep(3.0, 8.0, length(foamDrift))), 1.35, smoothstep(0.1, 0.9, 0.6 * t1.g + 0.5 * t2.g)); // v30.19.3: fewer far holes in strong wind
-        // v30.20: a 160 m lace lookup (same sampler, no new unit) keeps structure at distance: the far cover
-        // is mottled by it and its rim threshold wobbles with it, so patches fray instead of ending in a hard edge.
-        vec2 qsF2 = mix(qs, vec2(qs.x * 0.3, qs.y * 1.6), FAR_STREAK);
-        float lf = texture(foamLace, qsF2 / 160.0 + 0.19).g, lf2 = texture(foamLace, qsF2 / 22.0 + 0.57, 1.0).a; // the blotchy pit field (A), stretched: streaks
-        lf = mix(lf, 0.7 * lf + 0.5 * lf2, FAR_STREAK); // v30.24: a second, 22 m streak layer breaks the patches into streaks
-        covL *= mix(0.45, 1.4, smoothstep(0.1, 0.8, 0.55 * lf + 0.45 * t1.g));
-        covL *= mix(1.0, 1.4 * smoothstep(0.15, 0.6, lf2), 0.7 * FAR_STREAK);
-        float e0 = 0.08 + 0.35 * (lf - 0.4);
-        vec3 farC = mix(mix(water, milky, FAR_MILK * smoothstep(e0, e0 + 0.8, covL)), max(foamC, milky), wcF * aD * mix(1.0, smoothstep(0.2, 0.5, lf2), FAR_STREAK)); // v30.24: far whitecaps also break into streaks // v30.22f: fainter far milky fill (?fmilk=, 0.85 in v30.22e)
+        // The mip strand fraction is the foam area in this pixel. Lace grain keeps
+        // the world-locked holes. The blend weight is that area, so the shoal is
+        // not snapped up to solid white and not repainted as milky water.
+        vec2 qsF2 = qs; // same world lace as the close view; the hole weights below are unchanged
+        float lf = texture(foamLace, qsF2 / 160.0 + 0.19).g, lf2 = texture(foamLace, qsF2 / 22.0 + 0.57, 1.0).a;
+        lf = mix(lf, 0.7 * lf + 0.5 * lf2, FAR_STREAK);
+        float hole = mix(0.4, 1.0, smoothstep(0.15, 0.8, 0.55 * lf + 0.45 * t1.g));
+        hole *= mix(1.0, smoothstep(0.2, 0.65, lf2), 0.55 * FAR_STREAK);
+        // Weight is the strand fraction. The coverage knee is unchanged from v31.5,
+        // so this does not recruit water outside that footprint.
+        float area = smoothstep(0.02, 0.22, covF) * hole;
+        // v31.6: blending that partial area with the water turned a visible shoal grey.
+        // Lift the interior of the same footprint to the lit foam colour. The skirt
+        // below about 0.18 stays at or under the old weight, so the outline does not grow.
+        float shown = smoothstep(0.08, 0.42, area);
+        vec3 farC = mix(water, foamWhite, shown);
         color = mix(color, farC, farW);
       }
     }
@@ -1442,11 +1467,8 @@ export function createView(canvas) {
   const fftFragShader = webgl2 ? compile(gl, gl.FRAGMENT_SHADER, toEs3(fragBody
     .replace("uniform float chopKept[8];\nuniform float fineKept[8];", "float chopKept[8];\nfloat fineKept[8];\nuniform highp sampler2D chopStats;\nuniform highp sampler2D fineStats;")
     .replace("uniform float subMss;", "uniform float subMssU;\nvarying float vLodLost;\nfloat subMss;")
-    // GAD glow: the FFT sea's vThin is interpolated over 2.2 m triangles, so a lip's ramp
-    // (vThin 0.05-0.15) glowed around it; transmission now starts at the lip itself
-    // (vThin 0.14-0.18) with gain 4.2 so the tips keep v26's 94-102.
-    .replace("float transl = TRANSL_MAX * (1.0 - exp(-vThin * TRANSL_SKY));", "float thinE = min(1.0, 4.2 * vThin * smoothstep(0.14, 0.18, vThin)); float transl = TRANSL_MAX * (1.0 - exp(-thinE * TRANSL_SKY));")
-    .replace("float translSun = vThin * TRANSL_SCATTER * sunIn;", "float translSun = thinE * TRANSL_SCATTER * sunIn;")
+    // v31.8: do not gate vThin through smoothstep(0.14, 0.18) * 4.2. That isosurface was a
+    // second hard lip. The live colour is PHYS_SEA; this path stays the continuous transmission.
     .replace("vec3 nBig = normalize(vNormal);", "vec3 nBig = normalize(mix(normalize(vNormal), seaNormalPix(vSea.xy, vSea.z), clamp(vSea.w, 0.0, 1.0)));")
     // GAD per-pixel foam (see foamPix in fftView.js): the foam varyings become globals set per pixel.
     .replace("varying float vFoam;", "varying float vFoam;\nfloat fFoam; float rawFoam() { return vFoam; }\n#define vFoam fFoam\n")
@@ -1486,7 +1508,10 @@ void main() {
   const fftProgram = webgl2 ? link(VERT_FFT, fftFragShader) : null;
   const spray = webgl2 && SEA_PARAMS.get("spray") !== "0" ? createSpray(gl) : null;
   const curlSheet = webgl2 && SEA_PARAMS.get("curl") !== "0" && SEA_PARAMS.get("curl") !== "lip" ? createCurl(gl) : null; // v30.22c
-  const lip = webgl2 && SEA_PARAMS.get("lip") !== "0" ? createLip(gl) : null; // v30.18.3: on by default (foam spawns where it lands) // v30.17: off by default (lip=1), not yet verified visible
+  // v31.9: the coarse lip ribbon is a straight-edged turquoise quad a few cells wide.
+  // The curl sheet replaced that look. Draw the ribbon only when the sheet is off
+  // (?curl=0 or ?curl=lip). Foam still comes from the physics, not from this draw.
+  const lip = webgl2 && SEA_PARAMS.get("lip") !== "0" && !curlSheet ? createLip(gl) : null;
   // v29.1 fix5 review check (?edgecheck=1, off by default): runs the SAME vertex shader with the
   // same uniforms and textures over the surface tile vertices and the wall-top vertices through
   // transform feedback and reports the largest surface-edge to wall-top distance and how far any
@@ -1948,6 +1973,7 @@ void main() {
   const sizeDistance = (oldSize, newSize) => (oldSize > 0 ? camera.distance : OPEN_DIST);
   globalThis.__oceanViewCmd = {
     reset() { camera.yaw = 0.75; camera.pitch = 0.5; camera.distance = OPEN_DIST; },
+    dist(v) { if (Number.isFinite(v)) camera.distance = Math.max(CAM_MIN, Math.min(CAM_MAX, v)); },
     fit() {
       const targetOf = () => {
         const V = globalThis.__oceanView, P = globalThis.__oceanUI23 && globalThis.__oceanUI23.proj;
@@ -2135,6 +2161,7 @@ void main() {
     gl.uniform1f(locs.depth, state.depth);
     if (locs.sceneOn) gl.uniform1f(locs.sceneOn, 0);
     gl.uniform1f(locs.showFlags, showFlags ? 1 : 0);
+    { const af = gl.getUniformLocation(program, "uAirOn"); if (af) gl.uniform1f(af, globalThis.__airVis === 0 ? 0 : 1); }
     gl.uniform2f(locs.travel, state.travelX || 0, state.travelZ || 1);
     // GPU physics: the card already wrote the patch textures (gpuPatch.js); otherwise
     // quantise and upload the CPU patches as before.
@@ -2325,7 +2352,7 @@ void main() {
       if (spray && state.fx) /* v30.19: Break Flags only adds outlines */ timed("render:spray", () => { spray.draw(state, g, fft, vpMat, eye, (Math.PI / 4) / canvas.height); gl.bindVertexArray(vao); gl.useProgram(program); });
       if (lip && state.fx) timed("render:lip", () => { lip.draw(state, g, fft, vpMat, eye); gl.bindVertexArray(vao); gl.useProgram(program); });
       if (curlSheet && state.fx) timed("render:curl", () => { curlSheet.draw(state, g, fft, vpMat, eye, sunU, blockOn); gl.bindVertexArray(vao); gl.useProgram(program); });
-      if (state.boat && webgl2) { if (!boatView) boatView = createBoatView(gl); boatView.draw(state.boat, vpMat, sunU); gl.bindVertexArray(vao); gl.useProgram(program); }
+      if (state.boat && webgl2) { if (!boatView) boatView = createBoatView(gl); boatView.draw(state.boat, vpMat, sunU, state.fx || null); gl.bindVertexArray(vao); gl.useProgram(program); }
       if (globalThis.__oceanBuoy && webgl2) { if (!buoyView) buoyView = createBuoyView(gl); buoyView.draw(globalThis.__oceanBuoy, vpMat, sunU); gl.bindVertexArray(vao); gl.useProgram(program); } // v30.21
       if (edgeCheck && blockOn) { gl.disable(gl.BLEND); edgeCheckRun(fft.L); }
       gl.disable(gl.BLEND);
@@ -2526,7 +2553,7 @@ function createCurl(gl) {
 precision highp float; precision highp int;
 uniform highp sampler2D physA; uniform highp sampler2D physL; uniform highp sampler2D curlF; uniform highp sampler2D curlList;
 uniform int physN; uniform float fftL; uniform int uAxisX; uniform ivec2 uAx; uniform vec2 uDir; uniform mat4 viewProj; uniform float uBlock; uniform float uCurlX;
-out float vS; out float vAmp; out float vPh; out vec3 vW; out vec3 vN; out float vU; out float vH; flat out vec3 vDbg;
+out float vS; out float vAmp; out float vPh; out vec3 vW; out vec3 vN; out float vU; out float vH; out float vClear; out float vOpen; flat out vec3 vDbg;
 ${CURL_SHAPE_GLSL}
 ivec2 wrapc(ivec2 c) { return (c % physN + physN) % physN; }
 ivec2 cellOf(int u, int v) { return uAxisX == 1 ? ivec2(v, u) : ivec2(u, v); }
@@ -2563,7 +2590,7 @@ vec3 crestPos(ivec2 c, float sub, float sp) {
 void main() {
   int j = gl_VertexID / 2, side = gl_VertexID % 2;
   int k = gl_InstanceID % ${SLOTS}, u = gl_InstanceID / ${SLOTS};
-  gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vS = 0.0; vAmp = 0.0; vPh = 0.0; vW = vec3(0.0); vN = vec3(0.0, 1.0, 0.0); vU = 0.0; vH = 1.0; vDbg = vec3(0.0);
+  gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vS = 0.0; vAmp = 0.0; vPh = 0.0; vW = vec3(0.0); vN = vec3(0.0, 1.0, 0.0); vU = 0.0; vH = 1.0; vClear = 1.0; vOpen = 0.0; vDbg = vec3(0.0);
   float vf = texelFetch(curlList, ivec2(k, u), 0).x;
   if (vf < 0.0) return;
   if (uBlock > 0.5 && u >= physN - 1) return;
@@ -2612,6 +2639,17 @@ void main() {
     P.y += lift; if (lift > 0.0) dq.y = mix(dq.y, 0.0, smoothstep(0.0, 0.1 * Hc, lift));
   }
   vH = mix(1.0, (P.y - ht) / max(Hc, 0.3), smoothstep(0.35, 0.7, s)); // height above the landing water in lip heights
+  // Metres above the sea under this vertex. The drawn mesh (and the foam on it) does not
+  // match that sample, so a depth test against it used to slice the opaque sheet into a
+  // straight-edged facet a few cells wide.
+  vClear = P.y - surfH(P.xz, sp);
+  float prevA = -1.0;
+  if (u > 0) {
+    prevA = texelFetch(curlF, wrapc(cellOf(u - 1, v)), 0).x;
+    prevA = max(prevA, texelFetch(curlF, wrapc(cellOf(u - 1, v - 1)), 0).x);
+    prevA = max(prevA, texelFetch(curlF, wrapc(cellOf(u - 1, v + 1)), 0).x);
+  }
+  vOpen = side == 1 ? (found ? 0.0 : 1.0) : (prevA > 0.02 ? 0.0 : 1.0);
   vec3 N = fw * (-dq.y) + vec3(0.0, dq.x, 0.0);
   vN = length(N) > 1e-6 ? normalize(N) : vec3(0.0, 1.0, 0.0);
   vDbg = vec3(float(u), found ? float(du) : 0.0, float(k));
@@ -2621,7 +2659,7 @@ void main() {
   const fs = `#version 300 es
 precision highp float;
 uniform vec3 eye; uniform vec3 uSun; uniform vec3 dayTint; uniform float uU;
-in float vS; in float vAmp; in float vPh; in vec3 vW; in vec3 vN; in float vU; in float vH; flat in vec3 vDbg; out vec4 o;
+in float vS; in float vAmp; in float vPh; in vec3 vW; in vec3 vN; in float vU; in float vH; in float vClear; in float vOpen; flat in vec3 vDbg; out vec4 o;
 float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vn(vec2 x) { vec2 i = floor(x), f = x - i; f = f * f * (3.0 - 2.0 * f);
   return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
@@ -2663,11 +2701,24 @@ void main() {
   float rim = smoothstep(0.22, 0.38, vS) * (1.0 - smoothstep(0.55, 0.78, vS + 0.2 * (nz - 0.5))) * smoothstep(0.15, 0.5, vPh);
   ww = max(ww, mix(0.6, 1.0, storm) * rim * smoothstep(mix(0.35, 0.3, storm), mix(0.7, 0.55, storm), nz + 0.2)); // broken, not a solid white shell; brighter on storm lips
   col = mix(col, vec3(0.90, 0.94, 0.95) * (0.82 + 0.18 * dl), 0.95 * ww);
-  float a = smoothstep(0.0, 0.08, vAmp) * (1.0 - smoothstep(0.7, 1.0, vS + 0.3 * (nz - 0.5))); // the tip dissolves into spray, no hard rim
-  a *= smoothstep(0.0, 0.18, vS);                                         // the root fades into the wave face it grows from
-  // where the sheet comes down onto the water it fades out (noise-broken) instead of ending in a silhouette line
-  a *= mix(1.0, smoothstep(0.12, 0.5, vH + 0.12 * (nz - 0.5)), smoothstep(0.3, 0.6, vS));
-  a *= 1.0 - smoothstep(0.95, 1.35, vPh + 0.35 * (nz - 0.5) + 0.25 * vS);      // after landing the lip dissolves (tip first) into the foam it made
+  // v31.9: alpha is a hump across the profile, not a plateau of 1. A plateau ran into
+  // the depth test and the end of a short crest and left a flat parallelogram with
+  // straight edges (turquoise where the sheet is still water, white once it breaks).
+  // ?curlfade=0 is the old plateau, for comparison only.
+  float a = smoothstep(0.0, 0.12, vAmp);
+  if (${SEA_PARAMS.get("curlfade") === "0" ? "false" : "true"}) {
+    float along = clamp(vS + 0.2 * (nz - 0.5), 0.0, 1.0);
+    float hump = sin(along * 3.14159265);
+    a *= pow(max(hump, 0.0), 0.4);
+    a *= smoothstep(0.0, 1.15, vClear + 0.4 * (nz - 0.5));
+    a *= 1.0 - smoothstep(0.0, 0.85, vOpen);
+    a = min(a, 0.62);
+  } else {
+    a *= (1.0 - smoothstep(0.7, 1.0, vS + 0.3 * (nz - 0.5)));
+    a *= smoothstep(0.0, 0.18, vS);
+    a *= mix(1.0, smoothstep(0.12, 0.5, vH + 0.12 * (nz - 0.5)), smoothstep(0.3, 0.6, vS));
+  }
+  a *= 1.0 - smoothstep(0.95, 1.35, vPh + 0.35 * (nz - 0.5) + 0.25 * vS);
   a *= mix(1.0, 0.85, thin * (1.0 - ww));
   o = vec4(col * dayTint, a);
   if (${SEA_PARAMS.get("curldbg") === "4" || SEA_PARAMS.get("curldbg") === "5" ? 1 : 0} == 1) o = vec4(1.0, 0.0, 0.0, 1.0);
@@ -2695,7 +2746,10 @@ void main() {
       { const d = globalThis.__oceanDay; gl.uniform3f(U.dayTint, d ? d[0] : 1, d ? d[1] : 1, d ? d[2] : 1); }
       gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE); gl.disable(gl.CULL_FACE);
       if (SEA_PARAMS.get("curldbg") === "5" || SEA_PARAMS.get("curldbg") === "8") gl.disable(gl.DEPTH_TEST);
+      // Don't let the sheet's own triangles clip each other into facets.
+      gl.depthMask(false);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * (SUB + 1), SLOTS * fft.N);
+      gl.depthMask(true);
       gl.enable(gl.DEPTH_TEST);
       gl.disable(gl.BLEND);
     },

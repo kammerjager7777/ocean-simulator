@@ -20,17 +20,26 @@ const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
 function dayTint(m) {
   const e = elevAt(m) / D2R, e0 = elevAt(660) / D2R;
   if (Math.abs(m - 660) < 0.5 || e >= e0) return null;
-  // Twilight and the day curve are the approved sunrise / sunset brightness. Deep night used to sit on a
-  // 0.10 floor of the tonemapped colour, which crushed a full-moon sea to about RGB 3/6/7. The moon
-  // is still a light: hold a 0.55 floor instead of 0.10, and let it meet the existing
-  // curve by -3°, so every elevation above -3° — the whole warm sunrise and sunset — is unchanged.
-  const b0 = 0.1 + 0.9 * (0.5 * sm(-8, 4, e) + 0.5 * sm(2, e0, e));
-  const b = Math.max(b0, 0.55 * (1 - sm(-12, -3, e)));
-  const n = 1 - sm(-7, 6, e);
-  // v30.23 (GAD 17:50 hue 110° olive): this tint multiplies the WHOLE lit colour, water body included, so it must stay
-  // (near-)neutral: brightness only, with a slight cool shift at night. The warm dawn/dusk colour now arrives only
-  // through the sky reflection (uSkyHorM / uSkyZenM, keyed by skyAt) and the glitter (uGlitM).
-  return [b * (1 - 0.08 * n), b * (1 - 0.03 * n), b * (1 + 0.06 * n)];
+  // Deep night is the approved moonlit floor (0.55, slight cool shift). It used to be the
+  // same curve through golden hour, and at 18:25 (sun about -6°) that multiply is ~0.13
+  // on the already-tonemapped sea while the sky dome is left at full orange.
+  const legacy = () => {
+    const b0 = 0.1 + 0.9 * (0.5 * sm(-8, 4, e) + 0.5 * sm(2, e0, e));
+    const b = Math.max(b0, 0.55 * (1 - sm(-12, -3, e)));
+    const n = 1 - sm(-7, 6, e);
+    return [b * (1 - 0.08 * n), b * (1 - 0.03 * n), b * (1 + 0.06 * n)];
+  };
+  if (e <= -10) return legacy();
+  // Direct sun falls with elevation. The sky does not: it is the light on the water
+  // once the sun is low, so the sea stays dimmer than noon without going black.
+  const mu = Math.max(0, Math.sin(e * D2R));
+  const muN = Math.sin(Math.max(1e-3, e0 * D2R));
+  const sky = 0.62 + 0.38 * sm(-2, 18, e);
+  const b = Math.min(1, 0.25 * (mu / muN) + 0.75 * sky);
+  const lifted = [b, b, b];
+  if (e >= -6) return lifted;
+  const t = sm(-10, -6, e);
+  return legacy().map((v, i) => v + (lifted[i] - v) * t);
 }
 export function skyAt(m) {
   const e = elevAt(m) / D2R, morning = m < 720;
@@ -73,8 +82,9 @@ export function rayDir(x, y, V, VI) { // screen px -> unit world view-ray direct
   const un = (z) => { const w = m[3] * nx + m[7] * ny + m[11] * z + m[15]; return [(m[0] * nx + m[4] * ny + m[8] * z + m[12]) / w, (m[1] * nx + m[5] * ny + m[9] * z + m[13]) / w, (m[2] * nx + m[6] * ny + m[10] * z + m[14]) / w]; };
   const a = un(-1), b = un(1), d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], l = Math.hypot(...d) || 1; return [d[0] / l, d[1] / l, d[2] / l];
 }
-// warm (sunrise / sunset) weight: full from the horizon to 6 deg, gone by 24 deg; fades out into the night by -8 deg
-export const warmW = (e) => (e >= 6 ? 1 - sm(6, 24, e) : e >= -1 ? 1 : sm(-8, -1, e));
+// warm (sunrise / sunset) weight: full from a low sun through civil twilight, gone by 24 deg
+// and by the time the sky is the night key. 11:00 and midnight both stay at 0.
+export const warmW = (e) => (e >= 6 ? 1 - sm(6, 24, e) : e >= -4 ? 1 : e <= -9 ? 0 : sm(-9, -4, e));
 let V0 = null;
 // World azimuth of the sun at clock min. Noon is the block's -Z face normal, not the
 // default orbit heading. view.js yaw 0.75 looks at the near corner (about 43 degrees
@@ -121,7 +131,7 @@ export function publish(m, enabled = true, VI = null) {
     // v30.24 item 11: the warm light reaching the water. sunC: the light colour relative to noon (diffuse, foam, glitter);
     // warm: the horizon sky colour relative to noon and its weight, which the sea mixes into its body and reflection.
     sunC: ident ? [1, 1, 1] : night ? [0.75, 0.82, 1.0] : key.disc.map((v, i) => Math.min(1.6, v / noon.disc[i])),
-    warm: [...key.hor.map((v, i) => Math.min(3, v / noon.hor[i])), night ? 0 : warmW(e)],
+    warm: [...key.hor.map((v, i) => Math.min(3, v / noon.hor[i])), warmW(e)],
     arc: { noonAz: A_NOON, axis: "-Z", worldFixed: SUNARC !== "screen" },
   };
   return e;

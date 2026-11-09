@@ -1,8 +1,7 @@
 // Wind. A compass ring circles the ocean in world bearings: 0 is +X and is
 // labeled N, 90 is +Z and is labeled E, matching the sea's (cos θ, sin θ) wind.
 // Dragging the ring sets direction only. The fixed card sets speed only.
-import { ui } from "./core.js?v=30.29";
-import { seaHides } from "./geometry.js?v=30.29";
+import { ui } from "./core.js?v=31.9";
 import { skyAt } from "./sky.js?v=30.29";
 import { sample, release, cancel, velocity } from "./coast.js?v=30.29";
 const LO = [0, .3, 1.6, 3.4, 5.5, 8, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7, 36.9];
@@ -32,30 +31,41 @@ function skyLuma() {
 }
 // 1 on a bright horizon (black ink), 0 once the sky has gone dark (light ink).
 function dayInk() { return clamp((skyLuma() - 0.045) / 0.16, 0, 1); }
+function hexRgb(hex) {
+  const h = String(hex || "").replace("#", "");
+  if (h.length < 6) return [246, 248, 255];
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+}
 function ringInk(alpha = 1) {
   const t = dayInk();
-  const r = Math.round(14 * t + 246 * (1 - t));
-  const g = Math.round(18 * t + 248 * (1 - t));
-  const b = Math.round(22 * t + 255 * (1 - t));
+  const face = ui.theme && (t > 0.55 ? ui.theme.skyInk : ui.theme.hudFace);
+  const [r, g, b] = hexRgb(face || (t > 0.55 ? "#0C1724" : "#F6F8FF"));
   return `rgba(${r},${g},${b},${alpha})`;
+}
+function faceInk() { return (ui.theme && ui.theme.hudFace) || "#F6F8FF"; }
+function textGlow(ctx) {
+  const a = ui.theme && ui.theme.glowA || 0;
+  ctx.shadowColor = (ui.theme && ui.theme.accent) || "#F6F8FF";
+  ctx.shadowBlur = a > 0.28 ? 4 : 2;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
 }
 function ringRadius() {
   const S = ui.S();
-  return (S / 2) * Math.SQRT2 + S * 0.06 + 8;
+  // A little outside the block's diagonal. v31.8 is slightly larger than the 0.06 S + 8 m ring.
+  return (S / 2) * Math.SQRT2 + S * 0.1 + 18;
 }
 function worldAt(deg, radius = ringRadius()) {
   const a = deg * Math.PI / 180;
   return [Math.cos(a) * radius, 0, Math.sin(a) * radius];
 }
-function hidden(w) {
-  if (!w || seaHides(w)) return true;
-  const p = ui.proj(w[0], w[1], w[2]);
-  if (!p) return true;
-  if (ui.overBlock && ui.overBlock(p[0], p[1])) return true;
-  return false;
-}
+// The ring is a 2D overlay drawn after the sea, so the water cannot cover it in the
+// depth buffer. v31.7 still dropped a sample when seaHides said the water box sat on
+// the ray, or when the projected point fell inside the block's screen hull. That is
+// why the compass vanished wherever the ocean's projection overlapped it, including
+// grazing views. Points behind the camera still fail ui.proj.
 function project(w) {
-  if (hidden(w)) return null;
+  if (!w) return null;
   return ui.proj(w[0], w[1], w[2]);
 }
 
@@ -104,7 +114,8 @@ el.addEventListener("wheel", (e) => {
   e.preventDefault();
   e.stopPropagation();
   cancel("spd");
-  publishSpd(snapSpd(U() + (e.deltaY > 0 ? -SPD_STEP : SPD_STEP)));
+  // Scroll up (deltaY < 0) decreases speed, so the drum turns with the wheel.
+  publishSpd(snapSpd(U() + (e.deltaY < 0 ? -SPD_STEP : SPD_STEP)));
 }, { passive: false });
 ui.slider("Wind speed", () => [U(), `${U()} metres per second`], (e) => { if (!/Arrow(Up|Down)/.test(e.key)) return false; ui.set("spd", Math.max(0, Math.min(25, U() + (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 5 : .5)))); return true; });
 ui.slider("Wind direction", () => [D(), `${D()} degrees`], (e) => { if (!/Arrow(Left|Right)/.test(e.key)) return false; ui.set("dir", wrap(D() + (e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 15 : 1))); return true; });
@@ -121,10 +132,12 @@ function drawCard() {
   cctx.fillStyle = "#000";
   cctx.fillRect(0, 0, CARD_W, CARD_H);
   cctx.font = "500 20px Barlow, sans-serif";
-  cctx.fillStyle = "rgba(220,224,230,0.82)";
+  cctx.fillStyle = faceInk();
   cctx.textAlign = "left";
   cctx.textBaseline = "alphabetic";
+  textGlow(cctx);
   cctx.fillText("WIND", 18, 32);
+  cctx.shadowBlur = 0;
   cctx.strokeStyle = accent();
   cctx.lineWidth = 1.5;
   cctx.beginPath();
@@ -132,9 +145,11 @@ function drawCard() {
   cctx.lineTo(18 + cctx.measureText("WIND").width, 42);
   cctx.stroke();
   cctx.font = "400 22px Geist Mono, ui-monospace, monospace";
-  cctx.fillStyle = "rgba(220,224,230,0.82)";
+  cctx.fillStyle = faceInk();
   cctx.textAlign = "right";
+  textGlow(cctx);
   cctx.fillText(bearing(deg), CARD_W - 18, 34);
+  cctx.shadowBlur = 0;
   if (spdDrag || velocity("spd")) spdGlow = 1;
   else spdGlow = ui.reduced ? 0 : spdGlow * Math.exp(-(ui.dt || 0.016) / 0.14);
   const bodyTop = 52, bodyBot = 176;
@@ -155,7 +170,7 @@ function drawCard() {
     const selected = Math.abs(s - spd) < 0.01;
     const num = s.toFixed(1);
     cctx.globalAlpha = selected ? 1 : 0.16 + 0.5 * near * near;
-    cctx.fillStyle = selected && spdGlow > 0.08 ? accent() : "#F6F8FF";
+    cctx.fillStyle = selected && spdGlow > 0.08 ? accent() : faceInk();
     if (selected) {
       cctx.font = "400 26px Geist Mono, ui-monospace, monospace";
       const nw = cctx.measureText(num).width;
@@ -166,7 +181,7 @@ function drawCard() {
       cctx.textAlign = "left";
       cctx.fillText(num, left, mid + dy);
       cctx.font = "500 16px Barlow, sans-serif";
-      cctx.fillStyle = "rgba(220,224,230,0.78)";
+      cctx.fillStyle = faceInk();
       cctx.fillText("m/s", left + nw + gap, mid + dy);
     } else {
       cctx.font = "400 15px Geist Mono, ui-monospace, monospace";
@@ -183,7 +198,7 @@ function drawCard() {
   cctx.lineTo(CARD_W - 16, 176);
   cctx.stroke();
   cctx.font = "500 16px Barlow, sans-serif";
-  cctx.fillStyle = "rgba(220,224,230,0.9)";
+  cctx.fillStyle = faceInk();
   cctx.textBaseline = "alphabetic";
   cctx.fillText(bf, 18, 206);
   el.setAttribute("aria-valuemin", "0");
@@ -204,13 +219,37 @@ function covered(x, y) {
   }
   return false;
 }
-function outward(deg, radius) {
-  const a = project(worldAt(deg, radius));
-  const b = project(worldAt(deg, radius + Math.max(6, radius * 0.04)));
-  if (!a || !b) return a ? null : null;
-  const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy);
-  if (l < 0.4) return null;
-  return { at: a, ux: dx / l, uy: dy / l };
+function outward(deg, radius = ringRadius()) {
+  // The contact is the same world point the ring stroke uses. Its screen
+  // direction is the rail's own normal, not the projected world radius:
+  // that radius is not perpendicular to the projected ring, so the marker
+  // swiveled as the camera orbited and the stroke cut across the glyph.
+  const at = project(worldAt(deg, radius));
+  if (!at) return null;
+  const step = 2.5;
+  const prev = project(worldAt(deg - step, radius));
+  const next = project(worldAt(deg + step, radius));
+  let tx, ty;
+  if (prev && next) { tx = next[0] - prev[0]; ty = next[1] - prev[1]; }
+  else if (next) { tx = next[0] - at[0]; ty = next[1] - at[1]; }
+  else if (prev) { tx = at[0] - prev[0]; ty = at[1] - prev[1]; }
+  else return null;
+  const tl = Math.hypot(tx, ty);
+  if (tl < 0.35) return null;
+  tx /= tl; ty /= tl;
+  let nx = -ty, ny = tx;
+  const bump = Math.max(6, radius * 0.04);
+  const far = project(worldAt(deg, radius + bump));
+  const inn = project(worldAt(deg, Math.max(0, radius - bump)));
+  let sx = 0, sy = 0;
+  if (far) { sx += far[0] - at[0]; sy += far[1] - at[1]; }
+  if (inn) { sx += at[0] - inn[0]; sy += at[1] - inn[1]; }
+  if (Math.hypot(sx, sy) < 0.35) {
+    const c = ui.proj(0, 0, 0);
+    if (c) { sx = at[0] - c[0]; sy = at[1] - c[1]; }
+  }
+  if (nx * sx + ny * sy < 0) { nx = -nx; ny = -ny; }
+  return { at, ux: nx, uy: ny };
 }
 function ringSamples() {
   const radius = ringRadius();
@@ -230,7 +269,7 @@ function drawRing(pose) {
   ctx.lineCap = "butt";
   ctx.lineJoin = "round";
   ctx.strokeStyle = ringInk(0.92);
-  ctx.lineWidth = 1.35;
+  ctx.lineWidth = 1.7;
   ctx.beginPath();
   let pen = false;
   for (const p of pts) {
@@ -250,9 +289,9 @@ function drawRing(pose) {
       if (!o) continue;
       const cardinal = deg % 90 === 0;
       const thirty = deg % 30 === 0;
-      const len = cardinal ? 11 : thirty ? 8 : 5;
+      const len = cardinal ? 13 : thirty ? 9 : 6;
       ctx.strokeStyle = ringInk(cardinal ? 1 : 0.78);
-      ctx.lineWidth = cardinal ? 1.7 : 1.15;
+      ctx.lineWidth = cardinal ? 1.9 : 1.25;
       ctx.beginPath();
       ctx.moveTo(o.at[0], o.at[1]);
       ctx.lineTo(o.at[0] + o.ux * len, o.at[1] + o.uy * len);
@@ -261,32 +300,33 @@ function drawRing(pose) {
     const place = (deg, text, font, fill) => {
       const o = outward(deg, radius);
       if (!o) return;
-      let x = o.at[0] + o.ux * 22, y = o.at[1] + o.uy * 22;
-      if (ui.overBlock && ui.overBlock(x, y)) { x += o.ux * 18; y += o.uy * 18; }
-      if ((ui.overBlock && ui.overBlock(x, y)) || covered(x, y) || nearKept([x, y])) return;
+      const x = o.at[0] + o.ux * 24, y = o.at[1] + o.uy * 24;
+      if (covered(x, y) || nearKept([x, y])) return;
       kept.push([x, y]);
       ctx.font = font;
       ctx.fillStyle = fill;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
+      textGlow(ctx);
       ctx.fillText(text, x, y);
+      ctx.shadowBlur = 0;
     };
-    for (const [deg, text] of [[0, "N"], [90, "E"], [180, "S"], [270, "W"]]) place(deg, text, "600 13px Barlow, sans-serif", ringInk(1));
-    if (mid) for (const [deg, text] of [[45, "NE"], [135, "SE"], [225, "SW"], [315, "NW"]]) place(deg, text, "500 11px Barlow, sans-serif", ringInk(0.9));
-    if (numbers) for (const deg of [30, 60, 120, 150, 210, 240, 300, 330]) place(deg, String(deg), "400 10px Geist Mono, ui-monospace, monospace", ringInk(0.82));
+    for (const [deg, text] of [[0, "N"], [90, "E"], [180, "S"], [270, "W"]]) place(deg, text, "600 15px Barlow, sans-serif", ringInk(1));
+    if (mid) for (const [deg, text] of [[45, "NE"], [135, "SE"], [225, "SW"], [315, "NW"]]) place(deg, text, "500 12px Barlow, sans-serif", ringInk(0.9));
+    if (numbers) for (const deg of [30, 60, 120, 150, 210, 240, 300, 330]) place(deg, String(deg), "400 11px Geist Mono, ui-monospace, monospace", ringInk(0.82));
   }
-  const grown = pose === "drag" ? 16 : pose === "hover" ? 14 : 12;
+  const grown = pose === "drag" ? 18 : pose === "hover" ? 16 : 14;
   const mark = outward(D(), radius);
   if (mark) {
     const ux = mark.ux, uy = mark.uy, px = -uy, py = ux;
-    const lift = pose === "drag" ? 2 : 0;
     const half = pose === "idle" ? 5 : 5.6;
-    const tip = [mark.at[0] + ux * (grown + lift), mark.at[1] + uy * (grown + lift)];
-    const back = [mark.at[0] - ux * (3 - lift), mark.at[1] - uy * (3 - lift)];
+    // Base midpoint is the rail sample. The glyph stays on the outer side of
+    // that one point while dragging, orbiting, and zooming.
+    const tip = [mark.at[0] + ux * grown, mark.at[1] + uy * grown];
     const poly = [
       tip,
-      [back[0] + px * half, back[1] + py * half],
-      [back[0] - px * half, back[1] - py * half],
+      [mark.at[0] + px * half, mark.at[1] + py * half],
+      [mark.at[0] - px * half, mark.at[1] - py * half],
     ];
     ctx.beginPath();
     ctx.moveTo(poly[0][0], poly[0][1]);
@@ -304,7 +344,7 @@ function drawRing(pose) {
   ui.debug.compass = {
     deg: D(), spd: U(), radius, major, minor, labelOk, dayInk: dayInk(), ink: ringInk(1),
     world: { n: worldAt(0), e: worldAt(90) },
-    screen, marker: mark && mark.at, hiddenMark: !mark, pose, coast: velocity("dir"),
+    screen, marker: mark && mark.at, axis: mark && [mark.ux, mark.uy], hiddenMark: !mark, pose, coast: velocity("dir"),
   };
 }
 function nearestVisible(x, y, limit) {
@@ -326,7 +366,7 @@ const ring = ui.register({
     if (minor < 18) return null;
     const mark = project(worldAt(D()));
     if (mark && Math.hypot(mark[0] - x, mark[1] - y) <= 18) return "mark";
-    if (nearestVisible(x, y, 12)) return "ring";
+    if (nearestVisible(x, y, 14)) return "ring";
     return null;
   },
   body(x, y) {

@@ -1,8 +1,8 @@
 // v30.23 on-sea UI core (behaviour; the look comes from theme.js). Layers v4 + migration, keys 1-7 / U /
 // Space, clean view, the pause button, the overlay canvas, world<->screen geometry, the pointer router
 // (on-object hits first, misses fall through to the camera) and the per-frame loop the objects hang on.
-import { theme, inkForLum } from "./theme.js?v=30.29";
-import { publish as publishSky } from "./sky.js?v=30.29";
+import { theme, inkForLum } from "./theme.js?v=31.9";
+import { publish as publishSky } from "./sky.js?v=31.9";
 import { addRipple, publishSplash } from "../../physics/ripples.js?v=30.29";
 import { tick as coastTick, cancelAll } from "./coast.js?v=30.29";
 export const P = new URLSearchParams(location.search);
@@ -193,7 +193,14 @@ const up = (e) => {
 };
 sea.addEventListener("pointerup", up, { capture: true });
 sea.addEventListener("pointerleave", () => { if (!down) ui.hover = null; });
-sea.addEventListener("pointercancel", () => { down = null; ui.drag = null; }, { capture: true });
+const endCaptured = (e) => {
+  if (!(down && down.kind === "obj" && ui.drag)) { down = null; ui.drag = null; return; }
+  const g = ui.drag; ui.drag = null; down = null;
+  const [x, y] = e && Number.isFinite(e.offsetX) ? pos(e) : [g.x0, g.y0];
+  if (g.obj.up) g.obj.up(g.h, x, y, e);
+};
+sea.addEventListener("pointercancel", (e) => { endCaptured(e); if (e) e.stopImmediatePropagation(); }, { capture: true });
+sea.addEventListener("lostpointercapture", (e) => { if (down && down.kind === "obj" && ui.drag) endCaptured(e); });
 sea.addEventListener("dblclick", (e) => { const [x, y] = pos(e); const hit = hitAny(x, y); if (hit && hit.obj.dblclick) { hit.obj.dblclick(hit.h, x, y, e); e.stopImmediatePropagation(); e.preventDefault(); } }, { capture: true });
 sea.addEventListener("wheel", (e) => { const [x, y] = pos(e); const hit = hitAny(x, y); if (hit && hit.obj.wheel) { hit.obj.wheel(hit.h, e); e.stopImmediatePropagation(); e.preventDefault(); } }, { capture: true, passive: false });
 
@@ -249,8 +256,9 @@ function frame(t) {
   for (const o of ui.objs) if (o.update) o.update(vis[o.layer] || 0);
   if (ui.doLayout) ui.doLayout();
   { // UI height probes (async readback in gpuSurface: buoy rim k16-19, the 256-sample section): only while needed
-    const sf = globalThis.__surface; const need = !UI_OFF && (ui.probe.pts || ui.probe.sec);
-    if (sf && sf.setUiProbe) { if (need) sf.setUiProbe(ui.probe.pts || ZERO_PTS, ui.probe.sec); else sf.setUiProbe(null, null); }
+    ui.probe.edges = !UI_OFF;
+    const sf = globalThis.__surface; const need = !UI_OFF && (ui.probe.pts || ui.probe.sec || ui.probe.edges);
+    if (sf && sf.setUiProbe) { if (need) sf.setUiProbe(ui.probe.pts || ZERO_PTS, ui.probe.sec, !!ui.probe.edges); else sf.setUiProbe(null, null, false); }
     const st = globalThis.__oceanState; const pd = st && st.probe && st.probe.data && st.probe.data.length >= 84 * 4 ? st.probe.data : null;
     ui.probeData = need ? pd : null;
   }

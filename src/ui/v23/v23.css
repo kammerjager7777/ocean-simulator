@@ -246,3 +246,49 @@
   }
   .hidden-col, .sheet-off, .rows-left { transform: none !important; }
 }
+
+/* v31.8: version sits with the title. The stats sky tick stays, above the letters.
+   v30.36 had parked that tick at top: 8px inside a 5 px pad, so it cut through FPS. */
+#hud-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  max-width: calc(100vw - 168px);
+  min-height: 48px;
+  max-height: none;
+  padding: 8px 12px 8px 14px;
+}
+#hud-title { font-size: clamp(20px, 3.1vw, 44px); }
+#hud-head #hud-ver {
+  position: static;
+  right: auto;
+  bottom: auto;
+  margin: 0 0 5px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  font: 500 clamp(11px, 1.5vw, 15px)/1 var(--mono);
+  letter-spacing: 0.06em;
+  color: rgba(246, 248, 255, 0.8);
+  white-space: nowrap;
+}
+#hud-stats { padding: 12px 10px 6px; }
+#hud-stats::after { top: 5px; left: 10px; width: 16px; border-top: 1.5px solid var(--accent); }
+
+/* v31.9: plate text takes the time-of-day accent, held light enough to read on black.
+   The halo is two tight shadows in that hue, stronger when the sun is low or down. */
+#v23-hud,
+#v23-hud .tx, #v23-hud .mu, #v23-hud .ac,
+#v23-hud .l1, #v23-hud .l2, #v23-hud .t1, #v23-hud .n3, #v23-hud .n4,
+#hud-title, #hud-head #hud-ver, #hud-pl, #hud-pl .l1, #hud-pl .n4,
+#hud-stats, #hud-stats .l1, #hud-stats .n3,
+.paused #hud-pl .l1,
+#solar-dial .solar-clock, #solar-dial .solar-phase {
+  color: var(--hud-face, #F6F8FF);
+  text-shadow: var(--hud-glow, none);
+}
+#v23-hud .hrow .l1, #v23-hud .hrow .n4, #v23-hud .hrow .dg { color: var(--hud-face, #F6F8FF); }
+#v23-hud .chev path, #v23-hud .hrow:hover .chev path { stroke: var(--hud-face, #F6F8FF); }
+#v23-hud .hb .ic, #hb-pause .bars { stroke: var(--hud-face, #F6F8FF); }
+#v23-hud .hb .dot, #hb-pause .play { fill: var(--hud-face, #F6F8FF); }
