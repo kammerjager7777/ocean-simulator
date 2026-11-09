@@ -2,7 +2,7 @@ import { GRAVITY_NOTE } from "./physics/gravity.js";
 import { scenario } from "./physics/scenario.js?v=30.22";
 import { createWind } from "./physics/wind.js";
 import { createSurface } from "./physics/surface.js?v=30.22";
-import { createView } from "./render/view.js?v=32.1";
+import { createView } from "./render/view.js?v=32.4";
 import { createIslandGpu } from "./physics/islandGpu.js?v=32";
 import { ISLAND } from "./physics/island.js?v=32";
 import { seaSteepness, whySteepness } from "./physics/steepness.js";

@@ -1,4 +1,4 @@
-import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=32";
+import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=32.4";
 import { LOBE_GLSL } from "../physics/roughness.js?v=30.22";
 import { timed } from "../physics/passTimer.js?v=30.22";
 import { createBoatView, createBuoyView } from "./boatView.js?v=31.8";
@@ -1485,7 +1485,7 @@ export function createView(canvas) {
     float cv = clamp(vCurl.z, 0.0, 1.0);
     color = mix(color, vec3(0.025, 0.14, 0.16), 0.7 * cv);
   }
-  if (uIsland > 0.5) {
+  ${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `if (uIsland > 0.5) {
     vec2 uv = (vSea.xy - uIslandC) / uSpan + 0.5;
     float r = length(vSea.xy - uIslandC);
     float bI = r >= uRbank ? -depth : r >= uRbeach
@@ -1495,7 +1495,7 @@ export function createView(canvas) {
     float t = clamp((D - uDLo) / max(uDHi - uDLo, 1e-3), 0.0, 1.0);
     float wI = (1.0 - t * t * (3.0 - 2.0 * t));
     if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0 && wI > 0.45) {
-      vec4 ct = texture(coastState, uv);
+      vec4 ct = vCoast;
       vec3 dry = vec3(0.72, 0.63, 0.42);
       vec3 wetSand = dry * vec3(0.62, 0.58, 0.50);
       if (ct.r < 0.08) {
@@ -1503,17 +1503,17 @@ export function createView(canvas) {
         float shade = clamp(dot(nG, normalize(vec3(0.25, 0.85, 0.15))) * 0.55 + 0.62, 0.42, 1.15);
         color = mix(dry, wetSand, clamp(ct.a, 0.0, 1.0)) * shade;
       } else {
-        // Placeholder foam only. Not advected breaking foam.
         float eta = ct.r + bI;
         float steep = length(vec2(dFdx(eta), dFdy(eta)));
         color = mix(color, vec3(0.94, 0.96, 0.97), clamp(steep * 6.0 - 0.25, 0.0, 0.4));
       }
     }
-  }
+  }` : ""}
   color *= dayTint;
   gl_FragColor = vec4(color, 1.0);`)
     .replace("void main() {", PHYS_DECL + SEAFLOOR_FS + "#define HAS_FOAMNEAR 1\n#define FOAM_PIX " + ((typeof location !== "undefined" && new URLSearchParams(location.search).get("foampix") === "0") ? "false" : "true") + "\n" + FRAG_FFT_NORMAL.replace("in vec4 vSea;\n", "") + `in vec3 vCurl;
 uniform vec3 dayTint;
+${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `in vec4 vCoast;
 uniform float uIsland;
 uniform vec2 uIslandC;
 uniform float uSpan;
@@ -1523,7 +1523,6 @@ uniform float uPeak;
 uniform float uShelf;
 uniform float uDLo;
 uniform float uDHi;
-uniform sampler2D coastState;
 float islandBedF(vec2 p) {
   float r = length(p - uIslandC);
   if (r >= uRbank) return -depth;
@@ -1532,18 +1531,18 @@ float islandBedF(vec2 p) {
     return uShelf + (-depth - uShelf) * t;
   }
   return uPeak + (uShelf - uPeak) * (r / max(uRbeach, 1e-3));
-}
+}` : ""}
 void main() {
   if (vKind > 0.5) {
     gl_FragColor = seafloorShade();
-    if (uIsland > 0.5) {
+    ${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `if (uIsland > 0.5) {
       float bI = islandBedF(vWorld.xz);
       float D = max(0.0, -bI);
       if (D < 1.5 && bI > -depth + 0.2) {
         float k = 1.0 - smoothstep(0.15, 1.5, D);
         gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.55, 0.48, 0.32), 0.55 * k);
       }
-    }
+    }` : ""}
     gl_FragColor.rgb *= dayTint;
     return;
   }
