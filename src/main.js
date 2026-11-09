@@ -3,6 +3,7 @@ import { scenario } from "./physics/scenario.js?v=30.22";
 import { createWind } from "./physics/wind.js";
 import { createSurface } from "./physics/surface.js?v=30.22";
 import { createView } from "./render/view.js?v=31.9";
+import { seaSteepness, whySteepness } from "./physics/steepness.js";
 import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=31.8";
 import { createBoat } from "./physics/boat.js?v=30.22";
 import { createPerf } from "./perf.js?v=30.22";
@@ -94,10 +95,46 @@ depthInput.addEventListener("input", () => {
   depth = Number(depthInput.value);
   label("#depth-val", `${depthInput.value} m`);
 });
+const ageInput = document.querySelector("#age");
+const curInput = document.querySelector("#cur");
+let chopOverride = params.has("chop");
+function setCurrentAlong(signed) {
+  scenario.current = Math.abs(signed);
+  scenario.currentDir = wind.direction + (signed < 0 ? Math.PI : 0);
+}
+function applySteepness() {
+  if (ageInput) scenario.seaAge = Number(ageInput.value);
+  if (curInput) setCurrentAlong(Number(curInput.value));
+  const st = seaSteepness({
+    windMs: wind.speed,
+    age: scenario.seaAge,
+    currentMs: scenario.current,
+    currentDir: scenario.currentDir,
+    windDir: wind.direction,
+    depthM: depth,
+  });
+  scenario.label = st.kind;
+  if (!chopOverride) {
+    const v = st.chop.toFixed(1);
+    scenario.choppiness = st.chop;
+    scenario.steepnessS = st.S;
+    if (chopInput.value !== v) chopInput.value = v;
+    label("#chop-val", v);
+  } else {
+    scenario.choppiness = Number(chopInput.value);
+    scenario.steepnessS = scenario.choppiness / 2.5;
+  }
+  scenario.steepnessWhy = whySteepness(st, chopOverride);
+  window.__steep = { ...st, override: chopOverride, S: scenario.steepnessS, why: scenario.steepnessWhy, chop: scenario.choppiness };
+}
 chopInput.addEventListener("input", () => {
+  chopOverride = true;
   scenario.choppiness = Number(chopInput.value);
+  scenario.steepnessS = scenario.choppiness / 2.5;
   label("#chop-val", Number(chopInput.value).toFixed(1));
 });
+if (ageInput) ageInput.addEventListener("input", () => { scenario.seaAge = Number(ageInput.value); });
+if (curInput) curInput.addEventListener("input", () => { setCurrentAlong(Number(curInput.value)); });
 sizeInput.addEventListener("input", () => {
   scenario.size = Number(sizeInput.value);
   label("#size-val", `${sizeInput.value} m`);
@@ -122,6 +159,7 @@ function frame(now) {
   // loop is why a ?perf=1 run could end without its __perf line).
   requestAnimationFrame(frame);
   const dt = fixDt > 0 ? fixDt : Math.min(0.05, (now - last) / 1000);
+  applySteepness();
   const waitCard = surface.backlog && state && !pause.checked && surface.backlog() > MAX_BACKLOG;
   if (!waitCard) last = now;
   const t0 = performance.now();
@@ -208,4 +246,10 @@ if (params.get("wind") !== null && Number.isFinite(Number(params.get("wind")))) 
   const el = document.querySelector("#spd");
   el.value = String(Number(params.get("wind")));
   el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+if (params.get("age") !== null && ageInput && Number.isFinite(Number(params.get("age")))) ageInput.value = String(Number(params.get("age")));
+if (params.get("cur") !== null && curInput && Number.isFinite(Number(params.get("cur")))) curInput.value = String(Number(params.get("cur")));
+if (params.get("chop") !== null && Number.isFinite(Number(params.get("chop")))) {
+  chopOverride = true;
+  chopInput.value = String(Number(params.get("chop")));
 }
