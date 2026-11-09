@@ -1,6 +1,6 @@
 // Two fixed screen instruments above the time dial. They are not on the ocean,
 // so a drag cannot orbit the camera, and they do not change size with the sea.
-import { ui } from "./core.js?v=31.9";
+import { ui } from "./core.js?v=32.2";
 import { skyAt } from "./sky.js?v=30.29";
 
 const W = 400, H = 176;
