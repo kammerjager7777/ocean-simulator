@@ -11,7 +11,7 @@ const BACK = `<svg class="chev" viewBox="0 0 8 10" aria-hidden="true" style="mar
 const row = (id, name, right, extra = "") => `<div class="hrow" id="${id}" role="switch" tabindex="0" ${extra}><span class="nm l1"><span class="plate">${name}</span></span>${right}</div>`;
 hud.innerHTML = `
   <button class="hb" id="hb-set" type="button" aria-label="Settings" title="Settings" aria-expanded="true">${SVG_SET}</button>
-  <div id="hud-head"><div id="hud-title">Ocean Simulator</div><div id="hud-ver">V31.9</div></div>
+  <div id="hud-head"><div id="hud-title">Ocean Simulator</div><div id="hud-ver">V32 (dev)</div></div>
   <div id="hud-rows">
     ${row("hr-boat", "Boat", '<span class="tg"></span>')}
     ${row("hr-flags", "Break flags", '<span class="tg"></span>')}

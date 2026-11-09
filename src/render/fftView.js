@@ -191,6 +191,33 @@ uniform float minLod;    // shading detail never finer than this level (near-Nyq
 uniform float antiTile;  // 1: mixed copies away from the tile; 0: plain repeat (review only)
 uniform float block;     // v29: 1 = the cut-away block (tile only, physics fields to the very edge, walls and floor)
 uniform float depth;     // v29: floor depth (the depth slider; the same value the physics uses)
+uniform float uIsland;
+uniform vec2 uIslandC;
+uniform float uSpan;
+uniform float uRbeach;
+uniform float uRbank;
+uniform float uPeak;
+uniform float uShelf;
+uniform float uDLo;
+uniform float uDHi;
+uniform sampler2D coastState;
+float islandBedV(vec2 p) {
+  float r = length(p - uIslandC);
+  if (r >= uRbank) return -depth;
+  if (r >= uRbeach) {
+    float t = (r - uRbeach) / (uRbank - uRbeach);
+    return uShelf + (-depth - uShelf) * t;
+  }
+  return uPeak + (uShelf - uPeak) * (r / max(uRbeach, 1e-3));
+}
+float islandW(vec2 p) {
+  float D = max(0.0, -islandBedV(p));
+  float t = clamp((D - uDLo) / max(uDHi - uDLo, 1e-3), 0.0, 1.0);
+  float s = t * t * (3.0 - 2.0 * t);
+  vec2 uv = (p - uIslandC) / uSpan + 0.5;
+  float edge = smoothstep(0.02, 0.12, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)));
+  return (1.0 - s) * edge;
+}
 ${BED_GLSL}${RIPPLE_GLSL}
 uniform highp int xCount;
 uniform vec4 x0[MAXX];   // amplitude, k, cos dir, sin dir
@@ -591,6 +618,26 @@ void main() {
     float rr = max(ceil(log2(max(c, 1.0) - 1e-4)), 0.0);
     vWorld.xz += out_ * 2.0 * spacing * exp2(rr + 1.0);
     vWorld.y -= 0.3 + 0.0005 * d;
+  }
+  // Island handoff. uIsland is 0 unless ?island=1, and this block is then
+  // skipped, so the spectral height is unchanged. In shallow water the
+  // surface is the shallow-water elevation. Across 6 m to 2 m of still
+  // depth the two are blended.
+  if (uIsland > 0.5 && meta.w < 2.5) {
+    float wI = islandW(p);
+    if (wI > 0.001) {
+      vec2 uv = (p - uIslandC) / uSpan + 0.5;
+      float hC = texture(coastState, uv).r;
+      float bI = islandBedV(p);
+      float etaC = hC > 0.02 ? hC + bI : bI;
+      float fade = smoothstep(0.0, 0.2, wI);
+      vWorld.y = mix(vWorld.y, etaC, fade);
+      vWorld.xz = mix(vWorld.xz, p, wI);
+    }
+  }
+  if (uIsland > 0.5 && meta.w > 3.5 && meta.w < 4.5) {
+    float bI = islandBedV(p);
+    if (bI < -0.05 && bI > vWorld.y) vWorld.y = bI;
   }
   gl_Position = viewProj * vec4(vWorld, 1.0);
 }

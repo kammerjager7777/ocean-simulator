@@ -2,7 +2,9 @@ import { GRAVITY_NOTE } from "./physics/gravity.js";
 import { scenario } from "./physics/scenario.js?v=30.22";
 import { createWind } from "./physics/wind.js";
 import { createSurface } from "./physics/surface.js?v=30.22";
-import { createView } from "./render/view.js?v=31.9";
+import { createView } from "./render/view.js?v=32";
+import { createIslandGpu } from "./physics/islandGpu.js?v=32";
+import { ISLAND } from "./physics/island.js?v=32";
 import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=31.8";
 import { createBoat } from "./physics/boat.js?v=30.22";
 import { createPerf } from "./perf.js?v=30.22";
@@ -117,6 +119,20 @@ const MAX_BACKLOG = Number(params.get("maxbacklog") || 6);
 const noDraw = params.get("nodraw") === "1";
 // ?fixdt=<s> (headless measurement): fixed physics step, so sim time hits exact sample times
 const fixDt = Number(params.get("fixdt") || 0);
+// ?island=1 only. The shallow-water island is not built otherwise, and the
+// sea shader keeps uIsland at 0 so the open ocean is the V31.9 surface.
+function islandGlProblem(gl) {
+  if (!gl) return "no WebGL2 context";
+  if (typeof WebGL2RenderingContext === "undefined" || !(gl instanceof WebGL2RenderingContext)) return "not WebGL2";
+  if (!gl.getExtension("EXT_color_buffer_float")) return "no float color buffer";
+  return "";
+}
+const islandOn = params.get("island") === "1";
+let islandGpu = null;
+if (islandOn && view.gl && !islandGlProblem(view.gl)) {
+  try { islandGpu = createIslandGpu(view.gl, scenario.depth); }
+  catch (err) { console.error(err); }
+}
 function frame(now) {
   // Next frame first: an exception in this one must not stop the loop (v27.1; a stopped
   // loop is why a ?perf=1 run could end without its __perf line).
@@ -161,6 +177,18 @@ function frame(now) {
     surface.setProbe(on ? boat.probePoints() : null);
     state.boat = on ? boat : null;
     state.clarity = clarityIn ? Number(clarityIn.value) : 22.3024; // Secchi depth, m
+  }
+  if (islandGpu && state && state.gpu && state.gpu.A && !held && !pause.checked) {
+    const step = fixDt > 0 ? fixDt : Math.min(0.02, dt);
+    const nSub = Math.max(1, Math.round(step / 0.02));
+    const sub = step / nSub;
+    const dir = state.fx ? state.fx.dir : Math.PI / 2;
+    for (let s = 0; s < nSub; s += 1) islandGpu.step(sub, state.gpu.A, state.gpu.fft.L, Math.cos(dir), Math.sin(dir));
+    state.island = {
+      on: 1, tex: islandGpu.texture(), cx: ISLAND.cx, cz: ISLAND.cz, span: ISLAND.span,
+      Rbeach: ISLAND.Rbeach, Rbank: ISLAND.Rbank, peak: ISLAND.peak, shelf: ISLAND.shelf,
+      dLo: ISLAND.dLo, dHi: ISLAND.dHi,
+    };
   }
   if (!noDraw || pause.checked || (capT && capT.length && simTime >= capT[0] - 1e-6)) view.draw(state, flags.checked);
   const fine = state.chopPatch && state.chopPatch.modes
