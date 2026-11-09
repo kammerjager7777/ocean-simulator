@@ -3,13 +3,13 @@
 import { ui } from "./core.js?v=32.5";
 import { skyAt } from "./sky.js?v=30.29";
 
-const W = 400, H = 176, CHOP_H = 240;
-const chop = instrument("chop-inst", "Choppiness. Drag the wave up to sharpen, down to soften.", CHOP_H);
+const W = 400, H = 176, CHOP_H = 300, CHOP_W = 460;
+const chop = instrument("chop-inst", "Choppiness. Drag the wave up to sharpen, down to soften.", CHOP_H, CHOP_W);
 const clar = instrument("clar-inst", "Water clarity. Lower the disk for clearer water, raise it for murkier water. Secchi depth in metres.");
 chop.el.style.cursor = "ns-resize";
 clar.el.style.cursor = "ns-resize";
 
-function instrument(id, label, h = H) {
+function instrument(id, label, h = H, w = W) {
   const el = document.createElement("div");
   el.id = id;
   el.className = "sea-inst";
@@ -17,7 +17,7 @@ function instrument(id, label, h = H) {
   el.setAttribute("role", "slider");
   el.setAttribute("aria-label", label);
   const canvas = document.createElement("canvas");
-  canvas.width = W;
+  canvas.width = w;
   canvas.height = h;
   canvas.setAttribute("aria-hidden", "true");
   el.appendChild(canvas);
@@ -35,10 +35,10 @@ function srgb(c) {
 function accent() {
   return srgb(skyAt(ui.todMin ?? 660).key.disc);
 }
-function caption(ctx, name, value) {
-  ctx.clearRect(0, 0, W, H);
+function caption(ctx, name, value, h = H, w = W) {
+  ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillRect(0, 0, w, h);
   ctx.font = "500 20px Barlow, sans-serif";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
   ctx.textAlign = "left";
@@ -53,7 +53,7 @@ function caption(ctx, name, value) {
   ctx.font = "400 24px Geist Mono, ui-monospace, monospace";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
   ctx.textAlign = "right";
-  ctx.fillText(value, W - 18, 34);
+  ctx.fillText(value, w - 18, 34);
 }
 function chopK() { return clamp(Number(ui.inputs.chop.value) / 2.5, 0, 1); }
 // One crest. Steepness squeezes that crest toward a cusp and leaves the
@@ -67,10 +67,10 @@ function chopWave(k) {
   }
   return pts;
 }
-const CHOP_AMP = 30, CHOP_MID = 92;
-const AGE_BOX = { x0: 18, x1: 188, y0: 132, y1: 198 };
-const CUR_BOX = { x0: 200, x1: 382, y0: 132, y1: 198 };
-const WHY_Y = 214;
+const CHOP_AMP = 28, CHOP_MID = 96;
+const AGE_BOX = { x0: 16, x1: 190, y0: 140, y1: 248 };
+const CUR_BOX = { x0: 250, x1: 444, y0: 140, y1: 248 };
+const WHY_Y = 256;
 const chopGlow = { v: 0 }, clarGlow = { v: 0 };
 function present(active, store) {
   const now = performance.now();
@@ -84,9 +84,9 @@ function present(active, store) {
 }
 function drawChop() {
   const ctx = chop.ctx, k = chopK(), v = Number(ui.inputs.chop.value);
-  caption(ctx, "CHOP", v.toFixed(1));
+  caption(ctx, "CHOP", v.toFixed(1), CHOP_H, CHOP_W);
   const raw = chopWave(k);
-  const x0 = 28, x1 = W - 28;
+  const x0 = 28, x1 = CHOP_W - 28;
   const pts = raw.map(([x, y]) => [x0 + ((x + Math.PI) / (2 * Math.PI)) * (x1 - x0), CHOP_MID - y * CHOP_AMP]);
   const stroke = (list, style, width) => {
     if (list.length < 2) return;
@@ -116,77 +116,74 @@ function drawChop() {
   chop.el.setAttribute("aria-valuetext", `${v.toFixed(1)} choppiness`);
   drawAgeGlyph(ctx, present(!!ageDrag, ageGlow));
   drawCurGlyph(ctx, present(!!curDrag, curGlow));
+  ctx.fillStyle = "#000";
+  ctx.fillRect(12, WHY_Y, CHOP_W - 24, CHOP_H - WHY_Y);
   const why = (window.__steep && window.__steep.why) || "";
-  ctx.font = "400 15px Geist Mono, ui-monospace, monospace";
+  ctx.font = "400 20px Geist Mono, ui-monospace, monospace";
   ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
+  ctx.textBaseline = "middle";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
-  ctx.fillText(why, 18, WHY_Y + 14);
+  ctx.fillText(why, 18, (WHY_Y + CHOP_H) / 2);
 }
 function ageWord(age) { return age >= 0.72 ? "old" : age < 0.4 ? "young" : "building"; }
 function curWord(cur) { return Math.abs(cur) < 0.15 ? "still" : `${cur < 0 ? "against" : "with"} ${Math.abs(cur).toFixed(1)}`; }
 function glyphLabel(ctx, text, x, y) {
-  ctx.font = "500 13px Barlow, sans-serif";
+  ctx.font = "500 22px Barlow, sans-serif";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
   ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
+  ctx.textBaseline = "middle";
   ctx.fillText(text, x, y);
 }
 function drawAgeGlyph(ctx, hot) {
   const age = ui.inputs.age ? Number(ui.inputs.age.value) : 0.28;
-  const x0 = AGE_BOX.x0, x1 = AGE_BOX.x1, mid = 168;
-  const amp = 22;
+  const cx = 58, cy = 196, r = 30;
+  ctx.strokeStyle = "rgba(214,218,224,0.55)";
+  ctx.lineWidth = 1.6;
   ctx.beginPath();
-  for (let i = 0; i <= 64; i++) {
-    const t = i / 64;
-    const width = 0.07 + 0.28 * age;
-    const peak = Math.exp(-(((t - 0.62) / width) ** 2));
-    const roll = Math.sin(Math.max(0, t - 0.08) * Math.PI);
-    const yv = (1 - age) * peak + age * roll * 0.42;
-    const x = x0 + t * (x1 - x0);
-    const y = mid - yv * amp;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  }
-  ctx.strokeStyle = "rgba(214,218,224,0.9)";
-  ctx.lineWidth = 1.8 + hot * 0.7;
+  ctx.arc(cx, cy, r, Math.PI * 0.8, Math.PI * 2.2, false);
   ctx.stroke();
-  ctx.strokeStyle = accent();
-  ctx.lineWidth = 1.6 + hot;
+  const a = Math.PI * 0.8 + age * Math.PI * 1.4;
+  ctx.strokeStyle = hot > 0.04 ? accent() : "rgba(246,248,255,0.95)";
+  ctx.lineWidth = 2.2 + hot;
   ctx.beginPath();
-  ctx.moveTo(x0, mid - 16);
-  ctx.lineTo(x0 + 28, mid - 16);
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + Math.cos(a) * (r - 6), cy + Math.sin(a) * (r - 6));
   ctx.stroke();
-  glyphLabel(ctx, ageWord(age), x0, AGE_BOX.y0 + 12);
+  ctx.fillStyle = accent();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+  ctx.fill();
+  glyphLabel(ctx, ageWord(age), 100, cy);
 }
 function drawCurGlyph(ctx, hot) {
   const cur = ui.inputs.cur ? Number(ui.inputs.cur.value) : 0;
   const still = Math.abs(cur) < 0.15;
   const dir = cur < 0 ? -1 : 1;
   const n = still ? 0 : Math.min(3, 1 + Math.round(Math.abs(cur) / 1.2));
-  const mid = 162, cx = (CUR_BOX.x0 + CUR_BOX.x1) / 2;
+  const cy = 210, cx = (CUR_BOX.x0 + CUR_BOX.x1) / 2;
+  glyphLabel(ctx, curWord(cur), CUR_BOX.x0, 168);
   ctx.strokeStyle = hot > 0.04 ? accent() : "rgba(214,218,224,0.9)";
-  ctx.lineWidth = 1.7 + hot * 0.6;
+  ctx.lineWidth = 2.2 + hot * 0.6;
   ctx.lineJoin = "miter";
   ctx.lineCap = "butt";
   if (still) {
     ctx.beginPath();
-    ctx.moveTo(cx - 28, mid);
-    ctx.lineTo(cx + 28, mid);
+    ctx.moveTo(cx - 26, cy);
+    ctx.lineTo(cx + 26, cy);
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(cx, mid, 3.2, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
     ctx.stroke();
   } else {
     for (let i = 0; i < n; i++) {
-      const x = cx + dir * (i - (n - 1) / 2) * 22;
+      const x = cx + dir * (i - (n - 1) / 2) * 26;
       ctx.beginPath();
-      ctx.moveTo(x - dir * 7, mid - 8);
-      ctx.lineTo(x + dir * 7, mid);
-      ctx.lineTo(x - dir * 7, mid + 8);
+      ctx.moveTo(x - dir * 8, cy - 10);
+      ctx.lineTo(x + dir * 8, cy);
+      ctx.lineTo(x - dir * 8, cy + 10);
       ctx.stroke();
     }
   }
-  glyphLabel(ctx, curWord(cur), CUR_BOX.x0, CUR_BOX.y0 + 12);
 }
 function chopCanvasPos(e) {
   const r = chop.el.getBoundingClientRect();
