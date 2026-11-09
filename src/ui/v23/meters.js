@@ -3,7 +3,7 @@
 import { ui } from "./core.js?v=32.5";
 import { skyAt } from "./sky.js?v=30.29";
 
-const W = 400, H = 176, CHOP_H = 300, CHOP_W = 460;
+const W = 400, H = 176, CHOP_H = 340, CHOP_W = 400;
 const chop = instrument("chop-inst", "Choppiness. Drag the wave up to sharpen, down to soften.", CHOP_H, CHOP_W);
 const clar = instrument("clar-inst", "Water clarity. Lower the disk for clearer water, raise it for murkier water. Secchi depth in metres.");
 chop.el.style.cursor = "ns-resize";
@@ -67,10 +67,10 @@ function chopWave(k) {
   }
   return pts;
 }
-const CHOP_AMP = 28, CHOP_MID = 96;
-const AGE_BOX = { x0: 16, x1: 190, y0: 140, y1: 248 };
-const CUR_BOX = { x0: 250, x1: 444, y0: 140, y1: 248 };
-const WHY_Y = 256;
+const CHOP_AMP = 24, CHOP_MID = 86;
+const AGE_BOX = { x0: 12, x1: 190, y0: 148, y1: 276 };
+const CUR_BOX = { x0: 200, x1: 388, y0: 148, y1: 276 };
+const WHY_Y = 286;
 const chopGlow = { v: 0 }, clarGlow = { v: 0 };
 function present(active, store) {
   const now = performance.now();
@@ -119,7 +119,7 @@ function drawChop() {
   ctx.fillStyle = "#000";
   ctx.fillRect(12, WHY_Y, CHOP_W - 24, CHOP_H - WHY_Y);
   const why = (window.__steep && window.__steep.why) || "";
-  ctx.font = "400 20px Geist Mono, ui-monospace, monospace";
+  ctx.font = "400 18px Geist Mono, ui-monospace, monospace";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
@@ -136,7 +136,7 @@ function glyphLabel(ctx, text, x, y) {
 }
 function drawAgeGlyph(ctx, hot) {
   const age = ui.inputs.age ? Number(ui.inputs.age.value) : 0.28;
-  const cx = 58, cy = 196, r = 30;
+  const cx = 52, cy = 214, r = 28;
   ctx.strokeStyle = "rgba(214,218,224,0.55)";
   ctx.lineWidth = 1.6;
   ctx.beginPath();
@@ -160,8 +160,8 @@ function drawCurGlyph(ctx, hot) {
   const still = Math.abs(cur) < 0.15;
   const dir = cur < 0 ? -1 : 1;
   const n = still ? 0 : Math.min(3, 1 + Math.round(Math.abs(cur) / 1.2));
-  const cy = 210, cx = (CUR_BOX.x0 + CUR_BOX.x1) / 2;
-  glyphLabel(ctx, curWord(cur), CUR_BOX.x0, 168);
+  const cy = 228, cx = (CUR_BOX.x0 + CUR_BOX.x1) / 2;
+  glyphLabel(ctx, curWord(cur), CUR_BOX.x0, 176);
   ctx.strokeStyle = hot > 0.04 ? accent() : "rgba(214,218,224,0.9)";
   ctx.lineWidth = 2.2 + hot * 0.6;
   ctx.lineJoin = "miter";
@@ -270,7 +270,7 @@ chop.el.addEventListener("pointerdown", (e) => {
   const hit = chopHit(e);
   chopFocus = hit === "why" ? chopFocus : hit;
   if (hit === "why") return;
-  if (hit === "age") { ageDrag = { y: e.clientY, v: Number(ui.inputs.age.value) }; return; }
+  if (hit === "age") { ageDrag = { x: e.clientX, v: Number(ui.inputs.age.value) }; return; }
   if (hit === "cur") { curDrag = { x: e.clientX, v: Number(ui.inputs.cur.value) }; return; }
   if (performance.now() < holdChop) return;
   chopDrag = { y: e.clientY, v: Number(ui.inputs.chop.value), moved: false };
@@ -278,12 +278,12 @@ chop.el.addEventListener("pointerdown", (e) => {
 chop.el.addEventListener("pointermove", (e) => {
   if (!ageDrag && !curDrag && !chopDrag) {
     const hit = chopHit(e);
-    chop.el.style.cursor = hit === "age" ? "ns-resize" : hit === "cur" ? "ew-resize" : hit === "why" ? "pointer" : "ns-resize";
+    chop.el.style.cursor = hit === "why" ? "pointer" : hit === "wave" ? "ns-resize" : "ew-resize";
     return;
   }
   e.stopPropagation();
   if (ageDrag) {
-    const v = clamp(Math.round((ageDrag.v + (ageDrag.y - e.clientY) / 140) * 100) / 100, 0, 1);
+    const v = clamp(Math.round((ageDrag.v + (e.clientX - ageDrag.x) / 160) * 100) / 100, 0, 1);
     ui.set("age", String(v));
     return;
   }
@@ -319,7 +319,7 @@ chop.el.addEventListener("keydown", (e) => {
   if (!up && !down) return;
   if (chopFocus === "age") {
     const step = e.shiftKey ? 0.1 : 0.02;
-    const dir = e.key === "ArrowUp" ? 1 : e.key === "ArrowDown" ? -1 : 0;
+    const dir = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1 : -1;
     if (!dir) return;
     ui.set("age", String(clamp(Math.round((Number(ui.inputs.age.value) + dir * step) * 100) / 100, 0, 1)));
   } else if (chopFocus === "cur") {
