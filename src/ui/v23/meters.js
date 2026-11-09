@@ -1,15 +1,15 @@
 // Two fixed screen instruments above the time dial. They are not on the ocean,
 // so a drag cannot orbit the camera, and they do not change size with the sea.
-import { ui } from "./core.js?v=32.2";
+import { ui } from "./core.js?v=32.5";
 import { skyAt } from "./sky.js?v=30.29";
 
-const W = 400, H = 176;
-const chop = instrument("chop-inst", "Choppiness. Drag the wave up to sharpen, down to soften.");
+const W = 400, H = 176, CHOP_H = 240;
+const chop = instrument("chop-inst", "Choppiness. Drag the wave up to sharpen, down to soften.", CHOP_H);
 const clar = instrument("clar-inst", "Water clarity. Lower the disk for clearer water, raise it for murkier water. Secchi depth in metres.");
 chop.el.style.cursor = "ns-resize";
 clar.el.style.cursor = "ns-resize";
 
-function instrument(id, label) {
+function instrument(id, label, h = H) {
   const el = document.createElement("div");
   el.id = id;
   el.className = "sea-inst";
@@ -18,11 +18,11 @@ function instrument(id, label) {
   el.setAttribute("aria-label", label);
   const canvas = document.createElement("canvas");
   canvas.width = W;
-  canvas.height = H;
+  canvas.height = h;
   canvas.setAttribute("aria-hidden", "true");
   el.appendChild(canvas);
   ui.root.appendChild(el);
-  return { el, ctx: canvas.getContext("2d") };
+  return { el, ctx: canvas.getContext("2d"), h };
 }
 function clamp(v, a, b) { return Math.min(b, Math.max(a, v)); }
 function srgb(c) {
@@ -67,7 +67,10 @@ function chopWave(k) {
   }
   return pts;
 }
-const CHOP_AMP = 34, CHOP_MID = 112;
+const CHOP_AMP = 30, CHOP_MID = 92;
+const AGE_BOX = { x0: 18, x1: 188, y0: 132, y1: 198 };
+const CUR_BOX = { x0: 200, x1: 382, y0: 132, y1: 198 };
+const WHY_Y = 214;
 const chopGlow = { v: 0 }, clarGlow = { v: 0 };
 function present(active, store) {
   const now = performance.now();
@@ -111,11 +114,94 @@ function drawChop() {
   chop.el.setAttribute("aria-valuemax", "2.5");
   chop.el.setAttribute("aria-valuenow", v.toFixed(1));
   chop.el.setAttribute("aria-valuetext", `${v.toFixed(1)} choppiness`);
+  drawAgeGlyph(ctx, present(!!ageDrag, ageGlow));
+  drawCurGlyph(ctx, present(!!curDrag, curGlow));
   const why = (window.__steep && window.__steep.why) || "";
   ctx.font = "400 15px Geist Mono, ui-monospace, monospace";
   ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
-  ctx.fillText(why, 18, 166);
+  ctx.fillText(why, 18, WHY_Y + 14);
+}
+function ageWord(age) { return age >= 0.72 ? "old" : age < 0.4 ? "young" : "building"; }
+function curWord(cur) { return Math.abs(cur) < 0.15 ? "still" : `${cur < 0 ? "against" : "with"} ${Math.abs(cur).toFixed(1)}`; }
+function glyphLabel(ctx, text, x, y) {
+  ctx.font = "500 13px Barlow, sans-serif";
+  ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(text, x, y);
+}
+function drawAgeGlyph(ctx, hot) {
+  const age = ui.inputs.age ? Number(ui.inputs.age.value) : 0.28;
+  const x0 = AGE_BOX.x0, x1 = AGE_BOX.x1, mid = 168;
+  const amp = 22;
+  ctx.beginPath();
+  for (let i = 0; i <= 64; i++) {
+    const t = i / 64;
+    const width = 0.07 + 0.28 * age;
+    const peak = Math.exp(-(((t - 0.62) / width) ** 2));
+    const roll = Math.sin(Math.max(0, t - 0.08) * Math.PI);
+    const yv = (1 - age) * peak + age * roll * 0.42;
+    const x = x0 + t * (x1 - x0);
+    const y = mid - yv * amp;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = "rgba(214,218,224,0.9)";
+  ctx.lineWidth = 1.8 + hot * 0.7;
+  ctx.stroke();
+  ctx.strokeStyle = accent();
+  ctx.lineWidth = 1.6 + hot;
+  ctx.beginPath();
+  ctx.moveTo(x0, mid - 16);
+  ctx.lineTo(x0 + 28, mid - 16);
+  ctx.stroke();
+  glyphLabel(ctx, ageWord(age), x0, AGE_BOX.y0 + 12);
+}
+function drawCurGlyph(ctx, hot) {
+  const cur = ui.inputs.cur ? Number(ui.inputs.cur.value) : 0;
+  const still = Math.abs(cur) < 0.15;
+  const dir = cur < 0 ? -1 : 1;
+  const n = still ? 0 : Math.min(3, 1 + Math.round(Math.abs(cur) / 1.2));
+  const mid = 162, cx = (CUR_BOX.x0 + CUR_BOX.x1) / 2;
+  ctx.strokeStyle = hot > 0.04 ? accent() : "rgba(214,218,224,0.9)";
+  ctx.lineWidth = 1.7 + hot * 0.6;
+  ctx.lineJoin = "miter";
+  ctx.lineCap = "butt";
+  if (still) {
+    ctx.beginPath();
+    ctx.moveTo(cx - 28, mid);
+    ctx.lineTo(cx + 28, mid);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, mid, 3.2, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    for (let i = 0; i < n; i++) {
+      const x = cx + dir * (i - (n - 1) / 2) * 22;
+      ctx.beginPath();
+      ctx.moveTo(x - dir * 7, mid - 8);
+      ctx.lineTo(x + dir * 7, mid);
+      ctx.lineTo(x - dir * 7, mid + 8);
+      ctx.stroke();
+    }
+  }
+  glyphLabel(ctx, curWord(cur), CUR_BOX.x0, CUR_BOX.y0 + 12);
+}
+function chopCanvasPos(e) {
+  const r = chop.el.getBoundingClientRect();
+  const canvas = chop.el.querySelector("canvas");
+  return {
+    x: ((e.clientX - r.left) / r.width) * canvas.width,
+    y: ((e.clientY - r.top) / r.height) * canvas.height,
+  };
+}
+function chopHit(e) {
+  const p = chopCanvasPos(e);
+  if (p.y >= WHY_Y) return "why";
+  if (p.x >= AGE_BOX.x0 && p.x <= AGE_BOX.x1 && p.y >= AGE_BOX.y0 && p.y <= AGE_BOX.y1) return "age";
+  if (p.x >= CUR_BOX.x0 && p.x <= CUR_BOX.x1 && p.y >= CUR_BOX.y0 && p.y <= CUR_BOX.y1) return "cur";
+  return "wave";
 }
 const COL = { x: 156, w: 88, top: 52, bot: 162 };
 function clarT(z = Number(ui.inputs.clarity.value)) { return clamp((z - 3) / 37, 0, 1); }
@@ -176,24 +262,77 @@ function drawClar() {
   clar.el.setAttribute("aria-valuenow", String(Math.round(z)));
   clar.el.setAttribute("aria-valuetext", `${Math.round(z)} metres Secchi`);
 }
-let chopDrag = null;
+let chopDrag = null, ageDrag = null, curDrag = null, chopFocus = "wave", holdChop = 0;
+const ageGlow = { v: 0 }, curGlow = { v: 0 };
+function followSea() { if (typeof ui.clearChopOverride === "function") ui.clearChopOverride(); }
 chop.el.addEventListener("pointerdown", (e) => {
   e.stopPropagation();
   e.preventDefault();
   chop.el.focus({ preventScroll: true });
   chop.el.setPointerCapture(e.pointerId);
-  chopDrag = { y: e.clientY, v: Number(ui.inputs.chop.value) };
+  const hit = chopHit(e);
+  chopFocus = hit === "why" ? chopFocus : hit;
+  if (hit === "why") return;
+  if (hit === "age") { ageDrag = { y: e.clientY, v: Number(ui.inputs.age.value) }; return; }
+  if (hit === "cur") { curDrag = { x: e.clientX, v: Number(ui.inputs.cur.value) }; return; }
+  if (performance.now() < holdChop) return;
+  chopDrag = { y: e.clientY, v: Number(ui.inputs.chop.value), moved: false };
 });
 chop.el.addEventListener("pointermove", (e) => {
-  if (!chopDrag) return;
+  if (!ageDrag && !curDrag && !chopDrag) {
+    const hit = chopHit(e);
+    chop.el.style.cursor = hit === "age" ? "ns-resize" : hit === "cur" ? "ew-resize" : hit === "why" ? "pointer" : "ns-resize";
+    return;
+  }
   e.stopPropagation();
+  if (ageDrag) {
+    const v = clamp(Math.round((ageDrag.v + (ageDrag.y - e.clientY) / 140) * 100) / 100, 0, 1);
+    ui.set("age", String(v));
+    return;
+  }
+  if (curDrag) {
+    const v = clamp(Math.round((curDrag.v + (e.clientX - curDrag.x) / 36) * 10) / 10, -3, 3);
+    ui.set("cur", String(v));
+    return;
+  }
+  if (performance.now() < holdChop) return;
+  if (Math.abs(e.clientY - chopDrag.y) < 4) return;
+  chopDrag.moved = true;
   const v = clamp(Math.round((chopDrag.v + (chopDrag.y - e.clientY) / 64 * 2.5) * 10) / 10, 0, 2.5);
   ui.set("chop", v.toFixed(1));
 });
-const chopUp = (e) => { chopDrag = null; if (e) e.stopPropagation(); };
-chop.el.addEventListener("pointerup", chopUp);
-chop.el.addEventListener("pointercancel", chopUp);
-chop.el.addEventListener("lostpointercapture", () => { chopDrag = null; });
+chop.el.addEventListener("pointerup", (e) => {
+  if (chopHit(e) === "why" && window.__steep && window.__steep.override) followSea();
+  chopDrag = null; ageDrag = null; curDrag = null;
+  e.stopPropagation();
+});
+chop.el.addEventListener("pointercancel", () => { chopDrag = null; ageDrag = null; curDrag = null; });
+chop.el.addEventListener("lostpointercapture", () => { chopDrag = null; ageDrag = null; curDrag = null; });
+chop.el.addEventListener("dblclick", (e) => {
+  if (chopHit(e) !== "wave") return;
+  e.preventDefault();
+  e.stopPropagation();
+  holdChop = performance.now() + 450;
+  chopDrag = null;
+  followSea();
+});
+chop.el.addEventListener("keydown", (e) => {
+  const up = e.key === "ArrowUp" || e.key === "ArrowRight";
+  const down = e.key === "ArrowDown" || e.key === "ArrowLeft";
+  if (!up && !down) return;
+  if (chopFocus === "age") {
+    const step = e.shiftKey ? 0.1 : 0.02;
+    const dir = e.key === "ArrowUp" ? 1 : e.key === "ArrowDown" ? -1 : 0;
+    if (!dir) return;
+    ui.set("age", String(clamp(Math.round((Number(ui.inputs.age.value) + dir * step) * 100) / 100, 0, 1)));
+  } else if (chopFocus === "cur") {
+    const step = e.shiftKey ? 0.5 : 0.1;
+    const dir = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1 : -1;
+    ui.set("cur", String(clamp(Math.round((Number(ui.inputs.cur.value) + dir * step) * 10) / 10, -3, 3)));
+  } else return;
+  e.preventDefault();
+  e.stopPropagation();
+});
 
 function clarityAt(clientY) {
   const r = clar.el.getBoundingClientRect();
@@ -234,7 +373,7 @@ ui.register({
   layer: "tod",
   draw(a) {
     const on = a > 0.5 && !ui.clean;
-    if (!on) { chopDrag = null; clarDrag = false; }
+    if (!on) { chopDrag = null; ageDrag = null; curDrag = null; clarDrag = false; }
     chop.el.classList.toggle("on", on);
     clar.el.classList.toggle("on", on);
     drawChop();
@@ -242,6 +381,6 @@ ui.register({
   },
   hide() {
     chop.el.classList.remove("on"); clar.el.classList.remove("on");
-    chopDrag = null; clarDrag = false;
+    chopDrag = null; ageDrag = null; curDrag = null; clarDrag = false;
   },
 });

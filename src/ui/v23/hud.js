@@ -1,7 +1,7 @@
 // v30.23 HUD, the Hairline layer (modern-ui-spec §6): settings column (Open / Minimised / Layers sheet; H, Esc),
 // pause button (Space), stats line (S, 2 Hz), version, toast. DOM only; the look is v23.css. The old glass panel
 // and strip stay hidden in the DOM because their inputs (#boat, #flags, #pause) and stat ids stay the source of truth.
-import { ui, LAYERS, store, $ } from "./core.js?v=32.2";
+import { ui, LAYERS, store, $ } from "./core.js?v=32.5";
 const hud = document.createElement("div"); hud.id = "v23-hud"; document.body.appendChild(hud);
 const vg = document.createElement("div"); vg.id = "v23-vignette"; document.body.appendChild(vg);
 const SVG_SET = `<svg width="20" height="20" viewBox="-10 -10 20 20" aria-hidden="true"><path class="ic" d="M-7 -4H7M-7 0H7M-7 4H7"/><circle class="dot" cx="-3" cy="-4" r="1.35"/><circle class="dot" cx="3" cy="0" r="1.35"/><circle class="dot" cx="-1" cy="4" r="1.35"/></svg>`;

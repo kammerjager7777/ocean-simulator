@@ -6,6 +6,7 @@ import { createView } from "./render/view.js?v=32.4";
 import { createIslandGpu } from "./physics/islandGpu.js?v=32";
 import { ISLAND } from "./physics/island.js?v=32";
 import { seaSteepness, whySteepness } from "./physics/steepness.js";
+import { ui } from "./ui/v23/core.js?v=32.5";
 import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=31.8";
 import { createBoat } from "./physics/boat.js?v=30.22";
 import { createPerf } from "./perf.js?v=30.22";
@@ -135,6 +136,10 @@ chopInput.addEventListener("input", () => {
   scenario.steepnessS = scenario.choppiness / 2.5;
   label("#chop-val", Number(chopInput.value).toFixed(1));
 });
+ui.clearChopOverride = () => {
+  chopOverride = false;
+  applySteepness();
+};
 if (ageInput) ageInput.addEventListener("input", () => { scenario.seaAge = Number(ageInput.value); });
 if (curInput) curInput.addEventListener("input", () => { setCurrentAlong(Number(curInput.value)); });
 sizeInput.addEventListener("input", () => {

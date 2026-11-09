@@ -29,7 +29,7 @@ export function seaSteepness({
 }
 
 export function whySteepness(st, override = false) {
-  if (override) return "overridden";
+  if (override) return "overridden — click to follow again";
   const chop = st.chop.toFixed(1);
   if (st.age >= 0.72) return `${chop} — old swell`;
   const kn = Math.round(st.windMs * 1.94384);
