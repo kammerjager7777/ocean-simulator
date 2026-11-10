@@ -127,18 +127,18 @@ function drawChop() {
 }
 function ageWord(age) { return age >= 0.72 ? "old" : age < 0.4 ? "young" : "building"; }
 function curWord(cur) { return Math.abs(cur) < 0.15 ? "still" : `${cur < 0 ? "against" : "with"} ${Math.abs(cur).toFixed(1)}`; }
-function glyphLabel(ctx, text, x, y) {
-  ctx.font = "500 22px Barlow, sans-serif";
+function glyphLabel(ctx, text, x, y, align = "center") {
+  ctx.font = "500 20px Barlow, sans-serif";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
-  ctx.textAlign = "left";
+  ctx.textAlign = align;
   ctx.textBaseline = "middle";
   ctx.fillText(text, x, y);
 }
 function drawAgeGlyph(ctx, hot) {
   const age = ui.inputs.age ? Number(ui.inputs.age.value) : 0.28;
-  const cx = 52, cy = 214, r = 28;
+  const cx = (AGE_BOX.x0 + AGE_BOX.x1) / 2, cy = 200, r = 24;
   ctx.strokeStyle = "rgba(214,218,224,0.55)";
-  ctx.lineWidth = 1.6;
+  ctx.lineWidth = 1.8;
   ctx.beginPath();
   ctx.arc(cx, cy, r, Math.PI * 0.8, Math.PI * 2.2, false);
   ctx.stroke();
@@ -153,15 +153,16 @@ function drawAgeGlyph(ctx, hot) {
   ctx.beginPath();
   ctx.arc(cx, cy, 3, 0, Math.PI * 2);
   ctx.fill();
-  glyphLabel(ctx, ageWord(age), 100, cy);
+  glyphLabel(ctx, "age", cx, cy + r + 16);
+  glyphLabel(ctx, ageWord(age), cx, cy + r + 36);
 }
 function drawCurGlyph(ctx, hot) {
   const cur = ui.inputs.cur ? Number(ui.inputs.cur.value) : 0;
   const still = Math.abs(cur) < 0.15;
   const dir = cur < 0 ? -1 : 1;
   const n = still ? 0 : Math.min(3, 1 + Math.round(Math.abs(cur) / 1.2));
-  const cy = 228, cx = (CUR_BOX.x0 + CUR_BOX.x1) / 2;
-  glyphLabel(ctx, curWord(cur), CUR_BOX.x0, 176);
+  const cy = 200, cx = (CUR_BOX.x0 + CUR_BOX.x1) / 2;
+  glyphLabel(ctx, "current", cx, cy - 40);
   ctx.strokeStyle = hot > 0.04 ? accent() : "rgba(214,218,224,0.9)";
   ctx.lineWidth = 2.2 + hot * 0.6;
   ctx.lineJoin = "miter";
@@ -184,6 +185,7 @@ function drawCurGlyph(ctx, hot) {
       ctx.stroke();
     }
   }
+  glyphLabel(ctx, curWord(cur), cx, cy + 28);
 }
 function chopCanvasPos(e) {
   const r = chop.el.getBoundingClientRect();

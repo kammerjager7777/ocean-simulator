@@ -190,13 +190,21 @@ const ISLAND_VERT_MAIN = FFT_ISLAND ? `
   if (uvC.x > 0.0 && uvC.x < 1.0 && uvC.y > 0.0 && uvC.y < 1.0) vCoast = texture(coastState, uvC);
   if (meta.w < 2.5) {
     float wI = islandW(p);
+    vCoast.g = wI;
     if (wI > 0.001) {
       float hC = vCoast.r;
       float bI = islandBedV(p);
-      float etaC = hC > 0.02 ? hC + bI : bI;
-      float fade = smoothstep(0.0, 0.2, wI);
-      vWorld.y = mix(vWorld.y, etaC, fade);
-      vWorld.xz = mix(vWorld.xz, p, wI);
+      float dry = smoothstep(0.02, 0.4, bI);
+      // Wet cells stay a wave on the spectral sea. A drained column must not
+      // pull the surface down onto the bed (that was the dark ring).
+      float wetEta = hC + bI;
+      float wetLimited = clamp(wetEta, vWorld.y - 0.55, vWorld.y + 0.85);
+      float etaC = mix(wetLimited, bI, dry);
+      float limited = clamp(etaC, vWorld.y - 0.45, vWorld.y + 0.45);
+      float eta = mix(limited, etaC, smoothstep(0.4, 0.85, wI));
+      vWorld.y = mix(vWorld.y, eta, max(wI, dry));
+      vec2 disp = vWorld.xz - p;
+      vWorld.xz = p + disp * (1.0 - dry);
     }
   }
   if (meta.w > 3.5 && meta.w < 4.5) {

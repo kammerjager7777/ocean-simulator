@@ -1,4 +1,4 @@
-import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=32.4";
+import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=32.9";
 import { LOBE_GLSL } from "../physics/roughness.js?v=30.22";
 import { timed } from "../physics/passTimer.js?v=30.22";
 import { createBoatView, createBuoyView } from "./boatView.js?v=31.8";
@@ -1493,20 +1493,21 @@ export function createView(canvas) {
       : uPeak + (uShelf - uPeak) * (r / max(uRbeach, 1e-3));
     float D = max(0.0, -bI);
     float t = clamp((D - uDLo) / max(uDHi - uDLo, 1e-3), 0.0, 1.0);
-    float wI = (1.0 - t * t * (3.0 - 2.0 * t));
-    if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0 && wI > 0.45) {
+    float wI = clamp(vCoast.g, 0.0, 1.0);
+    if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0 && wI > 0.04) {
       vec4 ct = vCoast;
-      vec3 dry = vec3(0.72, 0.63, 0.42);
-      vec3 wetSand = dry * vec3(0.62, 0.58, 0.50);
+      float shore = 1.0 - smoothstep(1.2, 6.0, D);
+      float steepK = clamp(uSteep / 0.56, 0.35, 1.45);
+      float brk = clamp(vFoam, 0.0, 1.0) * steepK * shore;
       if (ct.r < 0.08) {
         vec3 nG = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
         float shade = clamp(dot(nG, normalize(vec3(0.25, 0.85, 0.15))) * 0.55 + 0.62, 0.42, 1.15);
-        color = mix(dry, wetSand, clamp(ct.a, 0.0, 1.0)) * shade;
-      } else {
-        float eta = ct.r + bI;
-        float steep = length(vec2(dFdx(eta), dFdy(eta)));
-        color = mix(color, vec3(0.94, 0.96, 0.97), clamp(steep * 6.0 - 0.25, 0.0, 0.4));
+        vec3 dry = vec3(0.72, 0.63, 0.42);
+        vec3 wetSand = dry * vec3(0.62, 0.58, 0.50);
+        float sand = smoothstep(0.25, 0.7, wI);
+        color = mix(color, mix(dry, wetSand, clamp(ct.a, 0.0, 1.0)) * shade, sand);
       }
+      color = mix(color, vec3(0.95, 0.97, 0.98), brk * smoothstep(0.2, 0.75, wI) * 0.55);
     }
   }` : ""}
   color *= dayTint;
@@ -1523,6 +1524,7 @@ uniform float uPeak;
 uniform float uShelf;
 uniform float uDLo;
 uniform float uDHi;
+uniform float uSteep;
 float islandBedF(vec2 p) {
   float r = length(p - uIslandC);
   if (r >= uRbank) return -depth;
@@ -1538,9 +1540,9 @@ void main() {
     ${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `if (uIsland > 0.5) {
       float bI = islandBedF(vWorld.xz);
       float D = max(0.0, -bI);
-      if (D < 1.5 && bI > -depth + 0.2) {
-        float k = 1.0 - smoothstep(0.15, 1.5, D);
-        gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.55, 0.48, 0.32), 0.55 * k);
+      if (D < 4.0 && bI > -depth + 0.2) {
+        float k = 1.0 - smoothstep(0.3, 4.0, D);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.48, 0.42, 0.30), 0.4 * k);
       }
     }` : ""}
     gl_FragColor.rgb *= dayTint;
@@ -2181,6 +2183,8 @@ void main() {
         gl.uniform1f(gl.getUniformLocation(program, "uShelf"), C.shelf || -2);
         gl.uniform1f(gl.getUniformLocation(program, "uDLo"), C.dLo || 2);
         gl.uniform1f(gl.getUniformLocation(program, "uDHi"), C.dHi || 6);
+        const steep = window.__steep;
+        gl.uniform1f(gl.getUniformLocation(program, "uSteep"), steep && Number.isFinite(steep.S) ? steep.S : 0.56);
         const cs = gl.getUniformLocation(program, "coastState");
         if (cs) {
           gl.activeTexture(gl.TEXTURE21);

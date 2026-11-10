@@ -25,6 +25,7 @@ uniform float uL;
 uniform float uDepth;
 uniform vec2 uCenter;
 uniform float uRbeach, uRbank, uPeak, uShelf, uDLo, uDHi;
+uniform float uOmega;
 out vec4 o;
 
 float bedAt(vec2 p) {
@@ -79,11 +80,17 @@ void main() {
   float D = max(0.0, -b);
   float w = sweW(D);
   vec2 uv = fract(world / uL + 0.5);
-  float etaS = texture(ocean, uv).r;
+  vec4 oc = texture(ocean, uv);
+  float etaS = oc.r;
   float hS = max(0.0, etaS - b);
   float hStill = max(D, 0.05);
   float speed = 2.0 * (sqrt(uG * max(hS, 1e-4)) - sqrt(uG * hStill));
-  vec2 vel = uWind * speed;
+  float kh = uOmega * uOmega * max(D, 0.4) / uG;
+  float cothKH = clamp(1.0 / tanh(clamp(kh, 0.2, 5.0)), 1.0, 2.4);
+  // Horizontal part of a circular orbit: forward on a crest, back in a trough.
+  // Use elevation. The Gerstner shift has a downwind bias and was emptying the shelf.
+  vec2 orbit = uWind * clamp(etaS * uOmega * cothKH, -2.0, 2.0);
+  vec2 vel = uWind * speed + orbit;
   vec4 spec = vec4(hS, hS * vel.x, hS * vel.y, 0.0);
   if (w < 0.02) { o = spec; return; }
   Cell C = loadAt(p.x, p.y);
@@ -181,7 +188,7 @@ export function createIslandGpu(gl, depth) {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "island link");
   const loc = {};
-  for (const name of ["st", "ocean", "uDt", "uDx", "uDy", "uG", "uEps", "uClip", "uOrigin", "uWind", "uL", "uDepth", "uCenter", "uRbeach", "uRbank", "uPeak", "uShelf", "uDLo", "uDHi"]) {
+  for (const name of ["st", "ocean", "uDt", "uDx", "uDy", "uG", "uEps", "uClip", "uOrigin", "uWind", "uL", "uDepth", "uCenter", "uRbeach", "uRbank", "uPeak", "uShelf", "uDLo", "uDHi", "uOmega"]) {
     loc[name] = gl.getUniformLocation(prog, name);
   }
   let cur = 0;
@@ -200,7 +207,7 @@ export function createIslandGpu(gl, depth) {
     }
   }
 
-  function step(dt, oceanTex, L, windX, windZ) {
+  function step(dt, oceanTex, L, windX, windZ, windSpeed) {
     guard(() => {
       gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[1 - cur]);
       gl.viewport(0, 0, nx, ny);
@@ -228,6 +235,8 @@ export function createIslandGpu(gl, depth) {
       gl.uniform1f(loc.uShelf, I.shelf);
       gl.uniform1f(loc.uDLo, I.dLo);
       gl.uniform1f(loc.uDHi, I.dHi);
+      const U = Math.max(1, windSpeed || 12);
+      gl.uniform1f(loc.uOmega, 9.81 * Math.sqrt(0.77) / U);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       cur = 1 - cur;
     });
