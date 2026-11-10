@@ -1,10 +1,11 @@
 import { GRAVITY_NOTE } from "./physics/gravity.js";
-import { scenario } from "./physics/scenario.js?v=30.22";
+import { scenario } from "./physics/scenario.js?v=32.10";
 import { createWind } from "./physics/wind.js";
-import { createSurface } from "./physics/surface.js?v=30.22";
+import { createSurface } from "./physics/surface.js?v=32.10";
 import { createView } from "./render/view.js?v=31.9";
-import { seaSteepness, whySteepness } from "./physics/steepness.js";
-import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=31.8";
+import { seaSteepness, whySteepness } from "./physics/steepness.js?v=32.10";
+import { ui } from "./ui/v23/core.js?v=32.10";
+import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=32.10";
 import { createBoat } from "./physics/boat.js?v=30.22";
 import { createPerf } from "./perf.js?v=30.22";
 import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js?v=30.29";
@@ -133,6 +134,10 @@ chopInput.addEventListener("input", () => {
   scenario.steepnessS = scenario.choppiness / 2.5;
   label("#chop-val", Number(chopInput.value).toFixed(1));
 });
+ui.clearChopOverride = () => {
+  chopOverride = false;
+  applySteepness();
+};
 if (ageInput) ageInput.addEventListener("input", () => { scenario.seaAge = Number(ageInput.value); });
 if (curInput) curInput.addEventListener("input", () => { setCurrentAlong(Number(curInput.value)); });
 sizeInput.addEventListener("input", () => {

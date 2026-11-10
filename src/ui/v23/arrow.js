@@ -1,7 +1,7 @@
 // Wind. A compass ring circles the ocean in world bearings: 0 is +X and is
 // labeled N, 90 is +Z and is labeled E, matching the sea's (cos θ, sin θ) wind.
 // Dragging the ring sets direction only. The fixed card sets speed only.
-import { ui } from "./core.js?v=31.9";
+import { ui } from "./core.js?v=32.10";
 import { skyAt } from "./sky.js?v=30.29";
 import { sample, release, cancel, velocity } from "./coast.js?v=30.29";
 const LO = [0, .3, 1.6, 3.4, 5.5, 8, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7, 36.9];
@@ -208,7 +208,7 @@ function drawCard() {
   ui.debug.windInst = { deg, spd, spdLive, bf, fixed: true, directionOnCard: false, beaufort: true, coast: velocity("spd"), t: performance.now() };
 }
 
-const HUD = ["hud-rows", "hud-sheet", "hud-head", "hb-set", "hb-pause", "hud-pl", "hud-stats", "hud-ver", "wind-inst", "chop-inst", "clar-inst", "solar-dial"];
+const HUD = ["hud-rows", "hud-sheet", "hud-head", "hb-set", "hb-pause", "hud-pl", "hud-stats", "hud-ver", "wind-inst", "chop-inst", "age-inst", "cur-inst", "clar-inst", "solar-dial"];
 function covered(x, y) {
   for (const id of HUD) {
     const node = document.getElementById(id);

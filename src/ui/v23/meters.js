@@ -1,15 +1,21 @@
 // Two fixed screen instruments above the time dial. They are not on the ocean,
 // so a drag cannot orbit the camera, and they do not change size with the sea.
-import { ui } from "./core.js?v=31.9";
+import { ui } from "./core.js?v=32.10";
 import { skyAt } from "./sky.js?v=30.29";
 
-const W = 400, H = 176;
-const chop = instrument("chop-inst", "Choppiness. Drag the wave up to sharpen, down to soften.");
+const W = 400, H = 176, CHOP_W = 400;
+// Wide chop box over two square boxes. Canvases are 2× the CSS size.
+const CHOP_H = 176, BOX_W = 194, BOX_H = 176;
+const chop = instrument("chop-inst", "Choppiness. Drag the wave up to sharpen, down to soften.", CHOP_H, CHOP_W);
+const ageInst = instrument("age-inst", "Sea age. Drag left for a younger sea, right for an older swell.", BOX_H, BOX_W);
+const curInst = instrument("cur-inst", "Current along the wind. Drag left against the wind, right with it.", BOX_H, BOX_W);
 const clar = instrument("clar-inst", "Water clarity. Lower the disk for clearer water, raise it for murkier water. Secchi depth in metres.");
 chop.el.style.cursor = "ns-resize";
+ageInst.el.style.cursor = "ew-resize";
+curInst.el.style.cursor = "ew-resize";
 clar.el.style.cursor = "ns-resize";
 
-function instrument(id, label) {
+function instrument(id, label, h = H, w = W) {
   const el = document.createElement("div");
   el.id = id;
   el.className = "sea-inst";
@@ -17,12 +23,12 @@ function instrument(id, label) {
   el.setAttribute("role", "slider");
   el.setAttribute("aria-label", label);
   const canvas = document.createElement("canvas");
-  canvas.width = W;
-  canvas.height = H;
+  canvas.width = w;
+  canvas.height = h;
   canvas.setAttribute("aria-hidden", "true");
   el.appendChild(canvas);
   ui.root.appendChild(el);
-  return { el, ctx: canvas.getContext("2d") };
+  return { el, ctx: canvas.getContext("2d"), h };
 }
 function clamp(v, a, b) { return Math.min(b, Math.max(a, v)); }
 function srgb(c) {
@@ -35,10 +41,10 @@ function srgb(c) {
 function accent() {
   return srgb(skyAt(ui.todMin ?? 660).key.disc);
 }
-function caption(ctx, name, value) {
-  ctx.clearRect(0, 0, W, H);
+function caption(ctx, name, value, h = H, w = W) {
+  ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillRect(0, 0, w, h);
   ctx.font = "500 20px Barlow, sans-serif";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
   ctx.textAlign = "left";
@@ -53,7 +59,7 @@ function caption(ctx, name, value) {
   ctx.font = "400 24px Geist Mono, ui-monospace, monospace";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
   ctx.textAlign = "right";
-  ctx.fillText(value, W - 18, 34);
+  ctx.fillText(value, w - 18, 34);
 }
 function chopK() { return clamp(Number(ui.inputs.chop.value) / 2.5, 0, 1); }
 // One crest. Steepness squeezes that crest toward a cusp and leaves the
@@ -67,7 +73,8 @@ function chopWave(k) {
   }
   return pts;
 }
-const CHOP_AMP = 34, CHOP_MID = 112;
+const CHOP_AMP = 24, CHOP_MID = 82;
+const WHY_Y = 122;
 const chopGlow = { v: 0 }, clarGlow = { v: 0 };
 function present(active, store) {
   const now = performance.now();
@@ -81,9 +88,9 @@ function present(active, store) {
 }
 function drawChop() {
   const ctx = chop.ctx, k = chopK(), v = Number(ui.inputs.chop.value);
-  caption(ctx, "CHOP", v.toFixed(1));
+  caption(ctx, "CHOP", v.toFixed(1), CHOP_H, CHOP_W);
   const raw = chopWave(k);
-  const x0 = 28, x1 = W - 28;
+  const x0 = 28, x1 = CHOP_W - 28;
   const pts = raw.map(([x, y]) => [x0 + ((x + Math.PI) / (2 * Math.PI)) * (x1 - x0), CHOP_MID - y * CHOP_AMP]);
   const stroke = (list, style, width) => {
     if (list.length < 2) return;
@@ -111,11 +118,107 @@ function drawChop() {
   chop.el.setAttribute("aria-valuemax", "2.5");
   chop.el.setAttribute("aria-valuenow", v.toFixed(1));
   chop.el.setAttribute("aria-valuetext", `${v.toFixed(1)} choppiness`);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, WHY_Y, CHOP_W, CHOP_H - WHY_Y);
   const why = (window.__steep && window.__steep.why) || "";
-  ctx.font = "400 15px Geist Mono, ui-monospace, monospace";
+  ctx.font = "400 18px Geist Mono, ui-monospace, monospace";
   ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
-  ctx.fillText(why, 18, 166);
+  ctx.fillText(why, 20, (WHY_Y + CHOP_H) / 2);
+  drawAgeGlyph(present(!!ageDrag, ageGlow));
+  drawCurGlyph(present(!!curDrag, curGlow));
+}
+function ageWord(age) { return age >= 0.72 ? "old" : age < 0.4 ? "young" : "building"; }
+function curWord(cur) { return Math.abs(cur) < 0.15 ? "still" : `${cur < 0 ? "against" : "with"} ${Math.abs(cur).toFixed(1)}`; }
+function glyphLabel(ctx, text, x, y, size = 20) {
+  ctx.font = `500 ${size}px Barlow, sans-serif`;
+  ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x, y);
+}
+function plate(ctx) {
+  const w = ctx.canvas.width, h = ctx.canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, w, h);
+}
+function drawAgeGlyph(hot) {
+  const ctx = ageInst.ctx;
+  plate(ctx);
+  const age = ui.inputs.age ? Number(ui.inputs.age.value) : 0.28;
+  const cx = BOX_W / 2, cy = 68, r = 32;
+  ctx.strokeStyle = "rgba(214,218,224,0.55)";
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, Math.PI * 0.8, Math.PI * 2.2, false);
+  ctx.stroke();
+  const a = Math.PI * 0.8 + age * Math.PI * 1.4;
+  ctx.strokeStyle = hot > 0.04 ? accent() : "rgba(246,248,255,0.95)";
+  ctx.lineWidth = 2.2 + hot;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + Math.cos(a) * (r - 5), cy + Math.sin(a) * (r - 5));
+  ctx.stroke();
+  ctx.fillStyle = accent();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+  ctx.fill();
+  glyphLabel(ctx, "age", cx, cy + r + 16, 18);
+  glyphLabel(ctx, ageWord(age), cx, cy + r + 34, 18);
+  ageInst.el.setAttribute("aria-valuemin", "0");
+  ageInst.el.setAttribute("aria-valuemax", "1");
+  ageInst.el.setAttribute("aria-valuenow", age.toFixed(2));
+  ageInst.el.setAttribute("aria-valuetext", `sea age ${ageWord(age)}`);
+}
+function drawCurGlyph(hot) {
+  const ctx = curInst.ctx;
+  plate(ctx);
+  const cur = ui.inputs.cur ? Number(ui.inputs.cur.value) : 0;
+  const still = Math.abs(cur) < 0.15;
+  const dir = cur < 0 ? -1 : 1;
+  const n = still ? 0 : Math.min(3, 1 + Math.round(Math.abs(cur) / 1.2));
+  const cy = 90, cx = BOX_W / 2;
+  glyphLabel(ctx, "current", cx, cy - 34, 18);
+  ctx.strokeStyle = hot > 0.04 ? accent() : "rgba(214,218,224,0.9)";
+  ctx.lineWidth = 2.2 + hot * 0.6;
+  ctx.lineJoin = "miter";
+  ctx.lineCap = "butt";
+  if (still) {
+    ctx.beginPath();
+    ctx.moveTo(cx - 26, cy);
+    ctx.lineTo(cx + 26, cy);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    for (let i = 0; i < n; i++) {
+      const x = cx + dir * (i - (n - 1) / 2) * 22;
+      ctx.beginPath();
+      ctx.moveTo(x - dir * 8, cy - 10);
+      ctx.lineTo(x + dir * 8, cy);
+      ctx.lineTo(x - dir * 8, cy + 10);
+      ctx.stroke();
+    }
+  }
+  glyphLabel(ctx, curWord(cur), cx, cy + 30, 18);
+  curInst.el.setAttribute("aria-valuemin", "-3");
+  curInst.el.setAttribute("aria-valuemax", "3");
+  curInst.el.setAttribute("aria-valuenow", cur.toFixed(1));
+  curInst.el.setAttribute("aria-valuetext", `current ${curWord(cur)}`);
+}
+function chopCanvasPos(e) {
+  const r = chop.el.getBoundingClientRect();
+  const canvas = chop.el.querySelector("canvas");
+  return {
+    x: ((e.clientX - r.left) / r.width) * canvas.width,
+    y: ((e.clientY - r.top) / r.height) * canvas.height,
+  };
+}
+function chopHit(e) {
+  return chopCanvasPos(e).y >= WHY_Y ? "why" : "wave";
 }
 const COL = { x: 156, w: 88, top: 52, bot: 162 };
 function clarT(z = Number(ui.inputs.clarity.value)) { return clamp((z - 3) / 37, 0, 1); }
@@ -176,24 +279,95 @@ function drawClar() {
   clar.el.setAttribute("aria-valuenow", String(Math.round(z)));
   clar.el.setAttribute("aria-valuetext", `${Math.round(z)} metres Secchi`);
 }
-let chopDrag = null;
+let chopDrag = null, ageDrag = null, curDrag = null, holdChop = 0;
+const ageGlow = { v: 0 }, curGlow = { v: 0 };
+function followSea() { if (typeof ui.clearChopOverride === "function") ui.clearChopOverride(); }
 chop.el.addEventListener("pointerdown", (e) => {
   e.stopPropagation();
   e.preventDefault();
   chop.el.focus({ preventScroll: true });
   chop.el.setPointerCapture(e.pointerId);
-  chopDrag = { y: e.clientY, v: Number(ui.inputs.chop.value) };
+  if (chopHit(e) === "why") return;
+  if (performance.now() < holdChop) return;
+  chopDrag = { y: e.clientY, v: Number(ui.inputs.chop.value), moved: false };
 });
 chop.el.addEventListener("pointermove", (e) => {
-  if (!chopDrag) return;
+  if (!chopDrag) {
+    chop.el.style.cursor = chopHit(e) === "why" ? "pointer" : "ns-resize";
+    return;
+  }
   e.stopPropagation();
+  if (performance.now() < holdChop) return;
+  if (Math.abs(e.clientY - chopDrag.y) < 4) return;
+  chopDrag.moved = true;
   const v = clamp(Math.round((chopDrag.v + (chopDrag.y - e.clientY) / 64 * 2.5) * 10) / 10, 0, 2.5);
   ui.set("chop", v.toFixed(1));
 });
-const chopUp = (e) => { chopDrag = null; if (e) e.stopPropagation(); };
-chop.el.addEventListener("pointerup", chopUp);
-chop.el.addEventListener("pointercancel", chopUp);
+chop.el.addEventListener("pointerup", (e) => {
+  if (chopHit(e) === "why" && window.__steep && window.__steep.override) followSea();
+  chopDrag = null;
+  e.stopPropagation();
+});
+chop.el.addEventListener("pointercancel", () => { chopDrag = null; });
 chop.el.addEventListener("lostpointercapture", () => { chopDrag = null; });
+chop.el.addEventListener("dblclick", (e) => {
+  if (chopHit(e) !== "wave") return;
+  e.preventDefault();
+  e.stopPropagation();
+  holdChop = performance.now() + 450;
+  chopDrag = null;
+  followSea();
+});
+ageInst.el.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  e.preventDefault();
+  ageInst.el.focus({ preventScroll: true });
+  ageInst.el.setPointerCapture(e.pointerId);
+  ageDrag = { x: e.clientX, v: Number(ui.inputs.age.value) };
+});
+ageInst.el.addEventListener("pointermove", (e) => {
+  if (!ageDrag) return;
+  e.stopPropagation();
+  const v = clamp(Math.round((ageDrag.v + (e.clientX - ageDrag.x) / 160) * 100) / 100, 0, 1);
+  ui.set("age", String(v));
+});
+const ageUp = (e) => { ageDrag = null; if (e) e.stopPropagation(); };
+ageInst.el.addEventListener("pointerup", ageUp);
+ageInst.el.addEventListener("pointercancel", ageUp);
+ageInst.el.addEventListener("lostpointercapture", ageUp);
+ageInst.el.addEventListener("keydown", (e) => {
+  const dir = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowDown" ? -1 : 0;
+  if (!dir) return;
+  const step = e.shiftKey ? 0.1 : 0.02;
+  ui.set("age", String(clamp(Math.round((Number(ui.inputs.age.value) + dir * step) * 100) / 100, 0, 1)));
+  e.preventDefault();
+  e.stopPropagation();
+});
+curInst.el.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  e.preventDefault();
+  curInst.el.focus({ preventScroll: true });
+  curInst.el.setPointerCapture(e.pointerId);
+  curDrag = { x: e.clientX, v: Number(ui.inputs.cur.value) };
+});
+curInst.el.addEventListener("pointermove", (e) => {
+  if (!curDrag) return;
+  e.stopPropagation();
+  const v = clamp(Math.round((curDrag.v + (e.clientX - curDrag.x) / 36) * 10) / 10, -3, 3);
+  ui.set("cur", String(v));
+});
+const curUp = (e) => { curDrag = null; if (e) e.stopPropagation(); };
+curInst.el.addEventListener("pointerup", curUp);
+curInst.el.addEventListener("pointercancel", curUp);
+curInst.el.addEventListener("lostpointercapture", curUp);
+curInst.el.addEventListener("keydown", (e) => {
+  const dir = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowDown" ? -1 : 0;
+  if (!dir) return;
+  const step = e.shiftKey ? 0.5 : 0.1;
+  ui.set("cur", String(clamp(Math.round((Number(ui.inputs.cur.value) + dir * step) * 10) / 10, -3, 3)));
+  e.preventDefault();
+  e.stopPropagation();
+});
 
 function clarityAt(clientY) {
   const r = clar.el.getBoundingClientRect();
@@ -234,14 +408,16 @@ ui.register({
   layer: "tod",
   draw(a) {
     const on = a > 0.5 && !ui.clean;
-    if (!on) { chopDrag = null; clarDrag = false; }
+    if (!on) { chopDrag = null; ageDrag = null; curDrag = null; clarDrag = false; }
     chop.el.classList.toggle("on", on);
+    ageInst.el.classList.toggle("on", on);
+    curInst.el.classList.toggle("on", on);
     clar.el.classList.toggle("on", on);
     drawChop();
     drawClar();
   },
   hide() {
-    chop.el.classList.remove("on"); clar.el.classList.remove("on");
-    chopDrag = null; clarDrag = false;
+    chop.el.classList.remove("on"); ageInst.el.classList.remove("on"); curInst.el.classList.remove("on"); clar.el.classList.remove("on");
+    chopDrag = null; ageDrag = null; curDrag = null; clarDrag = false;
   },
 });

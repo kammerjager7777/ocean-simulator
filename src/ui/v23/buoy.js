@@ -5,7 +5,7 @@
 // 2x hull-radius ring on the water), and a click opens the §7.3 card (208 x 128, leader 28 px; shifts sideways off
 // the HUD regions, then flips below). A drag leaves wake ripples;
 // a fast drag (> 2 m/s) also lays a foam trail into the drawn foam field (gpuSurface foam-trail pass).
-import { ui, $ } from "./core.js?v=31.9";
+import { ui, $ } from "./core.js?v=32.10";
 import { bedRelief } from "../../render/seabed.js?v=30.29";
 import { rippleHeight, addRipple } from "../../physics/ripples.js?v=30.29";
 import { elevAt } from "./sky.js?v=30.29";

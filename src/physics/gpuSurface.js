@@ -23,7 +23,7 @@ import { createGpuChopPatch } from "./gpuPatch.js?v=30.22";
 import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=30.22";
 import { slopeBudget } from "./roughness.js?v=30.22";
 import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=30.22";
-import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=32.1";
+import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=32.10";
 import { foamGain } from "./steepness.js";
 
 let simTimeCover = 0; // v30.6: clock for the cover pass eddy field

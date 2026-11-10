@@ -129,8 +129,13 @@
 .sea-inst canvas { position: absolute; inset: 0; width: 200px; height: 88px; }
 .sea-inst:focus-visible { outline: 1px solid #F5F7FB; outline-offset: 3px; }
 #clar-inst { bottom: 222px; }
-#chop-inst { bottom: 318px; }
-#wind-inst { bottom: 414px; height: 112px; cursor: ns-resize; }
+#chop-inst { bottom: 414px; height: 88px; }
+#chop-inst canvas { height: 88px; }
+#age-inst { right: 131px; bottom: 320px; width: 97px; height: 88px; cursor: ew-resize; }
+#age-inst canvas { width: 97px; height: 88px; }
+#cur-inst { bottom: 320px; width: 97px; height: 88px; cursor: ew-resize; }
+#cur-inst canvas { width: 97px; height: 88px; }
+#wind-inst { bottom: 512px; height: 112px; cursor: ns-resize; }
 #wind-inst canvas { height: 112px; }
 #onsea-ui.clean .sea-inst { opacity: 0; pointer-events: none; }
 #solar-dial { --solar-sky: #000; position: absolute; right: 28px; bottom: 58px; width: 200px; height: 156px; overflow: hidden; border-radius: 42px; border: 1px solid rgba(255,255,255,.22); background: #000; color: #F6F8FF; pointer-events: none; opacity: 0; cursor: ew-resize; touch-action: none; transition: opacity 140ms var(--ease); z-index: 8; }
@@ -289,6 +294,24 @@
   text-shadow: var(--hud-glow, none);
 }
 #v23-hud .hrow .l1, #v23-hud .hrow .n4, #v23-hud .hrow .dg { color: var(--hud-face, #F6F8FF); }
+.chop-info {
+  display: grid; place-items: center; box-sizing: border-box;
+  flex: 0 0 auto; width: 16px; height: 16px; margin: 0 8px 0 0; padding: 0;
+  border-radius: 50%; border: 1px solid rgba(246, 248, 255, 0.7); background: #000;
+  color: var(--hud-face, #F6F8FF); font: 600 11px/1 var(--sans); letter-spacing: 0; text-align: center;
+  text-shadow: var(--hud-glow, none); cursor: pointer; pointer-events: auto;
+}
+.chop-info:hover, .chop-info.on { border-color: var(--accent); color: var(--accent); }
+#chop-note {
+  position: fixed; z-index: 8; width: 280px; max-width: 36vw; box-sizing: border-box;
+  margin: 0; padding: 12px 14px 10px; pointer-events: auto;
+  background: #000; border: 1px solid rgba(246, 248, 255, 0.62); border-radius: 14px;
+  border-top: 1.5px solid var(--accent);
+  color: var(--hud-face, #F6F8FF); text-shadow: var(--hud-glow, none);
+  font: 400 12px/17px var(--sans); letter-spacing: 0.01em;
+}
+#chop-note p { margin: 0 0 8px; }
+#chop-note p:last-child { margin-bottom: 0; }
 #v23-hud .chev path, #v23-hud .hrow:hover .chev path { stroke: var(--hud-face, #F6F8FF); }
 #v23-hud .hb .ic, #hb-pause .bars { stroke: var(--hud-face, #F6F8FF); }
 #v23-hud .hb .dot, #hb-pause .play { fill: var(--hud-face, #F6F8FF); }

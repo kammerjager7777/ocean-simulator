@@ -1,6 +1,6 @@
 // Fixed world geometry and exact projected collision polygons.
 // Nothing in this module rotates toward the camera. Screen is only the view of XZ/Y objects.
-import { ui } from "./core.js?v=31.9";
+import { ui } from "./core.js?v=32.10";
 export const add = (a, b, t = 1) => a.map((v, i) => v + b[i] * t);
 export const sub = (a, b) => a.map((v, i) => v - b[i]);
 export const norm = (v) => { const l = Math.hypot(...v) || 1; return v.map((n) => n / l); };

@@ -1,6 +1,6 @@
 // Measurement handles. Chop is only the wave glyph: dragging that stroke changes choppiness live.
 // Clarity and depth stay on the two different corners arrange() assigned.
-import { ui } from "./core.js?v=31.9";
+import { ui } from "./core.js?v=32.10";
 import { arrange } from "./controls.js?v=30.29";
 import { textRow, inside, seaHides, showM } from "./geometry.js?v=30.29";
 import { cancel } from "./coast.js?v=30.29";
