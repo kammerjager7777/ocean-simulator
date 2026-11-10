@@ -1,4 +1,4 @@
-import { piersonMoskowitz, spectrumFor, wavenumber } from "./spectrum.js?v=30.22";
+import { piersonMoskowitz, spectrumFor, wavenumber } from "./spectrum.js?v=32.11";
 
 function unitPhase(n) {
   const x = Math.sin(n * 127.1) * 43758.5453;
@@ -48,7 +48,7 @@ export function shoal(amplitude, omega, k, depth, gravity) {
 export function retuneBand(state, windSample, depth, gravity, dt, spacing) {
   const { spec, components } = state;
   // The band's own spectrum model (scenario data: spec.spectrum), for its own wind sample.
-  const spectrum = spectrumFor(spec, windSample.speed, gravity);
+  const spectrum = spectrumFor(spec, windSample.speed, gravity, windSample.seaAge);
   const omegaPeak = spectrum.omegaPeak;
   const dFrac = (spec.omegaMax - spec.omegaMin) / spec.frequencies;
   const dOmega = Math.max(dFrac * omegaPeak, 1e-4);
@@ -76,7 +76,7 @@ export function retuneBand(state, windSample, depth, gravity, dt, spacing) {
     else if (spec.breakTest === "pm" && spectrum.model !== "pm") {
       const pmVariance = Math.max(0, 2 * piersonMoskowitz(omega, omegaPeak, gravity) * dOmega / spec.directions);
       component.breakAmplitude = shoal(Math.sqrt(pmVariance), omega, component.k, depth, gravity);
-    } else component.breakAmplitude = component.amplitude;
+    }     else component.breakAmplitude = component.amplitude;
   }
   // What this band holds on the big grid, for its own fine patch (if it has one): the
   // components stand for consecutive slices of width dOmega from omegaMin up, so the

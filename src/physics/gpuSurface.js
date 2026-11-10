@@ -18,13 +18,13 @@
 // The renderer reads the textures directly; nothing per point comes back to the CPU.
 // readFields() reads the whole field back, for parity tests only.
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, bandVariance } from "./band.js?v=30.22";
+import { createBand, retuneBand, bandVariance } from "./band.js?v=32.11";
 import { createGpuChopPatch } from "./gpuPatch.js?v=30.22";
 import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=30.22";
 import { slopeBudget } from "./roughness.js?v=30.22";
-import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=30.22";
-import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=32.10";
-import { foamGain } from "./steepness.js";
+import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=32.11";
+import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=32.11";
+import { foamGain, peakScale } from "./steepness.js?v=32.11";
 
 let simTimeCover = 0; // v30.6: clock for the cover pass eddy field
 const TAU = Math.PI * 2;
@@ -1835,7 +1835,7 @@ export function createGpuSurface(gl, scenario, wind) {
   function step(time, dt, depth) {
     timeEmpty();
     lastDepth = depth;
-    const winds = bands.map((band) => wind.sample(band.spec, time, dt));
+    const winds = bands.map((band) => Object.assign(wind.sample(band.spec, time, dt), { seaAge: scenario.seaAge }));
     testLast.bands = bands; testLast.winds = winds; testLast.comps = [];
     const L = scenario.size;
     bands.forEach((band, i) => retuneBand(band, winds[i], depth, GRAVITY, dt, L / n));
@@ -2007,7 +2007,8 @@ export function createGpuSurface(gl, scenario, wind) {
     { // v30c coverage (see COVER_FS)
       const drift = 0.03 * wind.speed + 0.25; // m/s: wind drift ~3% of U10 plus a little Stokes drift
       const wd = wind.direction;
-      const lpEff = Math.min(0.877 * wind.speed * wind.speed, 0.5 * L); // peak wavelength, capped by the box
+      const pk = peakScale(scenario.seaAge);
+      const lpEff = Math.min(0.877 * wind.speed * wind.speed / (pk * pk), 0.5 * L); // peak wavelength, shorter while the sea is young
       run(programs.longh, fbs.longh, 64, { tA: tex.A }, (u) => gl.uniform1f(u.uSig, 0.12 * lpEff / spacing));
       run(programs.cover, fbs.cover[kCur], M, { tP: tex.P, tK: tex.K[kCur], tA: tex.A, tHL: tex.HL, tL: tex.L, tCU: tex.CU }, (u) => {
         gl.uniform1f(u.uLp, lpEff);

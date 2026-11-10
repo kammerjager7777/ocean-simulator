@@ -1,4 +1,5 @@
 // Pierson–Moskowitz wind spectrum. S(ω) is variance density in m² / (rad/s).
+import { peakScale } from "./steepness.js?v=32.11";
 
 export function peakAngularFrequency(windSpeed, gravity) {
   const u = Math.max(windSpeed, 0.4);
@@ -82,10 +83,18 @@ export function elfouhaily(omega, p, longScale = 1) {
 // peak), so the band hands over from a PM band below without a step in energy. That
 // scale is one constant for the whole band (no splice inside the band) and the short-wave
 // part keeps its standard level. The band reads only its own spec and wind sample.
-export function spectrumFor(spec, windSpeed, gravity) {
-  const omegaPeak = peakAngularFrequency(windSpeed, gravity);
+function swellEnergy(spec, age) {
+  if (spec.id !== "swell" || !Number.isFinite(age)) return 1;
+  const g = 0.12 + 0.88 * Math.min(1, Math.max(0, age));
+  return g * g;
+}
+
+export function spectrumFor(spec, windSpeed, gravity, age) {
+  // Age omitted: the historical fully developed peak (self-checks).
+  const omegaPeak = peakAngularFrequency(windSpeed, gravity) * peakScale(age);
+  const swell = swellEnergy(spec, age);
   if (spec.spectrum !== "elfouhaily") {
-    return { model: "pm", omegaPeak, density: (w) => piersonMoskowitz(w, omegaPeak, gravity) };
+    return { model: "pm", omegaPeak, longScale: swell, density: (w) => swell * piersonMoskowitz(w, omegaPeak, gravity) };
   }
   const p = elfouhailyParams(windSpeed, gravity);
   let longScale = 1;
@@ -96,5 +105,5 @@ export function spectrumFor(spec, windSpeed, gravity) {
     const want = (piersonMoskowitz(wb, omegaPeak, gravity) * (gravity / (2 * wb))) * kb * kb * kb;
     longScale = Math.max(0, (want - bh) / bl);
   }
-  return { model: "elfouhaily", omegaPeak, params: p, longScale, density: (w) => elfouhaily(w, p, longScale) };
+  return { model: "elfouhaily", omegaPeak, params: p, longScale, density: (w) => swell * elfouhaily(w, p, longScale) };
 }

@@ -1,11 +1,11 @@
 import { GRAVITY_NOTE } from "./physics/gravity.js";
 import { scenario } from "./physics/scenario.js?v=32.10";
 import { createWind } from "./physics/wind.js";
-import { createSurface } from "./physics/surface.js?v=32.10";
+import { createSurface } from "./physics/surface.js?v=32.11";
 import { createView } from "./render/view.js?v=31.9";
-import { seaSteepness, whySteepness } from "./physics/steepness.js?v=32.10";
+import { seaSteepness, whySteepness } from "./physics/steepness.js?v=32.11";
 import { ui } from "./ui/v23/core.js?v=32.10";
-import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=32.10";
+import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=32.11";
 import { createBoat } from "./physics/boat.js?v=30.22";
 import { createPerf } from "./perf.js?v=30.22";
 import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js?v=30.29";

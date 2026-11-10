@@ -62,14 +62,16 @@ function caption(ctx, name, value, h = H, w = W) {
   ctx.fillText(value, w - 18, 34);
 }
 function chopK() { return clamp(Number(ui.inputs.chop.value) / 2.5, 0, 1); }
-// One crest. Steepness squeezes that crest toward a cusp and leaves the
-// trough broad. Crest and trough heights stay put, and there is no second crest.
-function chopWave(k) {
-  const s = 0.93 * k;
+// Wind-sea on top of a longer swell. Age sets how many wind-sea crests fit
+// across the card (young is short, old is one large crest) and how much swell shows.
+function seaCurve(cycles, steep) {
+  // Keep dx/du positive so a short young sea does not fold into a loop.
+  const s = Math.min(0.12, 0.1 * steep) / Math.max(cycles, 1);
   const pts = [];
   for (let i = 0; i <= 140; i++) {
-    const theta = -Math.PI + (2 * Math.PI * i) / 140;
-    pts.push([theta - s * Math.sin(theta), Math.cos(theta)]);
+    const u = i / 140;
+    const theta = -Math.PI + 2 * Math.PI * cycles * u;
+    pts.push([u - s * Math.sin(theta), Math.cos(theta)]);
   }
   return pts;
 }
@@ -88,10 +90,14 @@ function present(active, store) {
 }
 function drawChop() {
   const ctx = chop.ctx, k = chopK(), v = Number(ui.inputs.chop.value);
+  const st = window.__steep || {};
+  const age = Number.isFinite(st.age) ? st.age : 0.28;
+  const swell = Number.isFinite(st.swell) ? st.swell : age;
   caption(ctx, "CHOP", v.toFixed(1), CHOP_H, CHOP_W);
-  const raw = chopWave(k);
   const x0 = 28, x1 = CHOP_W - 28;
-  const pts = raw.map(([x, y]) => [x0 + ((x + Math.PI) / (2 * Math.PI)) * (x1 - x0), CHOP_MID - y * CHOP_AMP]);
+  const place = (raw, amp) => raw.map(([x, y]) => [x0 + clamp(x, -0.02, 1.02) * (x1 - x0), CHOP_MID - y * amp]);
+  const swellRaw = seaCurve(1, 0.15);
+  const raw = seaCurve(1 + (1 - age), k);
   const stroke = (list, style, width) => {
     if (list.length < 2) return;
     ctx.beginPath();
@@ -105,7 +111,10 @@ function drawChop() {
     ctx.stroke();
   };
   const hot = present(!!chopDrag, chopGlow);
-  stroke(pts, "rgba(214,218,224,0.9)", 2.2 + hot * 0.6);
+  const swellPts = place(swellRaw, CHOP_AMP * (0.28 + 0.42 * swell));
+  stroke(swellPts, "rgba(214,218,224,0.45)", 1.15);
+  const pts = place(raw, CHOP_AMP * (0.72 + 0.28 * k));
+  stroke(pts, "rgba(246,248,255,0.95)", 2.2 + hot * 0.6);
   stroke(pts.filter((_, i) => raw[i][1] > 0.86), accent(), 2.4 + hot * 1.1);
   let half = 0;
   const above = pts.filter((_, i) => raw[i][1] >= 0.5);
@@ -121,7 +130,7 @@ function drawChop() {
   ctx.fillStyle = "#000";
   ctx.fillRect(0, WHY_Y, CHOP_W, CHOP_H - WHY_Y);
   const why = (window.__steep && window.__steep.why) || "";
-  ctx.font = "400 18px Geist Mono, ui-monospace, monospace";
+  ctx.font = "400 16px Geist Mono, ui-monospace, monospace";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";

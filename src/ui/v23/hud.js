@@ -35,9 +35,9 @@ hud.innerHTML = `
   <div id="hud-toast" class="plate" role="status" aria-live="polite"><span class="l1 tx" id="ht-n"></span><span class="st" id="ht-s"></span></div>
   <div id="chop-note" hidden role="note">
     <p>Choppiness is steepness, not a weather input like wind. The sea becomes choppy as a result of other things.</p>
-    <p>A stronger wind makes a steeper sea. A young wind-sea is steep. An old swell, after a long travel, is much smoother, about a quarter as steep.</p>
-    <p>An opposing current steepens the waves. A following current flattens them. In water shallower than about 28 m, waves shoal and get steeper, more so as the water gets shallower.</p>
-    <p>The slider follows that on its own. Dragging it is an override. Breaking and foam follow the same steepness, so a calmer or older sea crashes less and makes less foam.</p>
+    <p>The local wind sets how steep the wind-sea is. A storm stays steep and breaking even when the sea is old. Age sets the size: young is short and choppy, old is a large fully developed sea.</p>
+    <p>Swell is the long smooth part, and an older sea carries more of it. In a light wind that old sea is just the swell, rolling, with little foam. A following current eases the steepness a little. An opposing current raises it a little. In water shallower than about 28 m, waves shoal and get steeper.</p>
+    <p>The wave follows that on its own. Dragging it is an override. Breaking and foam follow the wind-sea steepness.</p>
   </div>`;
 const q = (s) => hud.querySelector(s);
 // ---------- panel state: open | min, plus the Layers sheet ----------
