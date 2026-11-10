@@ -34,7 +34,7 @@ const saveLayers = () => { if (!LAYER_URL) store.set("ocean.ui.layers", JSON.str
 saveLayers();
 let clean = store.get("ocean.ui.clean", "off") === "on";
 const vis = {}; for (const [k] of LAYERS) vis[k] = layers[k] && !clean ? 1 : 0;
-const inputs = { dir: $("#dir"), spd: $("#spd"), chop: $("#chop"), size: $("#size"), clarity: $("#clarity"), depth: $("#depth"), gust: $("#gust"), pause: $("#pause"), flags: $("#flags"), boat: $("#boat") };
+const inputs = { dir: $("#dir"), spd: $("#spd"), chop: $("#chop"), age: $("#age"), cur: $("#cur"), size: $("#size"), clarity: $("#clarity"), depth: $("#depth"), gust: $("#gust"), pause: $("#pause"), flags: $("#flags"), boat: $("#boat") };
 
 // ---------- geometry ----------
 function inv4(a) {
@@ -79,6 +79,7 @@ export const ui = {
   pageRect() { const r = $("#panel").getBoundingClientRect(); return r.width ? r : null; },
   HIT: matchMedia("(pointer: coarse)").matches ? 22 : 16,
   // a hidden keyboard slider (spec: Tab reaches a role=slider per value)
+  clearChopOverride: null,
   slider(label, get, keys) {
     const el = document.createElement("div"); el.className = "vh v23-kbd"; el.tabIndex = 0; el.setAttribute("role", "slider"); el.setAttribute("aria-label", label);
     el.style.pointerEvents = "none"; el.addEventListener("keydown", (e) => { if (keys(e)) { e.preventDefault(); e.stopPropagation(); } upd(); });

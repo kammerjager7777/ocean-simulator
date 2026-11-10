@@ -2,7 +2,11 @@ import { GRAVITY_NOTE } from "./physics/gravity.js";
 import { scenario } from "./physics/scenario.js?v=30.22";
 import { createWind } from "./physics/wind.js";
 import { createSurface } from "./physics/surface.js?v=30.22";
-import { createView } from "./render/view.js?v=31.9";
+import { createView } from "./render/view.js?v=32.9";
+import { createIslandGpu } from "./physics/islandGpu.js?v=32.7";
+import { ISLAND } from "./physics/island.js?v=32";
+import { seaSteepness, whySteepness } from "./physics/steepness.js";
+import { ui } from "./ui/v23/core.js?v=32.5";
 import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=31.8";
 import { createBoat } from "./physics/boat.js?v=30.22";
 import { createPerf } from "./perf.js?v=30.22";
@@ -94,10 +98,50 @@ depthInput.addEventListener("input", () => {
   depth = Number(depthInput.value);
   label("#depth-val", `${depthInput.value} m`);
 });
+const ageInput = document.querySelector("#age");
+const curInput = document.querySelector("#cur");
+let chopOverride = params.has("chop");
+function setCurrentAlong(signed) {
+  scenario.current = Math.abs(signed);
+  scenario.currentDir = wind.direction + (signed < 0 ? Math.PI : 0);
+}
+function applySteepness() {
+  if (ageInput) scenario.seaAge = Number(ageInput.value);
+  if (curInput) setCurrentAlong(Number(curInput.value));
+  const st = seaSteepness({
+    windMs: wind.speed,
+    age: scenario.seaAge,
+    currentMs: scenario.current,
+    currentDir: scenario.currentDir,
+    windDir: wind.direction,
+    depthM: depth,
+  });
+  scenario.label = st.kind;
+  if (!chopOverride) {
+    const v = st.chop.toFixed(1);
+    scenario.choppiness = st.chop;
+    scenario.steepnessS = st.S;
+    if (chopInput.value !== v) chopInput.value = v;
+    label("#chop-val", v);
+  } else {
+    scenario.choppiness = Number(chopInput.value);
+    scenario.steepnessS = scenario.choppiness / 2.5;
+  }
+  scenario.steepnessWhy = whySteepness(st, chopOverride);
+  window.__steep = { ...st, override: chopOverride, S: scenario.steepnessS, why: scenario.steepnessWhy, chop: scenario.choppiness };
+}
 chopInput.addEventListener("input", () => {
+  chopOverride = true;
   scenario.choppiness = Number(chopInput.value);
+  scenario.steepnessS = scenario.choppiness / 2.5;
   label("#chop-val", Number(chopInput.value).toFixed(1));
 });
+ui.clearChopOverride = () => {
+  chopOverride = false;
+  applySteepness();
+};
+if (ageInput) ageInput.addEventListener("input", () => { scenario.seaAge = Number(ageInput.value); });
+if (curInput) curInput.addEventListener("input", () => { setCurrentAlong(Number(curInput.value)); });
 sizeInput.addEventListener("input", () => {
   scenario.size = Number(sizeInput.value);
   label("#size-val", `${sizeInput.value} m`);
@@ -117,11 +161,26 @@ const MAX_BACKLOG = Number(params.get("maxbacklog") || 6);
 const noDraw = params.get("nodraw") === "1";
 // ?fixdt=<s> (headless measurement): fixed physics step, so sim time hits exact sample times
 const fixDt = Number(params.get("fixdt") || 0);
+// ?island=1 only. The shallow-water island is not built otherwise, and the
+// sea shader keeps uIsland at 0 so the open ocean is the V31.9 surface.
+function islandGlProblem(gl) {
+  if (!gl) return "no WebGL2 context";
+  if (typeof WebGL2RenderingContext === "undefined" || !(gl instanceof WebGL2RenderingContext)) return "not WebGL2";
+  if (!gl.getExtension("EXT_color_buffer_float")) return "no float color buffer";
+  return "";
+}
+const islandOn = params.get("island") === "1";
+let islandGpu = null;
+if (islandOn && view.gl && !islandGlProblem(view.gl)) {
+  try { islandGpu = createIslandGpu(view.gl, scenario.depth); }
+  catch (err) { console.error(err); }
+}
 function frame(now) {
   // Next frame first: an exception in this one must not stop the loop (v27.1; a stopped
   // loop is why a ?perf=1 run could end without its __perf line).
   requestAnimationFrame(frame);
   const dt = fixDt > 0 ? fixDt : Math.min(0.05, (now - last) / 1000);
+  applySteepness();
   const waitCard = surface.backlog && state && !pause.checked && surface.backlog() > MAX_BACKLOG;
   if (!waitCard) last = now;
   const t0 = performance.now();
@@ -161,6 +220,18 @@ function frame(now) {
     surface.setProbe(on ? boat.probePoints() : null);
     state.boat = on ? boat : null;
     state.clarity = clarityIn ? Number(clarityIn.value) : 22.3024; // Secchi depth, m
+  }
+  if (islandGpu && state && state.gpu && state.gpu.A && !held && !pause.checked) {
+    const step = fixDt > 0 ? fixDt : Math.min(0.02, dt);
+    const nSub = Math.max(1, Math.round(step / 0.02));
+    const sub = step / nSub;
+    const dir = state.fx ? state.fx.dir : Math.PI / 2;
+    for (let s = 0; s < nSub; s += 1) islandGpu.step(sub, state.gpu.A, state.gpu.fft.L, Math.cos(dir), Math.sin(dir), state.fx ? state.fx.speed : 12);
+    state.island = {
+      on: 1, tex: islandGpu.texture(), cx: ISLAND.cx, cz: ISLAND.cz, span: ISLAND.span,
+      Rbeach: ISLAND.Rbeach, Rbank: ISLAND.Rbank, peak: ISLAND.peak, shelf: ISLAND.shelf,
+      dLo: ISLAND.dLo, dHi: ISLAND.dHi,
+    };
   }
   if (!noDraw || pause.checked || (capT && capT.length && simTime >= capT[0] - 1e-6)) view.draw(state, flags.checked);
   const fine = state.chopPatch && state.chopPatch.modes
@@ -208,4 +279,10 @@ if (params.get("wind") !== null && Number.isFinite(Number(params.get("wind")))) 
   const el = document.querySelector("#spd");
   el.value = String(Number(params.get("wind")));
   el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+if (params.get("age") !== null && ageInput && Number.isFinite(Number(params.get("age")))) ageInput.value = String(Number(params.get("age")));
+if (params.get("cur") !== null && curInput && Number.isFinite(Number(params.get("cur")))) curInput.value = String(Number(params.get("cur")));
+if (params.get("chop") !== null && Number.isFinite(Number(params.get("chop")))) {
+  chopOverride = true;
+  chopInput.value = String(Number(params.get("chop")));
 }

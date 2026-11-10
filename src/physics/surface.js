@@ -110,6 +110,10 @@ export function breakRuleAt(scenario, speed, spacing) {
   const szF = Math.pow(Math.max(1, scenario.size / 250), -Number(q.get("brkSz") ?? Math.min(0.6, Math.max(0.1, BRK_SZ - 0.04 * (speed - 15)))));
   const rule = { lg: Number(q.get("brkLg") ?? 1), M: Number(q.get("brkM") ?? BREAK_RULE.M), kL: lambdaP > 0 ? (2 * Math.PI) / lambdaP : 0, mode, ak: Number(q.get("brkAk") ?? BREAK_RULE.ak) * (scenario.breakSlope / 0.2) * breakWindFactor(speed), rb: Math.max(1, Math.round(win / spacing)), ts };
   rule.ak *= szF;
+  // Steepness from wind, sea age, current and depth. A smooth old swell
+  // raises the threshold so those crests do not break. Unset leaves ak as it was.
+  const sScale = !Number.isFinite(scenario.steepnessS) ? 1 : Math.min(6, Math.max(0.55, 0.56 / Math.max(scenario.steepnessS, 0.04)));
+  rule.ak *= sScale;
   return rule;
 }
 

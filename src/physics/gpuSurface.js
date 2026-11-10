@@ -23,7 +23,8 @@ import { createGpuChopPatch } from "./gpuPatch.js?v=30.22";
 import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=30.22";
 import { slopeBudget } from "./roughness.js?v=30.22";
 import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=30.22";
-import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=30.22";
+import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=32.1";
+import { foamGain } from "./steepness.js";
 
 let simTimeCover = 0; // v30.6: clock for the cover pass eddy field
 const TAU = Math.PI * 2;
@@ -2022,7 +2023,7 @@ export function createGpuSurface(gl, scenario, wind) {
         gl.uniform1f(u.uSrc, FOAM_SRC);
         gl.uniform2f(u.uCrest, -tz, tx);
         gl.uniform1f(u.uJth, FOAM_JTH);
-        gl.uniform1f(u.uSrcK, wind.speed < 4 ? 0 : cov.gain);
+        gl.uniform1f(u.uSrcK, (wind.speed < 4 ? 0 : cov.gain) * foamGain(scenario.steepnessS));
       });
       kCur = 1 - kCur;
       if (globalThis.__airPts && globalThis.__airPts.length) {
@@ -2061,7 +2062,7 @@ export function createGpuSurface(gl, scenario, wind) {
           gl.uniform1i(u.uM, M); gl.uniform1f(u.uTime, simTimeCover); gl.uniform1f(u.uDt, Math.max(dt, 0)); gl.uniform1f(u.uSp, spacing);
           gl.uniform1f(u.uLen, 0.03 * wind.speed * wind.speed);
           { const lp = Math.min(0.877 * wind.speed * wind.speed, 0.5 * L); gl.uniform1f(u.uC, Math.sqrt(9.81 * lp / (2 * Math.PI))); gl.uniform1f(u.uGrow, 0.15 * wind.speed); gl.uniform1f(u.uRideAll, L >= 500 ? 1 : 0); } gl.uniform1f(u.uJth, FOAM_JTH);
-          gl.uniform1f(u.uRate, wind.speed < 4 ? 0 : STRAND_RATE * (4096 / STRAND_CHAINS + (1 - 4096 / STRAND_CHAINS) * Math.min(1, Math.max(0, (wind.speed - 11) / 6))) * (1 + STRAND_BOOST * Math.min(1, Math.max(0, (wind.speed - 15) / 10))) * foamRateK(wind.speed)); // v30.22f x foamRateK // v30.19.2: per-free-chain rate scaled so low winds (free pool never full) spawn as before
+          gl.uniform1f(u.uRate, (wind.speed < 4 ? 0 : STRAND_RATE * (4096 / STRAND_CHAINS + (1 - 4096 / STRAND_CHAINS) * Math.min(1, Math.max(0, (wind.speed - 11) / 6))) * (1 + STRAND_BOOST * Math.min(1, Math.max(0, (wind.speed - 15) / 10))) * foamRateK(wind.speed)) * foamGain(scenario.steepnessS)); // v30.22f x foamRateK // steepness scales the spawn; the fold test itself is unchanged
           { // v30.16.1: the chain budget is fixed, so in oceans bigger than ~300 m most spawns go to a ~300 m
             // window around the camera (same foam density per m² there as in a 250 m ocean)
             const Ls = scenario.size, cam = globalThis.__oceanCam || [0, 0], win = Math.min(Ls, 300);

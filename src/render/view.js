@@ -1,4 +1,4 @@
-import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=30.22";
+import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=32.9";
 import { LOBE_GLSL } from "../physics/roughness.js?v=30.22";
 import { timed } from "../physics/passTimer.js?v=30.22";
 import { createBoatView, createBuoyView } from "./boatView.js?v=31.8";
@@ -1485,12 +1485,69 @@ export function createView(canvas) {
     float cv = clamp(vCurl.z, 0.0, 1.0);
     color = mix(color, vec3(0.025, 0.14, 0.16), 0.7 * cv);
   }
+  ${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `if (uIsland > 0.5) {
+    vec2 uv = (vSea.xy - uIslandC) / uSpan + 0.5;
+    float r = length(vSea.xy - uIslandC);
+    float bI = r >= uRbank ? -depth : r >= uRbeach
+      ? uShelf + (-depth - uShelf) * ((r - uRbeach) / (uRbank - uRbeach))
+      : uPeak + (uShelf - uPeak) * (r / max(uRbeach, 1e-3));
+    float D = max(0.0, -bI);
+    float t = clamp((D - uDLo) / max(uDHi - uDLo, 1e-3), 0.0, 1.0);
+    float wI = clamp(vCoast.g, 0.0, 1.0);
+    if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0 && wI > 0.04) {
+      vec4 ct = vCoast;
+      float shore = 1.0 - smoothstep(1.2, 6.0, D);
+      float steepK = clamp(uSteep / 0.56, 0.35, 1.45);
+      float brk = clamp(vFoam, 0.0, 1.0) * steepK * shore;
+      if (ct.r < 0.08) {
+        vec3 nG = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+        float shade = clamp(dot(nG, normalize(vec3(0.25, 0.85, 0.15))) * 0.55 + 0.62, 0.42, 1.15);
+        vec3 dry = vec3(0.72, 0.63, 0.42);
+        vec3 wetSand = dry * vec3(0.62, 0.58, 0.50);
+        float sand = smoothstep(0.25, 0.7, wI);
+        color = mix(color, mix(dry, wetSand, clamp(ct.a, 0.0, 1.0)) * shade, sand);
+      }
+      color = mix(color, vec3(0.95, 0.97, 0.98), brk * smoothstep(0.2, 0.75, wI) * 0.55);
+    }
+  }` : ""}
   color *= dayTint;
   gl_FragColor = vec4(color, 1.0);`)
     .replace("void main() {", PHYS_DECL + SEAFLOOR_FS + "#define HAS_FOAMNEAR 1\n#define FOAM_PIX " + ((typeof location !== "undefined" && new URLSearchParams(location.search).get("foampix") === "0") ? "false" : "true") + "\n" + FRAG_FFT_NORMAL.replace("in vec4 vSea;\n", "") + `in vec3 vCurl;
 uniform vec3 dayTint;
+${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `in vec4 vCoast;
+uniform float uIsland;
+uniform vec2 uIslandC;
+uniform float uSpan;
+uniform float uRbeach;
+uniform float uRbank;
+uniform float uPeak;
+uniform float uShelf;
+uniform float uDLo;
+uniform float uDHi;
+uniform float uSteep;
+float islandBedF(vec2 p) {
+  float r = length(p - uIslandC);
+  if (r >= uRbank) return -depth;
+  if (r >= uRbeach) {
+    float t = (r - uRbeach) / (uRbank - uRbeach);
+    return uShelf + (-depth - uShelf) * t;
+  }
+  return uPeak + (uShelf - uPeak) * (r / max(uRbeach, 1e-3));
+}` : ""}
 void main() {
-  if (vKind > 0.5) { gl_FragColor = seafloorShade(); gl_FragColor.rgb *= dayTint; return; }
+  if (vKind > 0.5) {
+    gl_FragColor = seafloorShade();
+    ${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `if (uIsland > 0.5) {
+      float bI = islandBedF(vWorld.xz);
+      float D = max(0.0, -bI);
+      if (D < 4.0 && bI > -depth + 0.2) {
+        float k = 1.0 - smoothstep(0.3, 4.0, D);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.48, 0.42, 0.30), 0.4 * k);
+      }
+    }` : ""}
+    gl_FragColor.rgb *= dayTint;
+    return;
+  }
   if (FOAM_PIX) {
     vec4 pf, pg; foamPix(vSea.xy, pf, pg);
     float kp = clamp(vFoamKeep, 0.0, 1.0);
@@ -2094,6 +2151,16 @@ void main() {
     const err = gl.getError(); if (err) globalThis.__oceanLumErr = err;
   }
   const scene = { fb: null, tex: null, rb: null, w: 0, h: 0 };
+  let islandDummyTex = null;
+  function islandDummy() {
+    if (islandDummyTex) return islandDummyTex;
+    islandDummyTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, islandDummyTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return islandDummyTex;
+  }
   function draw(state, showFlags) {
     // The GPU physics shares this context: take back the program, vertex state, target
     // and depth test every frame.
@@ -2102,6 +2169,31 @@ void main() {
     program = fft ? fftProgram : fromTextures ? gpuProgram : cpuProgram;
     locs = fft ? fftLocs : fromTextures ? gpuLocs : cpuLocs;
     gl.useProgram(program);
+    {
+      const iu = gl.getUniformLocation(program, "uIsland");
+      if (iu) {
+        const on = state.island && state.island.on ? 1 : 0;
+        gl.uniform1f(iu, on);
+        const C = state.island || {};
+        gl.uniform2f(gl.getUniformLocation(program, "uIslandC"), C.cx || 0, C.cz || 0);
+        gl.uniform1f(gl.getUniformLocation(program, "uSpan"), C.span || 80);
+        gl.uniform1f(gl.getUniformLocation(program, "uRbeach"), C.Rbeach || 22);
+        gl.uniform1f(gl.getUniformLocation(program, "uRbank"), C.Rbank || 78);
+        gl.uniform1f(gl.getUniformLocation(program, "uPeak"), C.peak || 1.6);
+        gl.uniform1f(gl.getUniformLocation(program, "uShelf"), C.shelf || -2);
+        gl.uniform1f(gl.getUniformLocation(program, "uDLo"), C.dLo || 2);
+        gl.uniform1f(gl.getUniformLocation(program, "uDHi"), C.dHi || 6);
+        const steep = window.__steep;
+        gl.uniform1f(gl.getUniformLocation(program, "uSteep"), steep && Number.isFinite(steep.S) ? steep.S : 0.56);
+        const cs = gl.getUniformLocation(program, "coastState");
+        if (cs) {
+          gl.activeTexture(gl.TEXTURE21);
+          gl.bindTexture(gl.TEXTURE_2D, (on && C.tex) || islandDummy());
+          gl.uniform1i(cs, 21);
+          gl.activeTexture(gl.TEXTURE0);
+        }
+      }
+    }
     if (vao) gl.bindVertexArray(vao);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.enable(gl.DEPTH_TEST);

@@ -1,7 +1,7 @@
 // v30.23 HUD, the Hairline layer (modern-ui-spec §6): settings column (Open / Minimised / Layers sheet; H, Esc),
 // pause button (Space), stats line (S, 2 Hz), version, toast. DOM only; the look is v23.css. The old glass panel
 // and strip stay hidden in the DOM because their inputs (#boat, #flags, #pause) and stat ids stay the source of truth.
-import { ui, LAYERS, store, $ } from "./core.js?v=31.9";
+import { ui, LAYERS, store, $ } from "./core.js?v=32.5";
 const hud = document.createElement("div"); hud.id = "v23-hud"; document.body.appendChild(hud);
 const vg = document.createElement("div"); vg.id = "v23-vignette"; document.body.appendChild(vg);
 const SVG_SET = `<svg width="20" height="20" viewBox="-10 -10 20 20" aria-hidden="true"><path class="ic" d="M-7 -4H7M-7 0H7M-7 4H7"/><circle class="dot" cx="-3" cy="-4" r="1.35"/><circle class="dot" cx="3" cy="0" r="1.35"/><circle class="dot" cx="-1" cy="4" r="1.35"/></svg>`;
@@ -11,13 +11,15 @@ const BACK = `<svg class="chev" viewBox="0 0 8 10" aria-hidden="true" style="mar
 const row = (id, name, right, extra = "") => `<div class="hrow" id="${id}" role="switch" tabindex="0" ${extra}><span class="nm l1"><span class="plate">${name}</span></span>${right}</div>`;
 hud.innerHTML = `
   <button class="hb" id="hb-set" type="button" aria-label="Settings" title="Settings" aria-expanded="true">${SVG_SET}</button>
-  <div id="hud-head"><div id="hud-title">Ocean Simulator</div><div id="hud-ver">V31.9</div></div>
+  <div id="hud-head"><div id="hud-title">Ocean Simulator</div><div id="hud-ver">V32 (dev)</div></div>
   <div id="hud-rows">
     ${row("hr-boat", "Boat", '<span class="tg"></span>')}
     ${row("hr-flags", "Break flags", '<span class="tg"></span>')}
     <div class="hrow" id="hr-layers" role="button" tabindex="0" aria-label="Layers"><span class="nm l1"><span class="plate">Layers</span></span><span class="cnt n4 tx plate" id="hr-cnt">4/7</span>${CHEV}</div>
     ${row("hr-clean", "Clean view", '<span class="tg"></span>')}
     ${row("hr-stats", "Stats", '<span class="tg"></span>')}
+    <div class="hrow" id="hr-age" role="slider" tabindex="0" aria-label="Sea age"><span class="nm l1">Sea age</span><button type="button" class="chop-info" id="chop-info" aria-label="How choppiness is set" aria-expanded="false" title="How choppiness is set">i</button><span class="n4" id="age-read">young</span></div>
+    <div class="hrow" id="hr-cur" role="slider" tabindex="0" aria-label="Current"><span class="nm l1">Current</span><span class="n4" id="cur-read">still</span></div>
     <div class="hrow" id="hr-fit" role="button" tabindex="0"><span class="nm l1">Fit ocean</span></div>
     <div class="hrow" id="hr-reset" role="button" tabindex="0"><span class="nm l1">Reset view</span></div>
     <div class="hrows-end"></div>
@@ -30,7 +32,13 @@ hud.innerHTML = `
   <button class="hb" id="hb-pause" type="button">${SVG_PAUSE}</button>
   <div id="hud-pl"><span class="l1 plate" id="hud-pause-l">Pause</span><span class="n4 plate">Space</span></div>
   <div id="hud-stats" class="plate"><span class="l1 mu">FPS</span> <span class="n3" id="hs-fps">--</span><span class="sep">·</span><span class="l1 mu">Foam</span> <span class="n3" id="hs-foam">--</span><span class="sep">·</span><span class="n3 ac" id="hs-f">F-</span></div>
-  <div id="hud-toast" class="plate" role="status" aria-live="polite"><span class="l1 tx" id="ht-n"></span><span class="st" id="ht-s"></span></div>`;
+  <div id="hud-toast" class="plate" role="status" aria-live="polite"><span class="l1 tx" id="ht-n"></span><span class="st" id="ht-s"></span></div>
+  <div id="chop-note" hidden role="note">
+    <p>Choppiness is steepness, not a weather input like wind. The sea becomes choppy as a result of other things.</p>
+    <p>A stronger wind makes a steeper sea. A young wind-sea is steep. An old swell, after a long travel, is much smoother, about a quarter as steep.</p>
+    <p>An opposing current steepens the waves. A following current flattens them. In water shallower than about 28 m, waves shoal and get steeper, more so as the water gets shallower.</p>
+    <p>The slider follows that on its own. Dragging it is an override. Breaking and foam follow the same steepness, so a calmer or older sea crashes less and makes less foam.</p>
+  </div>`;
 const q = (s) => hud.querySelector(s);
 // ---------- panel state: open | min, plus the Layers sheet ----------
 let panel = store.get("ocean.ui.panel", matchMedia("(max-width: 899px), (pointer: coarse)").matches ? "min" : "open") === "min" ? "min" : "open", sheet = false;
@@ -50,6 +58,57 @@ const flip = (inp) => { inp.checked = !inp.checked; inp.dispatchEvent(new Event(
 act(q("#hr-boat"), () => flip(ui.inputs.boat)); act(q("#hr-flags"), () => flip(ui.inputs.flags));
 act(q("#hr-clean"), () => ui.setClean(!ui.clean));
 act(q("#hr-stats"), () => { window.__ui && window.__ui.setStripHidden(!document.body.classList.contains("ui-hidden-strip")); syncHud(); });
+function dragRow(el, input, lo, hi, perPx) {
+  if (!el || !input) return;
+  let drag = null;
+  el.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    el.setPointerCapture(e.pointerId);
+    drag = { y: e.clientY, v: Number(input.value) };
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const v = Math.round((drag.v + (drag.y - e.clientY) * perPx) * 100) / 100;
+    ui.set(input.id === "age" ? "age" : "cur", String(Math.min(hi, Math.max(lo, v))));
+  });
+  const up = () => { drag = null; };
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+}
+dragRow(q("#hr-age"), ui.inputs.age, 0, 1, 0.004);
+const chopInfo = q("#chop-info");
+const chopNote = q("#chop-note");
+let chopNotePinned = false;
+function placeChopNote() {
+  const rows = q("#hud-rows").getBoundingClientRect();
+  const b = chopInfo.getBoundingClientRect();
+  chopNote.style.left = `${Math.round(rows.right + 14)}px`;
+  chopNote.style.top = `${Math.round(Math.max(16, b.top - 20))}px`;
+}
+function setChopNote(open) {
+  chopNote.hidden = !open;
+  chopInfo.classList.toggle("on", open);
+  chopInfo.setAttribute("aria-expanded", String(open));
+  if (open) placeChopNote();
+}
+chopInfo.addEventListener("pointerdown", (e) => e.stopPropagation());
+chopInfo.addEventListener("click", (e) => {
+  e.stopPropagation();
+  chopNotePinned = chopNote.hidden;
+  setChopNote(chopNote.hidden);
+});
+chopInfo.addEventListener("mouseenter", () => { if (chopNote.hidden) setChopNote(true); });
+chopInfo.addEventListener("mouseleave", () => { if (!chopNotePinned) setChopNote(false); });
+document.addEventListener("pointerdown", (e) => {
+  if (!chopNotePinned) return;
+  if (e.target === chopInfo || chopNote.contains(e.target)) return;
+  chopNotePinned = false;
+  setChopNote(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !chopNote.hidden) { chopNotePinned = false; setChopNote(false); }
+});
+dragRow(q("#hr-cur"), ui.inputs.cur, -3, 3, 0.02);
 act(q("#hr-fit"), () => { const cmd = globalThis.__oceanViewCmd; if (cmd) cmd.fit(); });
 act(q("#hr-reset"), () => { const cmd = globalThis.__oceanViewCmd; if (cmd) cmd.reset(); });
 for (const [k] of LAYERS) act(q("#hl-" + k), () => ui.setLayer(k, !ui.layers[k]));
@@ -75,9 +134,15 @@ ui.toast = (name, on) => {
 // ---------- stats (2 Hz) from the hidden strip's values ----------
 const txt = (id) => { const e = document.getElementById(id); return e ? e.textContent : "--"; };
 setInterval(() => {
-  if (hud.classList.contains("nostats")) return;
-  const put = (id, v) => { const e = q(id); if (e.textContent !== v) e.textContent = v; };
-  put("#hs-fps", txt("st-fps")); const f = txt("st-foam"); put("#hs-foam", f === "--" ? "--" : `${f}%`); put("#hs-f", txt("st-sea"));
+  const put = (id, v) => { const e = q(id); if (e && e.textContent !== v) e.textContent = v; };
+  if (!hud.classList.contains("nostats")) {
+    put("#hs-fps", txt("st-fps")); const f = txt("st-foam"); put("#hs-foam", f === "--" ? "--" : `${f}%`); put("#hs-f", txt("st-sea"));
+  }
+  const st = window.__steep;
+  const age = st && Number.isFinite(st.age) ? st.age : (ui.inputs.age ? Number(ui.inputs.age.value) : 0.28);
+  const cur = ui.inputs.cur ? Number(ui.inputs.cur.value) : 0;
+  put("#age-read", age >= 0.72 ? "old" : age < 0.4 ? "young" : "building");
+  put("#cur-read", Math.abs(cur) < 0.15 ? "still" : `${cur < 0 ? "against" : "with"} ${Math.abs(cur).toFixed(1)}`);
 }, 500);
 syncPanel(); syncHud();
 if (new URLSearchParams(location.search).get("notext") === "1") document.documentElement.classList.add("notext");

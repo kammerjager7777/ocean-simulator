@@ -151,6 +151,66 @@ vec3 seaNormalPix(vec2 p, float lod) {
 
 import { BED_GLSL } from "./seabed.js?v=30.29";
 import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
+// The sea fragment shader is already at the 16 texture-unit minimum. The island
+// state is sampled here, in the vertex shader, and only when ?island=1, then
+// passed down as vCoast. The default ocean declares no extra sampler.
+const FFT_ISLAND = typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1";
+const ISLAND_VERT_DECL = FFT_ISLAND ? `
+uniform float uIsland;
+uniform vec2 uIslandC;
+uniform float uSpan;
+uniform float uRbeach;
+uniform float uRbank;
+uniform float uPeak;
+uniform float uShelf;
+uniform float uDLo;
+uniform float uDHi;
+uniform sampler2D coastState;
+out vec4 vCoast;
+float islandBedV(vec2 p) {
+  float r = length(p - uIslandC);
+  if (r >= uRbank) return -depth;
+  if (r >= uRbeach) {
+    float t = (r - uRbeach) / (uRbank - uRbeach);
+    return uShelf + (-depth - uShelf) * t;
+  }
+  return uPeak + (uShelf - uPeak) * (r / max(uRbeach, 1e-3));
+}
+float islandW(vec2 p) {
+  float D = max(0.0, -islandBedV(p));
+  float t = clamp((D - uDLo) / max(uDHi - uDLo, 1e-3), 0.0, 1.0);
+  float s = t * t * (3.0 - 2.0 * t);
+  vec2 uv = (p - uIslandC) / uSpan + 0.5;
+  float edge = smoothstep(0.02, 0.12, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)));
+  return (1.0 - s) * edge;
+}` : "";
+const ISLAND_VERT_MAIN = FFT_ISLAND ? `
+  vCoast = vec4(0.0);
+  vec2 uvC = (p - uIslandC) / uSpan + 0.5;
+  if (uvC.x > 0.0 && uvC.x < 1.0 && uvC.y > 0.0 && uvC.y < 1.0) vCoast = texture(coastState, uvC);
+  if (meta.w < 2.5) {
+    float wI = islandW(p);
+    vCoast.g = wI;
+    if (wI > 0.001) {
+      float hC = vCoast.r;
+      float bI = islandBedV(p);
+      float dry = smoothstep(0.02, 0.4, bI);
+      // Wet cells stay a wave on the spectral sea. A drained column must not
+      // pull the surface down onto the bed (that was the dark ring).
+      float wetEta = hC + bI;
+      float wetLimited = clamp(wetEta, vWorld.y - 0.55, vWorld.y + 0.85);
+      float etaC = mix(wetLimited, bI, dry);
+      float limited = clamp(etaC, vWorld.y - 0.45, vWorld.y + 0.45);
+      float eta = mix(limited, etaC, smoothstep(0.4, 0.85, wI));
+      vWorld.y = mix(vWorld.y, eta, max(wI, dry));
+      vec2 disp = vWorld.xz - p;
+      vWorld.xz = p + disp * (1.0 - dry);
+    }
+  }
+  if (meta.w > 3.5 && meta.w < 4.5) {
+    float bI = islandBedV(p);
+    if (bI < -0.05 && bI > vWorld.y) vWorld.y = bI;
+  }` : "";
 export const VERT_FFT = `#version 300 es
 #define FOAM_LIFT ${Number(new URLSearchParams(globalThis.location?.search ?? "").get("foamlift") ?? 0).toFixed(3)}
 #define MAXX 64
@@ -191,6 +251,7 @@ uniform float minLod;    // shading detail never finer than this level (near-Nyq
 uniform float antiTile;  // 1: mixed copies away from the tile; 0: plain repeat (review only)
 uniform float block;     // v29: 1 = the cut-away block (tile only, physics fields to the very edge, walls and floor)
 uniform float depth;     // v29: floor depth (the depth slider; the same value the physics uses)
+${ISLAND_VERT_DECL}
 ${BED_GLSL}${RIPPLE_GLSL}
 uniform highp int xCount;
 uniform vec4 x0[MAXX];   // amplitude, k, cos dir, sin dir
@@ -592,6 +653,7 @@ void main() {
     vWorld.xz += out_ * 2.0 * spacing * exp2(rr + 1.0);
     vWorld.y -= 0.3 + 0.0005 * d;
   }
+  ${ISLAND_VERT_MAIN}
   gl_Position = viewProj * vec4(vWorld, 1.0);
 }
 `;
