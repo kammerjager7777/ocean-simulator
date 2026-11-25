@@ -18,13 +18,13 @@
 // The renderer reads the textures directly; nothing per point comes back to the CPU.
 // readFields() reads the whole field back, for parity tests only.
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, bandVariance } from "./band.js?v=32.11";
-import { createGpuChopPatch } from "./gpuPatch.js?v=30.22";
-import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js?v=30.22";
-import { slopeBudget } from "./roughness.js?v=30.22";
-import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js?v=32.11";
-import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js?v=32.1";
-import { foamGain, peakScale } from "./steepness.js?v=32.39";
+import { createBand, retuneBand, bandVariance } from "./band.js";
+import { createGpuChopPatch } from "./gpuPatch.js";
+import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js";
+import { slopeBudget } from "./roughness.js";
+import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js";
+import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js";
+import { foamGain, peakScale } from "./steepness.js";
 
 let simTimeCover = 0; // v30.6: clock for the cover pass eddy field
 const TAU = Math.PI * 2;

@@ -1,7 +1,7 @@
 // Two fixed screen instruments above the time dial. They are not on the ocean,
 // so a drag cannot orbit the camera, and they do not change size with the sea.
-import { ui } from "./core.js?v=32.61";
-import { skyAt } from "./sky.js?v=30.29";
+import { ui } from "./core.js";
+import { skyAt } from "./sky.js";
 
 const W = 400, H = 176, CHOP_W = 400;
 // Wide chop box over two square boxes. Canvases are 2× the CSS size.

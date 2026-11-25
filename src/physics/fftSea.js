@@ -31,9 +31,9 @@
 // sxN, szN are the shading slopes (the chop band's slope counted twice, as surface.js).
 // sq.. are the squeeze terms of the Jacobian (sum a k cicj sin). Real pairs are packed two
 // to a transform (Hermitian spectra), one-sided fields one to a transform.
-import { shoal } from "./band.js?v=30.22";
-import { timed } from "./passTimer.js?v=30.22";
-import { elfouhailyParams, spectrumFor, wavenumber } from "./spectrum.js?v=32.11";
+import { shoal } from "./band.js";
+import { timed } from "./passTimer.js";
+import { elfouhailyParams, spectrumFor, wavenumber } from "./spectrum.js";
 
 const TAU = Math.PI * 2;
 export const BAND_EDGE = 0.03; // soft band edges, +-3% of omega

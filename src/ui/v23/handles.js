@@ -1,12 +1,12 @@
 // Measurement handles. Chop is only the wave glyph: dragging that stroke changes choppiness live.
 // Clarity and depth stay on the two different corners arrange() assigned.
-import { ui } from "./core.js?v=32.61";
-import { arrange } from "./controls.js?v=32.61";
-import { textRow, inside, seaHides, showM } from "./geometry.js?v=32.61";
-import { cancel } from "./coast.js?v=30.29";
-import { bedY } from "../../render/seabed.js?v=30.30";
-import { sandbarBed, useIslandSize } from "../../physics/island.js?v=32.85";
-import { rippleHeight } from "../../physics/ripples.js?v=30.29";
+import { ui } from "./core.js";
+import { arrange } from "./controls.js";
+import { textRow, inside, seaHides, showM } from "./geometry.js";
+import { cancel } from "./coast.js";
+import { bedY } from "../../render/seabed.js";
+import { sandbarBed, useIslandSize } from "../../physics/island.js";
+import { rippleHeight } from "../../physics/ripples.js";
 const num = (k) => Number(ui.inputs[k].value), clamp = (v) => Math.min(1, Math.max(0, v)), T = ui.theme;
 export const zsdBand = (z) => z < 6 ? "Murky" : z < 15 ? "Coastal" : z < 30 ? "Open ocean" : "Clear tropical";
 export const zsdOfV = (v) => 3 * Math.pow(40 / 3, v), vOfZsd = (z) => Math.log(z / 3) / Math.log(40 / 3);

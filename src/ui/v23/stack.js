@@ -1,7 +1,7 @@
 // The right-hand cards are one column, anchored at the bottom. A layer
 // toggle pops a card out, then the cards above it slide down into the gap.
 // Turning it back on opens the gap first, then the card pops in.
-import { ui } from "./core.js?v=32.61";
+import { ui } from "./core.js";
 
 const BASE = 58;
 const POP_OUT = 180;

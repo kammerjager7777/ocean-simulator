@@ -5,11 +5,11 @@
 // 2x hull-radius ring on the water), and a click opens the §7.3 card (208 x 128, leader 28 px; shifts sideways off
 // the HUD regions, then flips below). A drag leaves wake ripples;
 // a fast drag (> 2 m/s) also lays a foam trail into the drawn foam field (gpuSurface foam-trail pass).
-import { ui, $ } from "./core.js?v=32.61";
-import { clampToWater, stillDepth, useIslandSize } from "../../physics/island.js?v=32.85";
-import { bedRelief } from "../../render/seabed.js?v=30.30";
-import { rippleHeight, addRipple } from "../../physics/ripples.js?v=30.29";
-import { elevAt } from "./sky.js?v=30.29";
+import { ui, $ } from "./core.js";
+import { clampToWater, stillDepth, useIslandSize } from "../../physics/island.js";
+import { bedRelief } from "../../render/seabed.js";
+import { rippleHeight, addRipple } from "../../physics/ripples.js";
+import { elevAt } from "./sky.js";
 const T = ui.theme, D2R = Math.PI / 180;
 const SCALE = Number(ui.P.get("buoyx") || 1.45), MASTH = 4.8, HULL_R = 1.5; // mesh: 3 m hull, 4.8 m mast; displayed hull ~4.4 m
 const pos = (() => { try { const j = JSON.parse(ui.store.get("ocean.ui.buoy", "")); if (j && Number.isFinite(j.x) && Number.isFinite(j.z)) return [j.x, j.z]; } catch { /* default */ } return [72, -48]; })();

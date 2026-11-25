@@ -1,5 +1,5 @@
 // Pierson–Moskowitz wind spectrum. S(ω) is variance density in m² / (rad/s).
-import { peakScale } from "./steepness.js?v=32.11";
+import { peakScale } from "./steepness.js";
 
 export function peakAngularFrequency(windSpeed, gravity) {
   const u = Math.max(windSpeed, 0.4);

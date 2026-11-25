@@ -149,9 +149,9 @@ vec3 seaNormalPix(vec2 p, float lod) {
 }
 `;
 
-import { BED_GLSL } from "./seabed.js?v=30.31";
-import { currentIsland } from "../physics/island.js?v=32.85";
-import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
+import { BED_GLSL } from "./seabed.js";
+import { currentIsland } from "../physics/island.js";
+import { RIPPLE_GLSL } from "../physics/ripples.js";
 // The sea fragment shader is already at the 16 texture-unit minimum. The island
 // state is sampled here, in the vertex shader, and only when ?island=1, then
 // passed down as vCoast. The default ocean declares no extra sampler.

@@ -1,20 +1,20 @@
-import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=33.91";
-import { currentIsland, useIslandSize, sandbarBed } from "../physics/island.js?v=32.85";
-import { LOBE_GLSL } from "../physics/roughness.js?v=30.22";
-import { timed } from "../physics/passTimer.js?v=30.22";
-import { createBoatView, createBuoyView } from "./boatView.js?v=33.91";
-import { BED_GLSL, bedRelief, setBedRippleDir } from "./seabed.js?v=30.31";
-import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
-import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js?v=30.29";
-import { createLightMaps, lightSampleGlsl, shadowGlsl } from "./light.js?v=33.93";
-import { assertFragmentSamplers } from "./samplerBudget.js?v=33.17";
+import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js";
+import { currentIsland, useIslandSize, sandbarBed } from "../physics/island.js";
+import { LOBE_GLSL } from "../physics/roughness.js";
+import { timed } from "../physics/passTimer.js";
+import { createBoatView, createBuoyView } from "./boatView.js";
+import { BED_GLSL, bedRelief, setBedRippleDir } from "./seabed.js";
+import { RIPPLE_GLSL } from "../physics/ripples.js";
+import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js";
+import { createLightMaps, lightSampleGlsl, shadowGlsl } from "./light.js";
+import { assertFragmentSamplers } from "./samplerBudget.js";
 // Beach bisect toggles: ?beach=nodamp drops the damp darkening, ?beach=nosurf the shore foam.
 const BEACH_MODE = (() => {
   const q = typeof location !== "undefined" ? new URLSearchParams(location.search).get("beach") : null;
   return q === "nodamp" ? 1 : q === "nosurf" ? 2 : 0;
 })();
-import { SEABED_LUT } from "./seabedLut.js?v=30.22";
-import { CURL_SHAPE_GLSL, CURL_SLOTS, curlX } from "../physics/gpuSurface.js?v=33.11";
+import { SEABED_LUT } from "./seabedLut.js";
+import { CURL_SHAPE_GLSL, CURL_SLOTS, curlX } from "../physics/gpuSurface.js";
 const FAR_HALVE_DEFAULT = 0; // 05:16 horizon bar: quarter-density far rings flattened the sun25 silhouette (?farhalve=1 to test)
 const CHUNK_DEFAULT = 1; // v28 chunk (Michael 09:23): only the one square tile of sea (size slider), no horizon rings (?chunk=0 for the full sea)
 const ONE_COPY_DEFAULT = 0; // GAD 01:08: onecopy=0 (all three FFT copies at every distance)
@@ -1906,17 +1906,21 @@ export function createView(canvas) {
   const statRead = gl.createFramebuffer();
   function copyBandStats(chop, fine) {
     const prev = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+    const unit = gl.getParameter(gl.ACTIVE_TEXTURE);
+    // Unit 7 is the bandStats unit; the caller's unit keeps its texture.
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D, bandStatsTex);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, statRead);
     const row = (src, y) => {
       if (!src) return;
       gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, src, 0);
       gl.readBuffer(gl.COLOR_ATTACHMENT0);
-      gl.bindTexture(gl.TEXTURE_2D, bandStatsTex);
       gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, y, 0, 0, 8, 1);
     };
     row(chop, 0);
     row(fine, 1);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prev);
+    gl.activeTexture(unit);
   }
   // Derivatives give a one-pixel-ish flag outline at any distance. Without them the
   // outline is a fixed band in attribute space.
@@ -2854,7 +2858,11 @@ void main() {
   // Menu ink probe: up to 16 exact screen pixels, every 10th frame. A downscale blit of the
   // default framebuffer came back black on this GL, so these are direct reads (a few hundred bytes).
   const lumProbe = { buf: new Uint8Array(4), n: 0 };
+  // Synchronous GL readbacks (__oceanLum probe, __sceneErr) run only with ?gldebug=1 or globalThis.__glDebug = true.
+  const glDebugUrl = typeof location !== "undefined" && /[?&]gldebug=1/.test(location.search);
+  const glDebug = () => glDebugUrl || globalThis.__glDebug === true;
   function sampleBackdrop() {
+    if (!glDebug()) return;
     try { sampleBackdropInner(); } catch (e) { globalThis.__oceanLumErr = String(e && e.message || e); }
   }
   function sampleBackdropInner() {
@@ -3121,7 +3129,6 @@ void main() {
       const ang = Math.atan2(ripEase.dir[1], ripEase.dir[0]);
       const tang = Math.atan2(target[1], target[0]);
       globalThis.__rippleNow = { dir: ang, target: tang, hs: ripEase.hs, tp: ripEase.tp, follow };
-      globalThis.__drawMs = (globalThis.__drawMs || []).concat(0);
     }
     // GPU physics: the card already wrote the patch textures (gpuPatch.js); otherwise
     // quantise and upload the CPU patches as before.
@@ -3317,7 +3324,7 @@ void main() {
           if (vao) gl.bindVertexArray(vao);
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, blockMesh.index);
           gl.drawElements(gl.TRIANGLES, blockMesh.count - blockMesh.wallCount, gl.UNSIGNED_INT, blockMesh.wallCount * 4);
-          globalThis.__sceneErr = gl.getError();
+          if (glDebug()) globalThis.__sceneErr = gl.getError();
           gl.disable(gl.POLYGON_OFFSET_FILL);
           if (clusters.program && clusters.count > 0) {
             gl.useProgram(clusters.program);

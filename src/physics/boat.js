@@ -5,7 +5,7 @@
 // speed, so the hull heaves, pitches and rolls. Wind windage and a weak current drift it, and a
 // soft mooring spring keeps it near the centre of the sea.
 import { GRAVITY } from "./gravity.js";
-import { clampToWater } from "./island.js?v=32.85";
+import { clampToWater } from "./island.js";
 const BOAT_DRIFT = typeof location !== "undefined" && new URLSearchParams(location.search).get("boatdrift") === "1";
 const RHO = 1025, MASS = 6500, LEN = 8.0, BEAM = 2.8, HULL_D = 1.1;
 const IX = MASS * (BEAM * BEAM + HULL_D * HULL_D) / 12 * 1.4; // roll

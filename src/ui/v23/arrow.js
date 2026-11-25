@@ -1,9 +1,9 @@
 // Wind. A compass ring circles the ocean in world bearings: 0 is +X and is
 // labeled N, 90 is +Z and is labeled E, matching the sea's (cos θ, sin θ) wind.
 // Dragging the ring sets direction only. The fixed card sets speed only.
-import { ui } from "./core.js?v=32.61";
-import { skyAt } from "./sky.js?v=30.29";
-import { sample, release, cancel, velocity } from "./coast.js?v=30.29";
+import { ui } from "./core.js";
+import { skyAt } from "./sky.js";
+import { sample, release, cancel, velocity } from "./coast.js";
 const LO = [0, .3, 1.6, 3.4, 5.5, 8, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7, 36.9];
 export const bfLevel = (u) => { let i = 0; while (i < 12 && u >= LO[i + 1] - .05) i++; return Math.min(12, i + Math.min(.999, (u - LO[i]) / (LO[i + 1] - LO[i]))); };
 const BF = ["Calm", "Light air", "Light breeze", "Gentle breeze", "Moderate breeze", "Fresh breeze", "Strong breeze", "Near gale", "Gale", "Strong gale", "Storm", "Violent storm", "Hurricane"];

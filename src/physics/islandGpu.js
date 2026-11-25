@@ -5,7 +5,7 @@
 // shallow-water equations. The spectral elevation is not added on again.
 
 import { GRAVITY } from "./gravity.js";
-import { ISLAND, islandById, sampleIsland, bakeShadow, useIslandSize, stockdonR2 } from "./island.js?v=32.85";
+import { ISLAND, islandById, sampleIsland, bakeShadow, useIslandSize, stockdonR2 } from "./island.js";
 
 const VERT = `#version 300 es
 void main() {

@@ -1,10 +1,10 @@
 // v30.23 on-sea UI core (behaviour; the look comes from theme.js). Layers v4 + migration, keys 1-7 / U /
 // Space, clean view, the pause button, the overlay canvas, world<->screen geometry, the pointer router
 // (on-object hits first, misses fall through to the camera) and the per-frame loop the objects hang on.
-import { theme, inkForLum } from "./theme.js?v=31.9";
-import { publish as publishSky } from "./sky.js?v=31.9";
-import { addRipple, publishSplash } from "../../physics/ripples.js?v=30.29";
-import { tick as coastTick, cancelAll } from "./coast.js?v=30.29";
+import { theme, inkForLum } from "./theme.js";
+import { publish as publishSky } from "./sky.js";
+import { addRipple, publishSplash } from "../../physics/ripples.js";
+import { tick as coastTick, cancelAll } from "./coast.js";
 export const P = new URLSearchParams(location.search);
 export const $ = (s) => document.querySelector(s);
 export const store = {

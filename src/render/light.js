@@ -549,7 +549,8 @@ void main() {
     }
     const gpuQuery = timer ? gl.createQuery() : null;
     if (gpuQuery) gl.beginQuery(timer.TIME_ELAPSED_EXT, gpuQuery);
-    const measuring = info.costFrames < 2;
+    // The cost-measure flush is a synchronous readback: only with ?gldebug=1 or globalThis.__glDebug = true.
+    const measuring = info.costFrames < 2 && (globalThis.__glDebug === true || (typeof location !== "undefined" && /[?&]gldebug=1/.test(location.search)));
     if (measuring) {
       const flush = new Uint8Array(4);
       gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, flush);

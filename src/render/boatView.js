@@ -2,8 +2,8 @@
 // The hull, cabin, mast and rigging are rigid. Only sail vertices (sail.x > 0) move, in
 // the vertex shader, from the apparent wind. The buoy mesh does not set that attribute.
 // Float, drift and yaw stay in physics/boat.js.
-import { lightSampleGlsl, shadowGlsl } from "./light.js?v=33.93";
-import { assertFragmentSamplers } from "./samplerBudget.js?v=33.17";
+import { lightSampleGlsl, shadowGlsl } from "./light.js";
+import { assertFragmentSamplers } from "./samplerBudget.js";
 const VS = `#version 300 es
 layout(location=0) in vec3 pos;
 in vec3 nrm; in vec3 col; in vec3 sail;

@@ -1,18 +1,18 @@
 import { GRAVITY_NOTE } from "./physics/gravity.js";
-import { scenario } from "./physics/scenario.js?v=33.11";
+import { scenario } from "./physics/scenario.js";
 import { createWind } from "./physics/wind.js";
-import { createSurface } from "./physics/surface.js?v=30.22";
-import { createView } from "./render/view.js?v=33.96";
-import { createIslandGpu } from "./physics/islandGpu.js?v=32.92";
-import { useIslandSize, stockdonR2 } from "./physics/island.js?v=32.85";
-import { parseShare, applyShareToInputs, islandRedirect } from "./ui/v23/share.js?v=32.32";
-import { sunVector } from "./ui/v23/sky.js?v=32.35";
-import { seaSteepness, whySteepness } from "./physics/steepness.js?v=32.40";
-import { ui } from "./ui/v23/core.js?v=32.61";
-import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=33.11";
-import { createBoat } from "./physics/boat.js?v=33.94";
-import { createPerf } from "./perf.js?v=30.22";
-import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js?v=30.29";
+import { createSurface } from "./physics/surface.js";
+import { createView } from "./render/view.js";
+import { createIslandGpu } from "./physics/islandGpu.js";
+import { useIslandSize, stockdonR2 } from "./physics/island.js";
+import { parseShare, applyShareToInputs, islandRedirect } from "./ui/v23/share.js";
+import { sunVector } from "./ui/v23/sky.js";
+import { seaSteepness, whySteepness } from "./physics/steepness.js";
+import { ui } from "./ui/v23/core.js";
+import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js";
+import { createBoat } from "./physics/boat.js";
+import { createPerf } from "./perf.js";
+import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js";
 
 // ?chopSpectrum=pm (or =elfouhaily) picks the chop band's spectrum for A/B comparison.
 // It only changes that band's scenario setting; nothing else reads it.
@@ -334,7 +334,7 @@ if (physicsNote) {
 
 // ?parity=1: CPU-vs-GPU parity test on this page's context (tests only; see parity.js).
 if (params.get("parity") === "1") {
-  import("./physics/parity.js?v=30.22").then(({ runParity }) => runParity(view.gl, {
+  import("./physics/parity.js").then(({ runParity }) => runParity(view.gl, {
     speeds: (params.get("speeds") || "0,5,10,17.5,25").split(",").map(Number),
     seconds: Number(params.get("seconds") || 6),
     gust: params.get("gust") || "continuous",

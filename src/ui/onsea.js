@@ -2,7 +2,7 @@
 // wave cross-section, Beaufort dial, buoy, ripple touch, time of day; Layers block, keys 1-7, U.
 // Drawn on one 2D overlay canvas (no WebGL texture units used) plus DOM cards; the buoy model is a
 // WebGL mesh drawn by view.js (globalThis.__oceanBuoy). Nothing here touches the foam or the physics.
-import { BEAUFORT_LO, beaufort } from "./ui.js?v=30.22";
+import { BEAUFORT_LO, beaufort } from "./ui.js";
 
 const $ = (s) => document.querySelector(s);
 const store = {

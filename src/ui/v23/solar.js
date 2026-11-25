@@ -1,9 +1,9 @@
 // v30.27 Apple-Watch-style Solar control. The full 24 h sine is centered in the card:
 // midnight at both padded ends, noon on the card center, 06:00 and 18:00 symmetric.
 // A short coast continues a flick, wraps at midnight, and stops at the next pointer.
-import { ui } from "./core.js?v=32.61";
-import { elevAt, isSunUp } from "./sky.js?v=30.29";
-import { sample, release, cancel, velocity } from "./coast.js?v=30.29";
+import { ui } from "./core.js";
+import { elevAt, isSunUp } from "./sky.js";
+import { sample, release, cancel, velocity } from "./coast.js";
 const D2R = Math.PI / 180, URL_T = ui.P.get("tod");
 const X0 = 28, X1 = 372, HY = 101, AMP = 64;
 ui.todMin = (() => { if (URL_T && /^\d{1,2}:\d{2}$/.test(URL_T)) { const [h, m] = URL_T.split(":").map(Number); return h * 60 + m; } const v = Number(ui.store.get("ocean.ui.tod", "660")); return Number.isFinite(v) && v >= 0 && v < 1440 ? v : 660; })();
