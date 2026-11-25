@@ -2,7 +2,7 @@
 // The hull, cabin, mast and rigging are rigid. Only sail vertices (sail.x > 0) move, in
 // the vertex shader, from the apparent wind. The buoy mesh does not set that attribute.
 // Float, drift and yaw stay in physics/boat.js.
-import { lightSampleGlsl } from "./light.js?v=33.44";
+import { lightSampleGlsl, shadowGlsl } from "./light.js?v=33.81";
 import { assertFragmentSamplers } from "./samplerBudget.js?v=33.17";
 const VS = `#version 300 es
 layout(location=0) in vec3 pos;
@@ -39,6 +39,7 @@ uniform vec3 lightDir;
 ${lightSampleGlsl()}
 uniform mat4 uShVP;
 uniform float uCausDay;
+${shadowGlsl()}
 uniform float uCausDeep;
 uniform float uSeaL;
 uniform vec2 uCaustO;
@@ -50,15 +51,7 @@ void main() {
   float d = max(dot(n, normalize(lightDir)), 0.0);
   float sky = 0.5 + 0.5 * n.y;
   vec3 c = vC * (0.32 * sky + 0.78 * d);
-  float sh = 1.0;
-  vec4 lp = uShVP * vec4(vW, 1.0);
-  vec3 sp = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
-  if (sp.x > 0.0 && sp.x < 1.0 && sp.y > 0.0 && sp.y < 1.0 && uCausDay > 0.01) {
-    float caster = lightSh(sp.xy);
-    float blocked = sp.z > caster + 0.015 ? 1.0 : 0.0;
-    float fill = 1.0 - exp(-max(0.0, -vW.y) * 0.11);
-    sh = mix(1.0 - blocked, 1.0, vW.y < 0.0 ? clamp(fill, 0.0, 0.7) : 0.0);
-  }
+  float sh = shadowFactor(vW);
   if (vW.y < -0.05 && uCausDay > 0.01) {
     float col = max(0.05, -vW.y);
     vec2 uv = (vW.xz - uCaustO) / max(uCaustTile, 1.0);

@@ -6,16 +6,17 @@
 
 const GRID = 256;
 const CAUST = 1024;
-const SHADOW = 160;
+const SHADOW = 512;
 // One draw. The grid is a little larger than the shallow window so a ray
 // from just outside can still land inside it. 256² is the ceiling.
 const SPAN = 1.12;
 // One map across the tank. A 64 m tile sat on the dry crown and the bank,
 // where the net has to read, only saw the wrapped edge.
 const TILE = 280;
-// One texture for both maps. Caustic intensity is the top block (.r).
-// Shadow depth is the block underneath (.r). Two samplers would push the
-// sea fragment shader past the 16-unit Mac limit.
+// One texture for both maps. The caustic block is unused (the net is
+// procedural). Shadow depth is packed into RGB under it, because an 8-bit
+// red channel over a kilometre of range cannot see a boat two metres off
+// the sand. Two samplers would push the sea past the 16-unit Mac limit.
 export const LIGHT_ATLAS = { w: CAUST, h: CAUST + SHADOW, cau: CAUST, sh: SHADOW };
 
 export function lightSampleGlsl() {
@@ -51,7 +52,9 @@ float causLine(vec2 p) {
 // Three abs-sine layers. Cells grow with depth. The live surface slope
 // warps the domain, so the lines bend as the waves move. No texture.
 float causNet(vec2 xz, float depthM, vec2 slope) {
-  float cell = 0.46 + max(depthM, 0.0) * 0.24;
+  // Finest in ankle-to-waist-deep water, then the cells grow with depth.
+  float d = max(depthM, 0.0);
+  float cell = 0.22 + smoothstep(0.3, 3.0, d) * 0.38 + max(d - 1.2, 0.0) * 0.40;
   vec2 p = xz / cell;
   vec2 warp = slope * 6.0;
   float t = uCausT;
@@ -65,7 +68,37 @@ float causNet(vec2 xz, float depthM, vec2 slope) {
   c += vec2(sin(c.y * 0.42 + t * 0.27), cos(c.x * 0.4 - t * 0.2)) * 0.6;
   float l2 = causLine(c + vec2(t * 0.1, t * 0.08));
   float net = l0 * 0.72 + l1 * 0.36 + l2 * 0.3;
-  return 0.78 + net * 1.55;
+  // Light on sand. The lines stay brighter than the cells, not white wires.
+  return 0.84 + net * 0.8;
+}
+`;
+}
+
+export function shadowGlsl() {
+  const { cau, sh } = LIGHT_ATLAS;
+  return `
+float shadowDecode(vec2 uv) {
+  vec2 f = clamp(uv, vec2(0.0), vec2(0.999));
+  ivec2 ip = ivec2(f * ${sh}.0);
+  vec3 e = texelFetch(uLight, ivec2(ip.x, ${cau} + ip.y), 0).rgb;
+  return dot(e, vec3(1.0, 0.0039215686, 0.0000153787));
+}
+float shadowFactor(vec3 w) {
+  if (uCausDay < 0.01) return 1.0;
+  vec4 lp = uShVP * vec4(w, 1.0);
+  vec3 p = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
+  if (p.x < 0.02 || p.x > 0.98 || p.y < 0.02 || p.y > 0.98) return 1.0;
+  float depthM = max(0.0, -w.y);
+  float rad = (6.0 + depthM * 0.5) / ${sh}.0;
+  float bias = 0.00035;
+  float acc = 0.0;
+  acc += p.z > shadowDecode(p.xy + vec2(-rad, -0.35 * rad)) + bias ? 1.0 : 0.0;
+  acc += p.z > shadowDecode(p.xy + vec2(rad, -0.4 * rad)) + bias ? 1.0 : 0.0;
+  acc += p.z > shadowDecode(p.xy + vec2(-0.4 * rad, rad)) + bias ? 1.0 : 0.0;
+  acc += p.z > shadowDecode(p.xy + vec2(0.55 * rad, 0.65 * rad)) + bias ? 1.0 : 0.0;
+  float blocked = acc * 0.25;
+  float fill = 1.0 - exp(-depthM * 0.08);
+  return mix(1.0 - blocked, 1.0, clamp(fill, 0.0, 0.6));
 }
 `;
 }
@@ -226,7 +259,11 @@ void main() { gl_Position = uMVP * vec4(pos, 1.0); }`;
 export const SH_FS = `#version 300 es
 precision highp float;
 out vec4 o;
-void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`;
+void main() {
+  vec3 enc = fract(vec3(1.0, 255.0, 65025.0) * gl_FragCoord.z);
+  enc -= enc.yzz * vec3(1.0 / 255.0, 1.0 / 255.0, 0.0);
+  o = vec4(enc, 1.0);
+}`;
 
 const REEF_SHADOW_VS = `#version 300 es
 layout(location=0) in vec3 pos;
@@ -294,11 +331,10 @@ export function createLightMaps(gl) {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.generateMipmap(gl.TEXTURE_2D);
     const rb = gl.createRenderbuffer();
     gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
     gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
@@ -436,8 +472,11 @@ void main() {
     gl.viewport(0, CAUST, SHADOW, SHADOW);
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(0, CAUST, SHADOW, SHADOW);
+    gl.disable(gl.BLEND);
+    gl.colorMask(true, true, true, true);
+    gl.depthMask(true);
     gl.enable(gl.DEPTH_TEST);
-    gl.clearColor(1, 1, 1, 1);
+    gl.clearColor(1, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     if (lit.day > 0.01 && !(info.bisect > 2.5)) {
       gl.useProgram(shProg);

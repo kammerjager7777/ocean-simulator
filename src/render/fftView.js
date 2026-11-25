@@ -735,7 +735,14 @@ void main() {
   // v29.1 fix2: the wall bottom (3) keeps the same horizontal shift as its wall-top vertex, so the
   // walls stay vertical under the stretched outline and the floor (a fan to those bottom vertices,
   // see buildBlockMesh) follows it: no gap, no sky under the water. The floor centre (4) stays put.
-  if (meta.w > 2.5) vWorld = (meta.w > 5.5 || (meta.w > 3.5 && meta.w < 4.5)) ? vec3(p.x, -depth + bedRelief(p, depth), p.y) : vec3(vWorld.x, -depth + bedRelief(vWorld.xz, depth), vWorld.z); // v30.23 relief; meta.w 6 is the island floor grid
+  if (meta.w > 2.5) {
+    // Visual cut only. Physics depth and the buoy HUD stay on the real depth.
+    // The drawn floor and the wall bottom sit at 38% of the real column so
+    // the side is not a 40 m slab. The island lift below puts the shallows back.
+    vec2 bxz = (meta.w > 5.5 || (meta.w > 3.5 && meta.w < 4.5)) ? p : vWorld.xz;
+    float yBedV = mix(0.0, -depth + bedRelief(bxz, depth), 0.38);
+    vWorld = (meta.w > 5.5 || (meta.w > 3.5 && meta.w < 4.5)) ? vec3(p.x, yBedV, p.y) : vec3(vWorld.x, yBedV, vWorld.z);
+  }
   if (meta.w < -0.5 && block < 0.5) {
     // skirt (see buildFftMesh): reaches outward under the coarser ring and a little down, so
     // the T-junction slivers are covered seen from above too (a vertical skirt has no area

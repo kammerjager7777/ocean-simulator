@@ -1,12 +1,12 @@
-import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=33.13";
+import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=33.80";
 import { currentIsland, useIslandSize, sandbarBed } from "../physics/island.js?v=32.85";
 import { LOBE_GLSL } from "../physics/roughness.js?v=30.22";
 import { timed } from "../physics/passTimer.js?v=30.22";
-import { createBoatView, createBuoyView } from "./boatView.js?v=33.44";
+import { createBoatView, createBuoyView } from "./boatView.js?v=33.81";
 import { BED_GLSL, bedRelief, setBedRippleDir } from "./seabed.js?v=30.31";
 import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
 import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js?v=30.29";
-import { createLightMaps, lightSampleGlsl } from "./light.js?v=33.70";
+import { createLightMaps, lightSampleGlsl, shadowGlsl } from "./light.js?v=33.88";
 import { assertFragmentSamplers } from "./samplerBudget.js?v=33.17";
 import { SEABED_LUT } from "./seabedLut.js?v=30.22";
 import { CURL_SHAPE_GLSL, CURL_SLOTS, curlX } from "../physics/gpuSurface.js?v=33.11";
@@ -236,8 +236,9 @@ vec3 sfAlbedo(vec2 q) {
       vec4 e = texture2D(clusterTex, (c + 0.5) / clusterGrid.z);
       if (e.w < 0.5) continue;
       vec2 ctr = clusterGrid.xx + (c + e.xy) * clusterGrid.y;
-      float rad = e.z * 8.0;                       // patch radius + 1 m
-      ao = min(ao, 1.0 - 0.2 * (1.0 - smoothstep(rad * 0.45, rad * 1.15, length(q - ctr))));
+      float rad = e.z * 8.0;
+      // Contact under the rock only. A wide disc read as a ring around every mound.
+      ao = min(ao, 1.0 - 0.32 * (1.0 - smoothstep(rad * 0.05, rad * 0.42, length(q - ctr))));
     }
   }
   return a * ao;
@@ -274,7 +275,8 @@ vec3 sfSandTex(vec2 sp, float bedY) {
     lee = smoothstep(0.15, 0.75, dot(radial, travel)) * (1.0 - smoothstep(uRipFace, uRipBank, r));
     // A full bend closes every crest into a circle around the island, lee side
     // included. Keep a partial wrap; the lee stays with the open-sea direction.
-    dir = normalize(mix(travel, -radial, clamp(turn, 0.0, 0.45) * (1.0 - lee)));
+    // A stronger bend closed the crests into bullseyes around the bank and the mounds.
+    dir = normalize(mix(travel, -radial, clamp(turn, 0.0, 0.12) * (1.0 - lee)));
   }
   if (uRipDbg > 0.5) {
     float ang = atan(dir.y, dir.x);
@@ -321,10 +323,10 @@ vec3 sfSandTex(vec2 sp, float bedY) {
     eta += asym * 0.35 * sin(12.5663706 * ph);
     vec2 puv = sp + vd.xz * eta * amp * 4.0;
     grain = sfNoise(puv * gScale);
-    float wet = smoothstep(0.35, -0.08, bedY);
+    float wet = smoothstep(0.7, -0.9, bedY);
     vec3 dryC = vec3(0.84, 0.80, 0.72);
-    // Wet sand is the same sand, a little darker and cooler, not a charcoal band.
-    vec3 carbonate = mix(dryC, dryC * vec3(0.90, 0.93, 0.96), wet * 0.45);
+    // Dry sand, then a wide damp band, then the sand under clear water. No hard moat edge.
+    vec3 carbonate = mix(dryC, dryC * vec3(0.90, 0.92, 0.91), wet * 0.28);
     col = carbonate * (0.88 + 0.24 * (grain - 0.5));
     col += vec3(wet * 0.05 * pow(clamp(vd.y, 0.0, 1.0), 6.0));
     float slope = amp * 6.2831853 / max(lam, 0.05) * cos(6.2831853 * ph);
@@ -402,27 +404,23 @@ uniform float uSeaL;
 uniform vec2 uCaustO;
 uniform float uCaustTile;
 uniform float uBisect;
+${shadowGlsl()}
 float shadowVis(vec3 w) {
-  if (uCausDay < 0.0 || uBisect > 2.5) return 1.0;
-  vec4 lp = uShVP * vec4(w, 1.0);
-  vec3 p = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
-  if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0) return 1.0;
-  float caster = lightSh(p.xy);
-  float blocked = p.z > caster + 0.012 ? 1.0 : 0.0;
-  float fill = 1.0 - exp(-max(0.0, -w.y) * 0.11);
-  return mix(1.0 - blocked, 1.0, clamp(fill, 0.0, 0.75));
+  if (uBisect > 2.5) return 1.0;
+  return shadowFactor(w);
 }
 float floorMul(vec3 bedP, vec2 slope) {
   if (uCausDay < 0.01 || (uBisect > 0.5 && uBisect < 1.5)) return 1.0;
   vec3 Rf = refract(-normalize(lightDir), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
   if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
   vec2 xz = bedP.xz - bedP.y * Rf.xz / Rf.y;
-  float col = max(0.12, -bedP.y);
+  float col = max(0.0, -bedP.y);
   float ratio = (uBisect > 1.5 && uBisect < 2.5) ? 1.0 : causNet(xz, col, slope);
-  float clar = max(uClarK, 0.35);
-  float near = exp(-col * clar / 2.6);
-  float deep = 0.08 * exp(-col * clar / 16.0);
-  float strength = clamp(near + deep, 0.0, 1.0) * max(uCausDay, 0.0);
+  // Off the dry beach and the swash. Strongest from about 0.3 m to 3 m, then it fades.
+  float ashore = smoothstep(0.08, 0.45, col);
+  float fine = exp(-max(col - 0.5, 0.0) * 0.28);
+  float far = exp(-col * max(uClarK, 0.35) / 12.0);
+  float strength = ashore * clamp(fine * 0.9 + far * 0.14, 0.0, 0.78) * max(uCausDay, 0.0);
   return mix(1.0, ratio, strength);
 }
 vec3 underLight(vec3 rgb, vec3 w) {
@@ -431,14 +429,13 @@ vec3 underLight(vec3 rgb, vec3 w) {
   // live map is redrawn. The cut stays the water colour. Light hits the floor.
   if (vKind < 1.5) return rgb;
   float sh = shadowVis(w);
-  float below = smoothstep(0.15, -0.2, w.y);
+  // The first metre stays sand. Darkening ramps with depth, and the sun shadow
+  // is a soft shape on top of that, not a black ring at the waterline.
+  float below = smoothstep(0.4, -1.4, w.y);
   float col0 = max(0.05, -w.y);
-  // A hard 0.46 darken in the first metre turned the wet sand into asphalt
-  // and smeared the coarse shadow map across the bank.
-  float dunk = mix(0.86, 0.58, smoothstep(0.6, 8.0, col0));
-  rgb *= mix(1.0, mix(dunk, 1.0, sh), below);
-  if (below < 0.01 || uCausDay < 0.01 || (uBisect > 0.5 && uBisect < 1.5)) return rgb;
-  return rgb * floorMul(w, vec2(0.0));
+  float dunk = mix(0.96, 0.55, smoothstep(1.5, 12.0, col0));
+  rgb *= mix(1.0, mix(dunk * mix(0.48, 1.0, sh), 1.0, sh), below);
+  return rgb;
 }
 vec4 seafloorShade() {
   vec3 fog = SB_FOG;
@@ -547,16 +544,15 @@ vec4 seafloorShade() {
   // depth once the bed is deep, which is the bright strip. Where the column
   // above has absorbed the light, keep this face opaque. Clearer shallow water
   // still sees through. The floor drawn from above is a different pass.
-  float vertT = clamp(dot(trKZ, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
-  wallA = mix(1.0, wallA, smoothstep(0.02, 0.45, vertT));
   float bedLine = -depth + bedRelief(vWorld.xz, depth);
 #ifdef ISLAND_ON
   if (uHasIsland > 0.5) bedLine = max(bedLine, islandBed(vWorld.xz));
 #endif
-  // The cut follows the bed, dunes included, and stays thick enough to
-  // read in a wide frame. The pattern is in the wall plane.
-  float cut = max(8.0, min(0.28 * depth, 14.0));
-  bool inSlice = vWorld.y < bedLine + cut;
+  // The drawn cut is 38% of the real water column (the vertex shader). The
+  // opaque sand is only the bottom of that shorter face. No ripple, no caustic.
+  float yVis = mix(0.0, bedLine, 0.38);
+  float span = max(vSurfY - yVis, 0.4);
+  bool inSlice = vWorld.y < yVis + 0.22 * span;
   if (inSlice) {
     wallA = 1.0;
     // Sand in the wall plane. The horizontal coordinate is the undisplaced
@@ -569,21 +565,21 @@ vec4 seafloorShade() {
     float g = n1 * 0.5 + n2 * 0.32 + n3 * 0.18;
     vec3 sand = vec3(0.76, 0.70, 0.60) * (0.72 + 0.55 * (g - 0.5));
     sand = mix(sand, sand * vec3(0.92, 0.90, 0.86), 0.35 * sfNoise(vec2(face.y * 0.55, 2.0)));
-    float bury = clamp((bedLine + cut - vWorld.y) / max(cut, 1.0), 0.0, 1.0);
+    float bury = clamp((yVis + 0.22 * span - vWorld.y) / max(0.22 * span, 0.3), 0.0, 1.0);
     vec3 linS = sand * mix(0.94, 0.62, bury);
     outc = sfCap(pow(max(linS, 0.0), vec3(1.0 / 2.2)));
   } else {
-    vec3 c3 = body3 * trKZ;
-    vec3 lin3 = mix(c3, vec3(0.36, 0.70, 0.68), 0.6 * fr) * PHYS_EXPO;
-    lin3 = lin3 / (1.0 + 0.35 * lin3);
+    // Column colour from the surface down, and the floor shows through it.
+    // The alpha follows the depth under the surface, not the long sideways
+    // path, which had turned the whole cut opaque.
+    float zCol = clamp(vSurfY - vWorld.y, 0.0, 16.0);
+    vec3 lin3 = mix(vec3(0.28, 0.66, 0.70), vec3(0.012, 0.045, 0.13), smoothstep(0.4, 12.0, zCol));
+    lin3 = mix(lin3, vec3(0.55, 0.72, 0.74), fr * 0.35);
     outc = pow(max(lin3, 0.0), vec3(1.0 / 2.2));
+    wallA = clamp(1.0 - exp(-zCol * 0.085) * 0.84, 0.16, 0.92);
   }
-  // A thin cool edge on the vertical corner, closer to the instrument hairline
-  // than a bright smear of the water colour. The water colour itself is unchanged.
-  // The floor behind this face is lit by the caustic map. Where the wall is
-  // transparent those lights read as vertical bars. The cut is the water
-  // colour, or the sand, and nothing shows through it.
-  wallA = 1.0;
+  // See-through above the sand. The floor behind this face is drawn without
+  // caustics, so a transparent wall does not turn them into vertical bars.
   float ce = max(abs(pW.x), abs(pW.y)) - min(abs(pW.x), abs(pW.y));
   float edgeW = max(length(vec2(dFdx(ce), dFdy(ce))), 1e-4);
   float corner = 1.0 - smoothstep(0.15 * edgeW, 0.7 * edgeW, ce);
@@ -679,6 +675,11 @@ const PHYS_SEA = String.raw`
     }
 #endif
     vec3 Rinf = 0.33 * bb / (1.15 * aW + bb);         // deep-water irradiance reflectance
+    // Ankle-deep water stays clear over the sand. Past the drop-off the
+    // body shifts from turquoise toward deep blue. Clarity still drives Kd.
+    float veil = smoothstep(0.2, 1.7, H);
+    float plunge = smoothstep(6.0, 22.0, H);
+    vec3 Rcol = mix(Rinf, Rinf * vec3(0.38, 0.55, 0.95), plunge);
     vec3 Rw;
     // v30.5 see-through: the view ray refracted at the wave normal (Snell, n = 1.33) is traced to the
     // seabed; the bed, rocks and corals under it come from the scene pass (bare albedo + rock height).
@@ -701,14 +702,20 @@ const PHYS_SEA = String.raw`
         float hr = sc.a * 4.0;
         float down = max(H - hr, 0.0), path = tb * (down / max(H, 1e-3));
         vec3 T = exp(-Kd * (down + path));
-        Rw = Rinf * (1.0 - T) + alb * T * floorMul(vWorld + dr * tb, n.xz);
+        T = mix(vec3(1.0), T, veil);
+        float shF = shadowVis(vWorld + dr * tb);
+        Rw = Rcol * (1.0 - T) + alb * T * floorMul(vWorld + dr * tb, n.xz) * mix(0.42, 1.0, shF);
       } else {
         vec3 T = exp(-2.0 * Kd * H);
-        Rw = Rinf * (1.0 - T) + SAND_ALBEDO * T * floorMul(vWorld + dr * tb, n.xz);
+        T = mix(vec3(1.0), T, veil);
+        float shF = shadowVis(vWorld + dr * tb);
+        Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorMul(vWorld + dr * tb, n.xz) * mix(0.42, 1.0, shF);
       }
     } else {
       vec3 T = exp(-2.0 * Kd * H);
-      Rw = Rinf * (1.0 - T) + SAND_ALBEDO * T * floorMul(vWorld + dr * tb, n.xz);
+      T = mix(vec3(1.0), T, veil);
+      float shF = shadowVis(vWorld + dr * tb);
+      Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorMul(vWorld + dr * tb, n.xz) * mix(0.42, 1.0, shF);
     }
     // v30.6 aeration: bubbles are bright, non-absorbing scatterers; in a shallow layer (za ~ 2 m) they
     // raise the backscatter, so light comes back up after a short path: red still absorbed, green-blue
@@ -746,6 +753,8 @@ const PHYS_SEA = String.raw`
     // v30.6 top-down relief: (a) upwelling depends on how the facet faces the sun (more light enters
     // and returns on sun-facing faces), (b) wave-face subsurface glow on raised crests, strongest
     // looking toward the sun, (c) troughs darkened (less light reaches them, the next wave occludes).
+    // A soft dim where the boat, buoy or reef blocks the sun. Foam is added later.
+    body *= mix(0.72, 1.0, shadowVis(vec3(vWorld.x, min(vWorld.y, -0.05), vWorld.z)));
     float sunFace = clamp(dot(n, L) / max(L.y, 0.25), 0.4, 1.8);
     body *= mix(1.0, sunFace, 0.65 * (1.0 - 0.8 * lowSun));
     float crestH = max(vWorld.y, 0.0), troughH = max(-vWorld.y, 0.0);
@@ -1746,14 +1755,16 @@ export function seaFragmentSources(derivatives, island) {
     vec2 rest = vSea.xy;
     float bedS = islandBed(rest);
     float cap = max(uR2, 0.15);
-    float inland = smoothstep(cap - 0.04, cap + 0.06, bedS);
+    float inland = smoothstep(cap - 0.35, cap + 0.4, bedS);
     float film = max(vCoast.a, 0.0);
     // Only the beach face. Thin water on the shelf is the sea, not a white strand.
-    float onBeach = smoothstep(-0.4, -0.08, bedS) * (1.0 - inland);
-    // The bore is the thin leading edge. Thicker film behind it is a wet sheen.
-    float bore = smoothstep(0.003, 0.012, film) * (1.0 - smoothstep(0.016, 0.04, film));
-    bore *= onBeach;
-    float sheen = smoothstep(0.02, 0.07, film) * onBeach;
+    float onBeach = smoothstep(-0.6, -0.15, bedS) * (1.0 - inland);
+    // Broken foam along the swash, not a hard white cut. The patches move with the film.
+    float boreBand = smoothstep(0.002, 0.025, film) * (1.0 - smoothstep(0.06, 0.2, film));
+    float brk = sfNoise(rest * 0.45 + vec2(foamT * 0.22, foamT * 0.05));
+    float brk2 = sfNoise(rest * 1.35 - vec2(foamT * 0.08, foamT * 0.16));
+    float bore = boreBand * smoothstep(0.52, 0.82, brk * 0.45 + brk2 * 0.75) * onBeach;
+    float sheen = smoothstep(0.0, 0.14, film) * (1.0 - smoothstep(0.22, 0.6, film)) * onBeach;
     float dry = smoothstep(-0.05, 0.12, bedS) * inland;
     if (dry > 0.001 || bore > 0.002 || sheen > 0.002) {
       vec3 sand = sfSandDetail(rest);
@@ -1762,11 +1773,11 @@ export function seaFragmentSources(derivatives, island) {
       float bz = islandBed(rest + vec2(0.0, eN)) - islandBed(rest - vec2(0.0, eN));
       vec3 nBed = normalize(vec3(-bx, 2.0 * eN, -bz));
       float ndl = clamp(dot(nBed, normalize(lightDir)), 0.0, 1.0);
-      float shade = 0.82 + 0.28 * ndl;
+      float shade = 0.94 + 0.1 * ndl;
       shade *= mix(0.96, 1.0, clamp(vCoast.b, 0.0, 1.0));
       sand *= shade;
-      vec3 shore = mix(sand, sand * vec3(0.72, 0.8, 0.82), clamp(sheen, 0.0, 0.7));
-      shore = mix(shore, vec3(0.94, 0.97, 0.98), clamp(bore, 0.0, 0.85));
+      vec3 shore = mix(sand, sand * vec3(0.90, 0.92, 0.92), clamp(sheen, 0.0, 0.28));
+      shore = mix(shore, vec3(0.93, 0.96, 0.97), clamp(bore, 0.0, 0.75));
       float cover = max(dry, max(sheen, bore));
       color = mix(color, shore, clamp(cover, 0.0, 1.0));
     }
@@ -2069,6 +2080,9 @@ void main() {
   // (x, height, z). A vertex above still water is pulled back under it: a tip
   // at y > 0 is drawn at full colour on top of the sea (the floating reef).
   float y = min(fy + pos.y * h + 0.02, -0.04);
+  // Same visual compression as the drawn floor, so a deep head is not left
+  // hanging under the shortened cut. Shallow heads stay on the real bank.
+  if (y < -4.0) y = mix(0.0, y, 0.38);
   vW = vec3(inst0.x + l.x, y, inst0.y + l.y);
   vN = normalize(nl); vCol = inst2.yzw * inst1.y; vY = pos.y; vKind = inst1.x;
   gl_Position = viewProj * vec4(vW, 1.0);
@@ -2086,6 +2100,7 @@ uniform float uCausDeep;
 uniform float uSeaL;
 uniform vec2 uCaustO;
 uniform float uCaustTile;
+${shadowGlsl()}
 uniform float raw; uniform float depth; uniform float uClarK;
 const vec3 SF_KD = ${v3(SEAFLOOR.kd)};
 const float SF_GAIN = ${Number(SEAFLOOR.gain).toFixed(6)};
@@ -2109,15 +2124,7 @@ void main() {
   float z = max(-vW.y, 0.0) * uClarK; // v30.24: the clarity's equivalent depth
   vec2 uA = vec2((clamp(z / ${SEABED_LUT.dz}, 0.0, ${SEABED_LUT.n - 1}.0) + 0.5) / ${SEABED_LUT.n}.0, 0.5 / 3.0);
   {
-    vec4 lp = uShVP * vec4(vW, 1.0);
-    vec3 sp = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
-    float sh = 1.0;
-    if (sp.x > 0.0 && sp.x < 1.0 && sp.y > 0.0 && sp.y < 1.0) {
-      float caster = lightSh(sp.xy);
-      float blocked = sp.z > caster + 0.012 ? 1.0 : 0.0;
-      float fill = 1.0 - exp(-max(0.0, -vW.y) * 0.11);
-      sh = mix(1.0 - blocked, 1.0, clamp(fill, 0.0, 0.75));
-    }
+    float sh = shadowFactor(vW);
     float col = max(0.05, -vW.y);
     vec3 Rf = refract(-normalize(uSun), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
     if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
