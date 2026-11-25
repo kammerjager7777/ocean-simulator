@@ -766,13 +766,12 @@ const PHYS_SEA = String.raw`
     // raise the backscatter, so light comes back up after a short path: red still absorbed, green-blue
     // kept -> lighter turquoise, through the same Beer-Lambert. Mottled at metre scale.
     {
-      // Underwater bubbles, separate from the white surface foam drawn below.
-      // K.w is the stored plume: it tracks break intensity, then decays. The tint
-      // is a lift of this water's own backscatter, scaled by that amount, so a
-      // weak crash stays a small lightening and a strong one lifts further.
-      // No noise gate, no foam-occupancy paint, no extra lip term (that term
-      // flattened every real lip toward the same colour).
-      float aer = clamp(K.w, 0.0, 1.0) * uAirOn;
+      // Underwater bubbles under the surface foam. v32: there is no separate 15-30 s air
+      // store any more (K.w now holds the fold gate). The bubbles are the foam's own
+      // footprint: the residual and fresh coverage (already blurred by the 30 Hz sim), so
+      // the tint dies with the foam and never lingers over empty sea. The lift is of this
+      // water's own backscatter, so a weak crash stays a small lightening.
+      float aer = clamp(0.7 * K.y + 0.3 * K.x, 0.0, 1.0) * uAirOn;
       vec3 bbA = bb + aer * vec3(0.02, 0.16, 0.13) * (0.35 + 0.65 * aer);
       vec3 RinfA = 0.33 * bbA / (1.15 * aW + bbA);
       Rw = mix(Rw, RinfA, aer * 0.75 * (1.0 - exp(-2.0 * Kd * 2.0)));
@@ -861,8 +860,7 @@ const PHYS_SEA = String.raw`
     // FOAM_FLOW_BEGIN
     // v31.1: the lace used to scroll on a prescribed eddy (not the simulated orbital
     // motion). It is world-locked now, so a patch does not swim under a fixed camera.
-    float airF = clamp(K.w / jv, 0.0, 1.0);
-    vec2 qf = qd + 0.0 * airF, qf2 = qd;
+    vec2 qf = qd, qf2 = qd;
     float flowW = 1.0;
     // FOAM_FLOW_END
     // stretched along the flow as the foam ages (accumulated strain, capped)

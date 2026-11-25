@@ -60,7 +60,9 @@ float foamNear(vec2 p) {
   float sp = fftL / float(physN);
   ivec2 c = ivec2(floor((p + 0.5 * fftL) / sp + 0.5));
   float m = 0.0;
-  for (int j = -1; j <= 1; j += 1) for (int i = -1; i <= 1; i += 1) m = max(m, max(fpG(c + 3 * ivec2(i, j)).z, fpG(c + 3 * ivec2(i, j)).w));
+  // (.z: the break flag field's 'recent', or the v32 coverage's birth channel when physK is bound
+  // here; .w is not read, it is the fold gate in the coverage texture)
+  for (int j = -1; j <= 1; j += 1) for (int i = -1; i <= 1; i += 1) m = max(m, fpG(c + 3 * ivec2(i, j)).z);
   return m;
 }
 void foamPix(vec2 p, out vec4 F, out vec4 G) {
