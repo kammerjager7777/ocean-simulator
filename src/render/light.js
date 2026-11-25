@@ -77,11 +77,31 @@ float causNet(vec2 xz, float depthM, vec2 slope) {
 export function shadowGlsl() {
   const { cau, sh } = LIGHT_ATLAS;
   return `
-float shadowDecode(vec2 uv) {
-  vec2 f = clamp(uv, vec2(0.0), vec2(0.999));
-  ivec2 ip = ivec2(f * ${sh}.0);
+// Depth of one shadow texel. Clamped inside the shadow block, so a tap at the
+// edge cannot read the caustic rows above it.
+float shadowDepthAt(ivec2 ip) {
+  ip = clamp(ip, ivec2(0), ivec2(${sh - 1}));
   vec3 e = texelFetch(uLight, ivec2(ip.x, ${cau} + ip.y), 0).rgb;
   return dot(e, vec3(1.0, 0.0039215686, 0.0000153787));
+}
+// Percentage-closer, by hand. The atlas is RGB-packed depth, so linear
+// filtering cannot compare. Each of the four texels is a smooth 0..1 test (a
+// thin ramp past the bias, not a hard step), then the four are blended with
+// hermite weights. One unit of depth is the whole light range (about 1 km), so
+// the bias is ~0.2 m and the ramp ~0.4 m: a hull 2-3 m over the sand is fully
+// blocked, a face is not shadowed by its own texel.
+float shadowBilin(vec2 uv, float z) {
+  vec2 g = uv * ${sh}.0 - 0.5;
+  vec2 f = fract(g);
+  f = f * f * (3.0 - 2.0 * f);
+  ivec2 i0 = ivec2(floor(g));
+  const float bias = 0.0002;
+  const float soft = 0.0004;
+  float a = smoothstep(bias, bias + soft, z - shadowDepthAt(i0));
+  float b = smoothstep(bias, bias + soft, z - shadowDepthAt(i0 + ivec2(1, 0)));
+  float c = smoothstep(bias, bias + soft, z - shadowDepthAt(i0 + ivec2(0, 1)));
+  float d = smoothstep(bias, bias + soft, z - shadowDepthAt(i0 + ivec2(1, 1)));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 float shadowFactor(vec3 w) {
   if (uCausDay < 0.01) return 1.0;
@@ -89,14 +109,15 @@ float shadowFactor(vec3 w) {
   vec3 p = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
   if (p.x < 0.02 || p.x > 0.98 || p.y < 0.02 || p.y > 0.98) return 1.0;
   float depthM = max(0.0, -w.y);
-  float rad = (1.15 + depthM * 0.05) / ${sh}.0;
-  float bias = 0.00035;
-  float acc = 0.0;
-  acc += p.z > shadowDecode(p.xy + vec2(-rad, -0.35 * rad)) + bias ? 1.0 : 0.0;
-  acc += p.z > shadowDecode(p.xy + vec2(rad, -0.4 * rad)) + bias ? 1.0 : 0.0;
-  acc += p.z > shadowDecode(p.xy + vec2(-0.4 * rad, rad)) + bias ? 1.0 : 0.0;
-  acc += p.z > shadowDecode(p.xy + vec2(0.55 * rad, 0.65 * rad)) + bias ? 1.0 : 0.0;
-  float blocked = acc * 0.25;
+  // Four filtered taps on a rotated grid about half a texel out. The hull is
+  // only ~4 texels wide (0.7 m each), so a wider disc pulls lit sand into the
+  // middle of the shadow. Deeper sand gets a slightly wider penumbra.
+  float rad = (0.5 + min(depthM, 10.0) * 0.03) / ${sh}.0;
+  float blocked = 0.25 * (
+      shadowBilin(p.xy + vec2(-0.8, -0.3) * rad, p.z)
+    + shadowBilin(p.xy + vec2(0.3, -0.8) * rad, p.z)
+    + shadowBilin(p.xy + vec2(0.8, 0.3) * rad, p.z)
+    + shadowBilin(p.xy + vec2(-0.3, 0.8) * rad, p.z));
   float fill = 1.0 - exp(-depthM * 0.08);
   return mix(1.0 - blocked, 1.0, clamp(fill, 0.0, 0.6));
 }
@@ -111,10 +132,13 @@ function lookAt(eye, at, up) {
   const z = norm(sub(eye, at));
   const x = norm(cross(up, z));
   const y = cross(z, x);
+  // Column-major: the rows of the rotation are x, y, z. Written as columns,
+  // the rotation was transposed, so the map looked along the wrong axis and
+  // the boat's shadow never fell under the boat.
   return new Float32Array([
-    x[0], x[1], x[2], 0,
-    y[0], y[1], y[2], 0,
-    z[0], z[1], z[2], 0,
+    x[0], y[0], z[0], 0,
+    x[1], y[1], z[1], 0,
+    x[2], y[2], z[2], 0,
     -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
   ]);
 }

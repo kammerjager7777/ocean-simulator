@@ -311,7 +311,9 @@ const ISLAND_VERT_MAIN = FFT_ISLAND ? `
     vWorld = vec3(xz.x, y, xz.y);
     vEta = y;
     vCoast = vec4(yBed, wI, shad, film);
-    float nK = yBed >= -0.05 ? 1.0 - join : 0.0;
+    // Smooth onto the bed normal through the waterline. A hard yBed test
+    // switched the normal per vertex and drew the mesh along the join.
+    float nK = smoothstep(-0.4, -0.02, yBed) * (1.0 - join);
     if (nK > 0.001) {
       float eN = 1.6;
       float bx = islandBed(xz + vec2(eN, 0.0)) - islandBed(xz - vec2(eN, 0.0));
