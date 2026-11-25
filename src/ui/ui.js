@@ -1,6 +1,7 @@
 // v29.2 glass UI (GAD ui-style-spec v1). Drives the panel, wind dial, stats strip, fade and
 // H/S keys. It only reads the sea (window.__oceanState) and drives the existing v29 inputs
 // (#dir, #spd, #chop, #size, #gust, #depth, #flags, #pause) through their own events.
+import { wavenumber } from "../physics/spectrum.js";
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
 const body = document.body;
@@ -150,11 +151,7 @@ const g = 9.81;
 // v30.21: SEA STATE shows Beaufort force (WMO, on-sea spec §4); the same table as the Beaufort dial
 export const BEAUFORT_LO = [0, 0.5, 1.6, 3.4, 5.5, 8.0, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7];
 export function beaufort(u) { let b = 0; while (b + 1 < BEAUFORT_LO.length && u >= BEAUFORT_LO[b + 1] - 0.05) b++; return b; }
-function wavelength(T, h) { // finite-depth dispersion, fixed-point on k
-  const w = (2 * Math.PI) / T; let k = (w * w) / g;
-  for (let i = 0; i < 30; i++) k = (w * w) / (g * Math.tanh(Math.max(1e-6, k * h)));
-  return (2 * Math.PI) / k;
-}
+function wavelength(T, h) { return (2 * Math.PI) / wavenumber((2 * Math.PI) / T, h, g); } // finite-depth dispersion
 function tick(now) {
   requestAnimationFrame(tick);
   if (prevT !== null) { ft[fi] = now - prevT; fi = (fi + 1) % N; fn = Math.min(N, fn + 1); }

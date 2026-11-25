@@ -5,6 +5,7 @@ import { timed } from "../physics/passTimer.js";
 import { createBoatView, createBuoyView } from "./boatView.js";
 import { BED_GLSL, bedRelief, setBedRippleDir } from "./seabed.js";
 import { RIPPLE_GLSL } from "../physics/ripples.js";
+import { WAVENUMBER_GLSL } from "../physics/spectrum.js";
 import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js";
 import { createLightMaps, lightSampleGlsl, shadowGlsl } from "./light.js";
 import { assertFragmentSamplers } from "./samplerBudget.js";
@@ -221,7 +222,7 @@ const float SF_RIPPLE_LEN = ${SEAFLOOR.rippleLen.toFixed(4)};
 const float SF_RIPPLE_AMP = ${SEAFLOOR.rippleAmp.toFixed(4)};
 const float SF_SLICE = ${SEAFLOOR.sliceBand.toFixed(4)};
 const float SF_UPWELL = ${UPWELL.toFixed(4)};
-vec3 sfEncode(vec3 c) { c = clamp(c, 0.0, 1.0); return mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+${WAVENUMBER_GLSL}vec3 sfEncode(vec3 c) { c = clamp(c, 0.0, 1.0); return mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 float sfHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float sfNoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
   return mix(mix(sfHash(i), sfHash(i + vec2(1, 0)), f.x), mix(sfHash(i + vec2(0, 1)), sfHash(i + vec2(1, 1)), f.x), f.y); }
@@ -288,8 +289,7 @@ vec3 sfSandTex(vec2 sp, float bedY) {
     return vec3(0.5 + 0.5 * cos(ang), 0.5 + 0.5 * sin(ang), 0.25 + 0.5 * lee);
   }
   float omega = 6.2831853 / max(uTp, 1.0);
-  float k = omega * omega / 9.81;
-  for (int i = 0; i < 3; i++) k = omega * omega / (9.81 * tanh(max(k, 1e-3) * h));
+  float k = waveNumber(omega, h, 9.81);
   float L = 6.2831853 / max(k, 1e-3);
   float snh = max(sinh(k * h), 0.2);
   float d0 = uHsRip / snh;

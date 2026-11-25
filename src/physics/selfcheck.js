@@ -408,6 +408,17 @@ for (const sh of fc.shells) if (Math.abs(sh.ratio - 1) > 0.15) problems.push(`fi
 if (Math.abs(fc.total.ratio - 1) > 0.05) problems.push(`finer patch variance off its band spectrum (${fc.total.ratio.toFixed(3)})`);
 if (fc.dispersionErr > 1e-3) problems.push(`finer patch waves do not move by the dispersion relation (${fc.dispersionErr})`);
 if (fc.clampShare > 1e-4) problems.push(`finer patch slopes exceed the texture range (${fc.clampShare})`);
+// The dispersion solver itself, in the shallows where a fixed-point iteration stalls:
+// residual of g k tanh(kh) = ω², and k against a 400-step bisection (independent of Newton).
+const dispersionFixtures = [[0.6, 0.5], [0.6, 2], [0.6, 5], [0.8, 3], [1.0, 10], [0.6, 40], [1.0, 40], [2.0, 0.5], [3.0, 2]].map(([w, h]) => {
+  const k = wavenumber(w, h, GRAVITY);
+  let lo = 0, hi = (10 * w * w) / GRAVITY + 100 / h;
+  for (let i = 0; i < 400; i += 1) { const m = 0.5 * (lo + hi); if (GRAVITY * m * Math.tanh(m * h) < w * w) lo = m; else hi = m; }
+  const ref = 0.5 * (lo + hi);
+  return { w, h, k, residual: Math.abs(GRAVITY * k * Math.tanh(k * h) - w * w) / (w * w), err: Math.abs(k - ref) / ref };
+});
+for (const d of dispersionFixtures) if (!(d.residual < 1e-10) || !(d.err < 1e-10)) problems.push(`dispersion solver off at omega ${d.w}, depth ${d.h} m (residual ${d.residual}, k error ${d.err})`);
+console.log("dispersion solver: " + dispersionFixtures.map((d) => `ω ${d.w} h ${d.h} m: k ${d.k.toFixed(5)}, residual ${d.residual.toExponential(1)}, k error ${d.err.toExponential(1)}`).join("; "));
 // Handover between the wind-sea band (below) and the chop band (above): the energy
 // density each band uses at the shared frequency, and so the slope density k^2 S there,
 // must agree; a step would be a visible change in roughness at that wavelength. Checked

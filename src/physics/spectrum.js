@@ -14,16 +14,43 @@ export function piersonMoskowitz(omega, omegaPeak, gravity) {
   return ((alpha * gravity * gravity) / w ** 5) * Math.exp(-beta * ratio ** 4);
 }
 
-// Finite-depth dispersion: ω² = g k tanh(k h). Iterate k from the deep-water guess.
+// Finite-depth dispersion: ω² = g k tanh(k h), solved by Newton on f(k) = g k tanh(kh) − ω²,
+// f'(k) = g (tanh(kh) + kh sech²(kh)), sech² = 1 − tanh². Eckart's seed k∞ / √tanh(k∞ h),
+// k∞ = ω²/g, then three steps reach float precision at any depth. WAVENUMBER_GLSL below
+// is the same method for the shaders; keep the two in step.
 export function wavenumber(omega, depth, gravity) {
-  const h = Math.max(depth, 0.5);
-  let k = (omega * omega) / gravity;
-  for (let i = 0; i < 6; i += 1) {
-    const tanhKh = Math.tanh(k * h);
-    k = (omega * omega) / (gravity * Math.max(tanhKh, 1e-4));
+  if (!(omega > 0) || !(gravity > 0)) return 0;
+  const w2 = omega * omega;
+  const kInf = w2 / gravity;
+  if (!(depth > 0)) return kInf;
+  let k = kInf / Math.sqrt(Math.max(Math.tanh(kInf * depth), 1e-30));
+  for (let i = 0; i < 3; i += 1) {
+    const kh = k * depth;
+    const t = Math.tanh(kh);
+    const df = Math.max(gravity * (t + kh * (1 - t * t)), 1e-30);
+    k = Math.max(k - (gravity * k * t - w2) / df, 0);
   }
   return k;
 }
+// The same Newton solve as wavenumber() above, in GLSL. Float only and no extensions, so
+// WebGL1 shaders can include it too; tanh is written with exp because GLSL ES 1.00 has none.
+export const WAVENUMBER_GLSL = `
+float wnTanh(float x) { return 1.0 - 2.0 / (exp(2.0 * min(x, 40.0)) + 1.0); }
+float waveNumber(float omega, float h, float gravity) {
+  if (omega <= 0.0 || gravity <= 0.0) return 0.0;
+  float w2 = omega * omega;
+  float kInf = w2 / gravity;
+  if (h <= 0.0) return kInf;
+  float k = kInf / sqrt(max(wnTanh(kInf * h), 1e-30));
+  for (int i = 0; i < 3; i++) {
+    float kh = k * h;
+    float t = wnTanh(kh);
+    float df = max(gravity * (t + kh * (1.0 - t * t)), 1e-30);
+    k = max(k - (gravity * k * t - w2) / df, 0.0);
+  }
+  return k;
+}
+`;
 
 // Elfouhaily et al. 1997 (J. Geophys. Res. 102, 15781), the unified directional spectrum
 // fitted to measured long and short wind waves, including Cox and Munk's slopes. Used
