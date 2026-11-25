@@ -36,9 +36,12 @@ const FQ = typeof location !== "undefined" ? new URLSearchParams(location.search
 const EN_CREF = Number(FQ.get("ecr") || 6.0).toFixed(3); // v30.19 reference crest speed (m/s) for the break-energy scale
 const EN_K = Number(FQ.get("ek") || 4.0).toFixed(3);    // v30.19 coverage calibration (Monahan & O'Muircheartaigh 1980)
 // v32 foam sim (COVER_FS): fixed 30 Hz step; half-lives in seconds (?fhf= fresh, ?fhr0= / ?fhr1= residual
-// at 8 / 20 m/s, ?fhb= birth); eddy diffusivity of the blur (?fdiff=, m^2/s); seed mip (?flod=); cap (?fmax=).
+// at 8 / 20 m/s, ?fhb= birth); eddy diffusivity of the blur at >= 12 m/s (?fdiff=, m^2/s; it scales with
+// U below 12, down to x0.6, since eddy diffusivity goes as u*); seed mip (?flod=); cap (?fmax=).
+// Residual was 4 s at 8 m/s rising to 8 s at 20, which piled trails up to ~17% of the sea at 20 m/s
+// (Monahan ~10%). It now falls with the wind (4 s -> 3 s): a strong breeze's trails soften and die.
 const COVER_HZ = Number(FQ.get("fhz") || 30);
-const FOAM_HL = { fresh: Number(FQ.get("fhf") || 1.0), r0: Number(FQ.get("fhr0") || 4.0), r1: Number(FQ.get("fhr1") || 8.0), birth: Number(FQ.get("fhb") || 0.3) };
+const FOAM_HL = { fresh: Number(FQ.get("fhf") || 1.0), r0: Number(FQ.get("fhr0") || 4.0), r1: Number(FQ.get("fhr1") || 3.0), birth: Number(FQ.get("fhb") || 0.3) };
 const FOAM_DIFF = Number(FQ.get("fdiff") || 0.2);
 const FOAM_LOD = Number(FQ.get("flod") ?? 0.5);
 const FOAM_MAXF = Number(FQ.get("fmax") || 0.9);
@@ -49,6 +52,16 @@ const CHOP_Q01 = Number(FQ.get("fq01") ?? 0.075), CHOP_Q001 = Number(FQ.get("fq0
 // fold share for it: CDF(lT) = W (1 - a) / (1 - a W), a = e^-0.15.
 export function monahanW(U) { return U < 4 ? 0 : 3.84e-6 * Math.pow(U, 3.41); }
 export function foldShare(W) { const a = Math.exp(-0.15); return W * (1 - a) / (1 - a * W); }
+// The sim keeps less than the fold share in a light breeze (small breaks, the blur eats the specks)
+// and more in a strong one, so the trim used to start at 1 and spend the first ~10 s ramping (8 m/s
+// measured 0.1% vs 0.45% at 10.5 s). The trim now multiplies a wind prior, log-linear in U through
+// x1 at 12 m/s, ?fpri8= at 8 (2.5) and ?fpri20= at 20 (0.8), clamped to 8..20 m/s (?fprior=0 off).
+const FOAM_PRIOR = { lo: Number(FQ.get("fpri8") || 2.5), hi: Number(FQ.get("fpri20") || 0.8) };
+export function trimPrior(U) {
+  if (FQ.get("fprior") === "0" || !(U > 0)) return 1;
+  const x = Math.log(Math.min(20, Math.max(8, U)) / 12);
+  return x < 0 ? Math.pow(FOAM_PRIOR.lo, x / Math.log(8 / 12)) : Math.pow(FOAM_PRIOR.hi, x / Math.log(20 / 12));
+}
 const FOAM_VIS = Number(FQ.get("foamvis") || 0.3); // v30.20: FOAM SEA counts cells at or above this foam strength
 const FOAM_JTH = Number(FQ.get("fjth") || 0.75); // Jacobian below this = surface folding at the tip
 // v30.22f whitecap coverage vs wind (Monahan-style: ~1% at 10 m/s, 3-5% at 15, 8-15% at 20-25). ?fcov=0 restores
@@ -748,8 +761,10 @@ void main() {
 }`;
 
 // v32 coverage stats (HUD FOAM SEA and the coverage trim): 16x16 blocks of the coverage grid ->
-// (active share: fresh >= 0.3, visible share: max(fresh, residual) >= FOAM_VIS_K).
-const FOAM_VIS_K = Number(FQ.get("fvis") || 0.25);
+// (active share: fresh >= 0.3, visible share: max(fresh, residual) >= FOAM_VIS_K). v32: the gate is
+// 0.4 (was 0.25): below it residual draws as barely-there lace and is not counted as cover, so the
+// number agrees with what is drawn.
+const FOAM_VIS_K = Number(FQ.get("fvis") || 0.4);
 const COVSTAT_FS = HEADER + `
 uniform sampler2D tK;
 uniform int uM;
@@ -2043,7 +2058,7 @@ export function createGpuSurface(gl, scenario, wind) {
       const Ur = Math.min(1, Math.max(0, (wind.speed - 8) / 12));
       const hlR = (FOAM_HL.r0 + (FOAM_HL.r1 - FOAM_HL.r0) * Ur) * Math.min(1, Math.max(0.5, depth / 4)); // bubbles hit the bed and degas sooner in very shallow water
       const dec = [Math.pow(0.5, cdt / FOAM_HL.fresh), Math.pow(0.5, cdt / hlR), Math.pow(0.5, cdt / FOAM_HL.birth)];
-      const blur = Math.min(1, 4 * FOAM_DIFF * cdt / (tx2 * tx2)); // binomial 3x3 adds 0.5 texel^2 per axis at weight 1
+      const blur = Math.min(1, 4 * FOAM_DIFF * Math.min(1, Math.max(0.6, wind.speed / 12)) * cdt / (tx2 * tx2)); // binomial 3x3 adds 0.5 texel^2 per axis at weight 1
       for (let k = 0; k < 2 && coverAcc >= cdt; k++) {
         coverAcc -= cdt;
         simTimeCover = (simTimeCover || 0) + cdt;
@@ -2124,8 +2139,9 @@ export function createGpuSurface(gl, scenario, wind) {
     // (negative lambda_min excluded) reaches W (1 - a) / (1 - a W), W = Monahan 3.84e-6 U^3.41
     // (8 m/s ~0.45%, 12 m/s ~1.8%, 20 m/s ~10.5%), solved about twice a second. (2) The seed is
     // gated to rising folds and the blur eats small specks, so the share the sim keeps is not
-    // exactly the fold share: a slow, bounded trim (x0.25..4, ~5 s, ?ftrim=0 off) scales the
-    // CDF target so the measured visible cover tracks W. HUD FOAM SEA is that measured cover.
+    // exactly the fold share: a wind prior (trimPrior) and a bounded trim on top of it (x0.25..4,
+    // ~3 s, ?ftrim=0 off) scale the CDF target so the measured visible cover tracks W. HUD FOAM SEA
+    // is that measured cover.
     if (lamFence && gl.clientWaitSync(lamFence, 0, 0) !== gl.TIMEOUT_EXPIRED) {
       const d = lamBuf; gl.bindBuffer(gl.PIXEL_PACK_BUFFER, lamPack); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, d); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       gl.deleteSync(lamFence); lamFence = null;
@@ -2160,7 +2176,7 @@ export function createGpuSurface(gl, scenario, wind) {
         cov.chopK = chopK; cov.lamNeg = neg / total;
       }
       const W = monahanW(wind.speed);
-      const p = Math.min(0.5, foldShare(W) * cov.trim);
+      const p = Math.min(0.5, foldShare(W) * trimPrior(wind.speed) * cov.trim);
       cov.foldTarget = p;
       if (W <= 0 || pos < 1) cov.lamT = -1;
       else {
@@ -2188,7 +2204,7 @@ export function createGpuSurface(gl, scenario, wind) {
       const W = monahanW(wind.speed);
       cov.target = W;
       const el = Math.min(1, Math.max(0, covT - covLastT)); covLastT = covT;
-      if (W > 0 && FQ.get("ftrim") !== "0") cov.trim *= Math.exp(Math.max(-1, Math.min(1, Math.log((W + 1e-4) / (cov.visible + 1e-4)))) * el / 5);
+      if (W > 0 && FQ.get("ftrim") !== "0") cov.trim *= Math.exp(Math.max(-1, Math.min(1, Math.log((W + 1e-4) / (cov.visible + 1e-4)))) * el / 3);
       cov.trim = Math.max(0.25, Math.min(4, cov.trim));
       globalThis.__foamCov = cov;
     }
