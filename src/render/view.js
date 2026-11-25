@@ -793,6 +793,17 @@ const PHYS_SEA = String.raw`
     float crestH = max(vWorld.y, 0.0), troughH = max(-vWorld.y, 0.0);
     body += WATER_E * vec3(0.004, 0.028, 0.026) * crestH * (0.4 + 0.6 * pow(max(dot(V, -L), 0.0), 4.0) + 0.4 * (1.0 - cosV0));
     body *= 1.0 - 0.38 * smoothstep(0.0, 1.6, troughH);
+    // v32 (A3, Sea of Thieves / Atlas): turquoise crest subsurface light on the same mask as the
+    // foam. Peak = height above still water, raised where the crest is squeezed (J < 1, the fold
+    // the foam is seeded on); strongest looking toward the sun (pow(V . -L, 4)), and boosted under
+    // the foam halo, so the turquoise sits under and around the white instead of beside it.
+    {
+      vec3 Lsn = normalize(L);
+      float peak = clamp(crestH / (crestH + 0.8), 0.0, 1.0) * mix(0.5, 1.0, smoothstep(0.95, 0.55, J));
+      float backL = pow(max(dot(V, -Lsn), 0.0), 4.0);
+      float sss = peak * (backL * (1.0 + 2.5 * halo) + 0.3 * halo);
+      body += WATER_E * vec3(0.003, 0.040, 0.034) * sss * (0.25 + 0.75 * clamp(Lsn.y, 0.0, 1.0)) * (1.0 - 0.6 * lowSun);
+    }
     // v31.8 crest transmission. The old term was a hard strip: steepness had to clear
     // smoothstep(0.18, 0.5) and height had to clear smoothstep(0.2, 1.2), so the colour
     // switched on along a nearly horizontal elevation contour and sat apart from the face.
@@ -804,7 +815,8 @@ const PHYS_SEA = String.raw`
       float slope = length(n.xz) / max(n.y, 0.12);
       float above = crestH / (crestH + 0.6);
       float geo = exp(-1.2 / max(slope, 0.05)) * above;
-      float sheet = geo + clamp(vThin, 0.0, 1.0) * (1.0 - geo);
+      // v32 (A3): the physics' thin-lip transmission and the foam halo are one crest mask here
+      float sheet = geo + max(clamp(vThin, 0.0, 1.0), 0.6 * halo * above) * (1.0 - geo);
       vec3 Ls = normalize(L);
       float sunEl = clamp(Ls.y, 0.0, 1.0);
       float intoSun = pow(max(dot(V, -Ls), 0.0), 2.0);

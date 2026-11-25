@@ -43,6 +43,8 @@ const FOAM_DIFF = Number(FQ.get("fdiff") || 0.2);
 const FOAM_LOD = Number(FQ.get("flod") ?? 0.5);
 const FOAM_MAXF = Number(FQ.get("fmax") || 0.9);
 const FOAM_EPS = Number(FQ.get("feps") ?? 0.002);
+// F2 targets for lambda_min's low tail: 1% of the surface at ~0.075 (close to a cusp), 0.1% >= 0.02
+const CHOP_Q01 = Number(FQ.get("fq01") ?? 0.075), CHOP_Q001 = Number(FQ.get("fq001") ?? 0.02);
 // Monahan & O'Muircheartaigh 1980 whitecap cover, and Tessendorf 2020 Algorithm 1's instantaneous
 // fold share for it: CDF(lT) = W (1 - a) / (1 - a W), a = e^-0.15.
 export function monahanW(U) { return U < 4 ? 0 : 3.84e-6 * Math.pow(U, 3.41); }
@@ -654,6 +656,9 @@ vec3 jacAt(vec2 uv) {
   return vec3(1.0 - uChop * r2.z, 1.0 - uChop * r2.w, -uChop * xz);
 }
 float lamMin(vec3 j) { return 0.5 * (j.x + j.y) - sqrt(0.25 * (j.x - j.y) * (j.x - j.y) + j.z * j.z); }
+// eigenvector of lambda_min (the horizontal direction the surface folds in), unnormalised:
+// the larger of its two equivalent forms; zero where the squeeze is isotropic
+vec2 foldVec(vec3 j, float l) { vec2 e1 = vec2(j.z, l - j.x), e2 = vec2(l - j.y, j.z); return dot(e1, e1) > dot(e2, e2) ? e1 : e2; }
 `;
 const COVER_FS = HEADER + LAM_GLSL + `
 uniform sampler2D tK;   // last step (RGBA16F, linear, repeat)
@@ -690,21 +695,24 @@ void main() {
   float lamPrev = texelFetch(tK, ivec2(gl_FragCoord.xy), 0).w; // this texel's own, not advected
   float inject = 0.0;
   if (uLamT > -0.5) {
-    // fold direction: eigenvector of lambda_min (larger of the two equivalent forms)
-    vec2 e1 = vec2(j0.z, lam - j0.x), e2 = vec2(lam - j0.y, j0.z);
-    vec2 e = dot(e1, e1) > dot(e2, e2) ? e1 : e2;
+    vec2 e = foldVec(j0, lam);
     e = dot(e, e) > 1e-10 ? normalize(e) : uTravel;
     e *= dot(e, uTravel) < 0.0 ? -1.0 : 1.0;    // forward = with the waves
     vec2 cr = vec2(-e.y, e.x);                  // along the crest
     // rising fold: only while the crest is still sharpening here (soft over one eps)
     float rising = smoothstep(lamPrev - 0.5 * uEps, lamPrev - 1.5 * uEps, lam);
     if (rising > 0.0) {
+      // F4: stretched along the crest (7 taps over ~+-1 m at 512 / 250 m) and taken half a texel
+      // behind, so the foam is born on the leading lip. A tap only joins when its own fold
+      // direction lines up with this one: the same crest, not a crossing fold next to it.
       float s = 0.0;
-      for (int i = -2; i <= 2; i++) {
-        // the seed found half a texel behind lands here: foam born on the leading lip
-        vec2 q = pc0 + (float(i) * cr - 0.5 * e) / rM;
-        float lq = lamMin(jacAt(UV(q)));
-        s = max(s, exp(-0.25 * float(i * i)) * smoothstep(uLamT, uLamT - 0.15, lq));
+      for (int i = -3; i <= 3; i++) {
+        vec2 q = pc0 + (0.75 * float(i) * cr - 0.5 * e) / rM;
+        vec3 jq = jacAt(UV(q));
+        float lq = lamMin(jq);
+        vec2 eq = foldVec(jq, lq);
+        float al = dot(eq, eq) > 1e-10 ? abs(dot(normalize(eq), e)) : 1.0;
+        s = max(s, exp(-0.12 * float(i * i)) * smoothstep(0.6, 0.9, al) * smoothstep(uLamT, uLamT - 0.15, lq));
       }
       inject = rising * s;
     }
@@ -1680,7 +1688,7 @@ export function createGpuSurface(gl, scenario, wind) {
   const lamPack = gl.createBuffer();
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, lamPack); gl.bufferData(gl.PIXEL_PACK_BUFFER, LAM_BINS * 16 * 16, gl.STREAM_READ); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
   const lamBuf = new Float32Array(LAM_BINS * 16 * 4);
-  let lamFence = null, lamT = -1e9, coverAcc = 0;
+  let lamFence = null, lamT = -1e9, coverAcc = 0, lamChopK = 1, lamChopBase = 0;
   const probeBufs = [new Float32Array(PROBE_W * 4), new Float32Array(PROBE_W * 4)]; let probeBi = 0; const covBuf = new Float32Array(1024); // v30.22g perf: reused readback arrays (no per-frame garbage)
   let probeFence = null; let probePts = null; let uiPts = new Float32Array(32); let uiSec = [0, 0, 0, 0]; let uiOn = false; const probeOut = { data: null, time: -1 }; let probeTime = 0;
   let current = 0; // tex.S[current] holds the latest foam state
@@ -1790,7 +1798,10 @@ export function createGpuSurface(gl, scenario, wind) {
   let ampScale = 1;
   // v29.1: shallow water cannot carry deep-water horizontal chop without folding: the choppiness
   // eases to 40% between 10 m and 4 m depth (unchanged at 10 m and deeper).
-  const chopFor = (d) => scenario.choppiness * Math.min(1, Math.max(0.4, d / 10));
+  // v32 (F2): chopK scales the user's choppiness so the crests come close to a cusp without
+  // folding through (see the lambda_min solve below). 1 in parity runs and with ?fchop=0.
+  let chopK = 1;
+  const chopFor = (d) => scenario.choppiness * Math.min(1, Math.max(0.4, d / 10)) * chopK;
   let lastDepth = 40;
   let last = null;
 
@@ -2120,6 +2131,34 @@ export function createGpuSurface(gl, scenario, wind) {
       gl.deleteSync(lamFence); lamFence = null;
       let pos = 0; const cnt = new Float64Array(LAM_BINS);
       for (let r = 0; r < 16; r++) { pos += d[r * LAM_BINS * 4 + 1]; for (let b2 = 0; b2 < LAM_BINS; b2++) cnt[b2] += d[(r * LAM_BINS + b2) * 4]; }
+      // F2 (Tessendorf choppiness, "steeper crests instead of crashing"): lambda_min is linear in
+      // the choppiness c (lambda = 1 - c mu, mu the squeeze's larger eigenvalue), so the quantiles
+      // read at c give the c that puts them anywhere. The 1% tail goes to CHOP_Q01 (~0.075, near
+      // a cusp) and the 0.1% tail must stay >= CHOP_Q001 (no self-intersection), within x0.75..1.35
+      // of the user's choppiness, eased over a few seconds. The breaking rules are untouched.
+      {
+        const total = 16 * 256 * 16, neg = Math.max(0, total - pos);
+        const quant = (q) => {
+          const want = q * total;
+          if (neg >= want) return null;
+          let pc2 = neg, pe2 = 0;
+          for (let b2 = 0; b2 < LAM_BINS; b2++) {
+            const c2 = neg + cnt[b2], e2 = (b2 + 1) * LAM_BIN;
+            if (c2 >= want) return pe2 + (e2 - pe2) * (want - pc2) / Math.max(c2 - pc2, 1e-9);
+            pc2 = c2; pe2 = e2;
+          }
+          return LAM_BINS * LAM_BIN;
+        };
+        const base = lamChopBase, c = base * lamChopK;
+        if (FQ.get("fchop") !== "0" && scenario.paritySpeed === undefined && wind.speed >= 4 && base > 1e-3) {
+          const q01 = quant(0.01), q001 = quant(0.001);
+          const cWant = q01 === null ? c * 0.9 : c * (1 - CHOP_Q01) / Math.max(1 - q01, 1e-3);
+          const cMax = q001 === null ? c * 0.9 : c * (1 - CHOP_Q001) / Math.max(1 - q001, 1e-3);
+          const kNew = Math.max(0.75, Math.min(1.35, Math.min(cWant, cMax) / base));
+          chopK += 0.25 * (kNew - chopK);
+        } else chopK = 1;
+        cov.chopK = chopK; cov.lamNeg = neg / total;
+      }
       const W = monahanW(wind.speed);
       const p = Math.min(0.5, foldShare(W) * cov.trim);
       cov.foldTarget = p;
@@ -2136,6 +2175,7 @@ export function createGpuSurface(gl, scenario, wind) {
       }
     }
     if (!lamFence && time - lamT >= 0.5) {
+      lamChopK = chopK; lamChopBase = chopFor(depth) / chopK; // the choppiness this readback is taken at
       run(programs.lamcdf, lamFb, LAM_BINS, { tR2: fft.R[2], tR3: fft.R[3] }, (u) => { gl.uniform1f(u.uChop, chopFor(depth)); gl.uniform1f(u.uLod, FOAM_LOD); }, 16);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, lamPack); gl.readPixels(0, 0, LAM_BINS, 16, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       lamFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); lamT = time;
