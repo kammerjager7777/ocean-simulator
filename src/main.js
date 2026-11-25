@@ -258,17 +258,18 @@ function frame(now) {
     const H0 = state.stockdonH0 > 0 ? state.stockdonH0 : 0.4;
     const Tp = state.windSeaTp > 0 ? state.windSeaTp : 5;
     if (state.gpu && state.gpu.A && !held && !pause.checked) {
-      // Advance the same simulation step as the sea, in CFL-stable pieces.
-      // At h ≈ 8 m, c ≈ 12 m/s and dx ≈ 0.89 m, a 0.03 s step is the limit.
-      // A 60 fps frame needs one; a long capture frame (dt capped at 0.05 s) needs two.
+      // Advance the same simulation step as the sea, in CFL-stable SSP-RK2 pieces (CFL 0.25).
+      // cMax is the swash solver's own: still depth below dHi (6 m) plus the 0.45 D crest cap
+      // and 3 m/s of flow, about 12.2 m/s. At dx ≈ 0.89 m a 0.018 s step is the limit, so a
+      // 60 fps frame needs one; a long capture frame (dt capped at 0.05 s) needs three.
       const seaDt = fixDt > 0 ? fixDt : Math.min(0.05, dt);
-      const cMax = Math.sqrt(9.81 * 8) + 3;
-      const dtCfl = 0.4 * islandGpu.dx / cMax;
+      const cMax = islandGpu.cMax;
+      const dtCfl = 0.25 * islandGpu.dx / cMax;
       const nCfl = Math.max(1, Math.ceil(seaDt / Math.max(dtCfl, 1e-4)));
       const asked = Number(params.get("swashsteps"));
       const nSub = Number.isFinite(asked) && asked > 0 ? Math.max(nCfl, Math.round(asked)) : nCfl;
       const sub = seaDt / nSub;
-      globalThis.__swashCfl = { seaDt, dtCfl, nSub, sub, dx: islandGpu.dx };
+      globalThis.__swashCfl = { seaDt, dtCfl, nSub, sub, dx: islandGpu.dx, cMax };
       const dir = state.fx ? state.fx.dir : Math.PI / 2;
       for (let s = 0; s < nSub; s += 1) islandGpu.step(sub, state.gpu.A, state.gpu.fft.L, Math.cos(dir), Math.sin(dir), state.fx ? state.fx.speed : 12, H0, Tp);
     }
@@ -293,7 +294,7 @@ function frame(now) {
       if (g && g.A && g.fft) {
         try {
           const m = islandGpu.measures(g.A, g.fft.L, g.fft.N, Math.cos(state.fx ? state.fx.dir : 0), Math.sin(state.fx ? state.fx.dir : 0));
-          globalThis.__shore = { runup: m.runup, inland: m.inland, wetMax: m.wetMax, hs: H0, t: simTime, dx: islandGpu.dx, n: islandGpu.nx, az: m.az, leeInlandM: m.leeInlandM, windwardInlandM: m.windwardInlandM };
+          globalThis.__shore = { runup: m.runup, r2Sim: m.r2Sim, r2Stockdon: m.r2, inland: m.inland, wetMax: m.wetMax, hs: H0, t: simTime, dx: islandGpu.dx, n: islandGpu.nx, az: m.az, leeInlandM: m.leeInlandM, windwardInlandM: m.windwardInlandM };
         } catch (err) { console.error(err); }
       }
     }

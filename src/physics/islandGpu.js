@@ -6,6 +6,7 @@
 
 import { GRAVITY } from "./gravity.js";
 import { ISLAND, islandById, sampleIsland, bakeShadow, useIslandSize, stockdonR2 } from "./island.js";
+import { WAVENUMBER_GLSL } from "./spectrum.js";
 
 const VERT = `#version 300 es
 void main() {
@@ -16,9 +17,12 @@ void main() {
 const FRAG = `#version 300 es
 precision highp float;
 precision highp int;
+${WAVENUMBER_GLSL}
 uniform sampler2D st;
+uniform sampler2D st0; // SSP-RK2: U^n, read by the second stage (st is then U^1)
 uniform sampler2D ocean;
-uniform float uDt, uDx, uDy, uG, uEps, uClip;
+uniform int uStage;
+uniform float uDt, uDx, uDy, uG, uEps;
 uniform vec2 uOrigin;
 uniform vec2 uWind;
 uniform float uL;
@@ -117,6 +121,19 @@ void face(Cell L, Cell R, float etaL, float etaR, float uL, float vL, float uR, 
   hKeep = keepLeft ? hl : hr;
 }
 
+// The live FFT elevation already carries the groups. The period sets the
+// orbital flux, so one crest is one uprush and the trough is the backwash.
+// Onshore is toward the island. The lee face only gets a fraction of it.
+// Linear theory: the depth-integrated flux is hu = eta omega / k, k from the
+// finite-depth dispersion (the same Newton solve as spectrum.js).
+vec2 specFlux(vec2 world, float etaS, float D) {
+  vec2 inland = length(world) > 2.0 ? -normalize(world) : uWind;
+  float windward = dot(length(world) > 2.0 ? normalize(world) : uWind, -uWind);
+  float faceW = mix(0.18, 1.0, smoothstep(-0.25, 0.55, windward));
+  float k = max(waveNumber(uOmega, max(D, 0.0), uG), 1e-4);
+  return inland * (etaS * uOmega / k) * faceW;
+}
+
 Cell specAt(vec2 world) {
   Cell c;
   c.b = bedAt(world);
@@ -124,15 +141,12 @@ Cell specAt(vec2 world) {
   vec4 oc = texture(ocean, uv);
   float etaS = oc.r;
   float hS = max(0.0, etaS - c.b);
-  float Ds = max(0.0, -c.b);
-  vec2 inland = length(world) > 2.0 ? -normalize(world) : uWind;
-  float windward = dot(length(world) > 2.0 ? normalize(world) : uWind, -uWind);
-  float faceW = mix(0.18, 1.0, smoothstep(-0.25, 0.55, windward));
-  float kh = max(uOmega, 0.35) * sqrt(max(Ds, 0.3) / uG);
-  float uAmp = clamp(etaS * max(uOmega, 0.35) / max(tanh(max(kh, 0.12)), 0.15), -1.6, 1.6);
+  vec2 q = specFlux(world, etaS, max(0.0, -c.b));
+  // Same desingularized velocity as loadAt.
+  float denom = hS * hS + max(hS, 0.04) * max(hS, 0.04);
   c.h = hS;
-  c.u = inland.x * uAmp * faceW;
-  c.v = inland.y * uAmp * faceW;
+  c.u = 2.0 * hS * q.x / denom;
+  c.v = 2.0 * hS * q.y / denom;
   return c;
 }
 
@@ -146,16 +160,8 @@ void main() {
   vec4 oc = texture(ocean, uv);
   float etaS = oc.r;
   float hS = max(0.0, etaS - b);
-  // The live FFT elevation already carries the groups. The period sets the
-  // orbital speed, so one crest is one uprush and the trough is the backwash.
-  // Onshore is toward the island. The lee face only gets a fraction of it.
-  vec2 inland = length(world) > 2.0 ? -normalize(world) : uWind;
-  float windward = dot(length(world) > 2.0 ? normalize(world) : uWind, -uWind);
-  float faceW = mix(0.18, 1.0, smoothstep(-0.25, 0.55, windward));
-  float kh = max(uOmega, 0.35) * sqrt(max(D, 0.3) / uG);
-  float uAmp = clamp(etaS * max(uOmega, 0.35) / max(tanh(max(kh, 0.12)), 0.15), -1.6, 1.6);
-  vec2 vel = inland * uAmp * faceW;
-  vec4 spec = vec4(hS, hS * vel.x, hS * vel.y, 0.0);
+  vec2 flux = specFlux(world, etaS, D);
+  vec4 spec = vec4(hS, flux.x, flux.y, 0.0);
   if (w < 0.02) { o = spec; return; }
   Cell C = loadAt(p.x, p.y);
   Cell L = loadAt(p.x - 1, p.y);
@@ -196,13 +202,24 @@ void main() {
     recEdge(BB.v, B.v, C.v, B.h, 1.0), recEdge(BB.u, B.u, C.u, B.h, 1.0),
     recEdge(B.v, C.v, T.v, C.h, -1.0), recEdge(B.u, C.u, T.u, C.h, -1.0),
     ghB, gnB, gtB, hBkeep, false);
-  float sx = 0.5 * uG * (hRkeep * hRkeep - hLkeep * hLkeep) / uDx;
-  float sy = 0.5 * uG * (hTkeep * hTkeep - hBkeep * hBkeep) / uDy;
+  // Audusse et al. (2004) bed source. h* (hRkeep, ...) is the cell's side of each face's
+  // hydrostatic reconstruction; hCR/hCL are the cell's own edge depths on its own bed,
+  // bCR/bCL the reconstructed bed there. Each face flux is corrected by
+  // 1/2 g (h_edge^2 - h*^2), plus the centred term -g h (b_R - b_L) / dx. At rest this
+  // equals the pressure flux divergence; on a flat bed it is 0, so moving water feels -g h h_x.
+  float eCR = recEdge(eL, eC, eR, C.h, 1.0), eCL = recEdge(eL, eC, eR, C.h, -1.0);
+  float eCT = recEdge(eB, eC, eT, C.h, 1.0), eCB = recEdge(eB, eC, eT, C.h, -1.0);
+  float hCR = max(0.0, eCR - C.b), hCL = max(0.0, eCL - C.b);
+  float hCT = max(0.0, eCT - C.b), hCB = max(0.0, eCB - C.b);
+  float sx = -0.5 * uG * ((hCR * hCR - hRkeep * hRkeep) - (hCL * hCL - hLkeep * hLkeep)) / uDx
+    - uG * 0.5 * (hCL + hCR) * ((eCR - hCR) - (eCL - hCL)) / uDx;
+  float sy = -0.5 * uG * ((hCT * hCT - hTkeep * hTkeep) - (hCB * hCB - hBkeep * hBkeep)) / uDy
+    - uG * 0.5 * (hCB + hCT) * ((eCT - hCT) - (eCB - hCB)) / uDy;
   vec4 cur = texelFetch(st, ivec2(p.x, p.y + int(uSweY)), 0);
   float hn = cur.r - uDt * ((fhR - fhL) / uDx + (ghT - ghB) / uDy);
   float hun = cur.g - uDt * ((fnR - fnL) / uDx + (gtT - gtB) / uDy - sx);
   float hvn = cur.b - uDt * ((ftR - ftL) / uDx + (gnT - gnB) / uDy - sy);
-  if (hn < 0.0 && hn >= uClip) hn = 0.0;
+  hn = max(hn, 0.0);
   if (hn < uEps) { hun = 0.0; hvn = 0.0; }
   // Manning friction on the thin film, so the edge stops and drains
   // instead of sloshing. Deeper water keeps the flux as integrated.
@@ -214,14 +231,18 @@ void main() {
     hun *= damp;
     hvn *= damp;
   }
+  // SSP-RK2 (Heun): stage 0 writes U^1 = U^n + dt L(U^n); stage 1 takes
+  // U^{n+1} = 1/2 U^n + 1/2 (U^1 + dt L(U^1)). Percolation, wetness and the
+  // spectral blends below run once, on the completed step.
+  if (uStage == 0) { o = vec4(hn, hun, hvn, cur.a); return; }
+  vec4 un = texelFetch(st0, ivec2(p.x, p.y + int(uSweY)), 0);
+  hn = max(0.5 * (un.r + hn), 0.0);
+  hun = 0.5 * (un.g + hun);
+  hvn = 0.5 * (un.b + hvn);
+  if (hn < uEps) { hun = 0.0; hvn = 0.0; }
   // Wet sand keeps percolating, including once the cell reads saturated.
-  // Above the Stockdon cap there is no water at all.
-  if (b > uR2) {
-    hn = 0.0;
-    hun = 0.0;
-    hvn = 0.0;
-  } else if (b > 0.0 && hn > 0.0) {
-    float perc = uK * (0.4 + 0.6 * (1.0 - cur.a));
+  if (b > 0.0 && hn > 0.0) {
+    float perc = uK * (0.4 + 0.6 * (1.0 - un.a));
     if (b > 0.25) perc += 0.06;
     hn = max(0.0, hn - perc * uDt);
   }
@@ -241,10 +262,10 @@ void main() {
     float crest = min(max(etaS, -0.9 * D), 0.45 * max(D, 0.3));
     float hCap = max(0.0, crest - b);
     hn = mix(hn, hCap, a);
-    hun = mix(hun, hCap * vel.x, a);
-    hvn = mix(hvn, hCap * vel.y, a);
+    hun = mix(hun, flux.x, a);
+    hvn = mix(hvn, flux.y, a);
   }
-  float wet = cur.a;
+  float wet = un.a;
   if (hn > 0.012) wet = min(1.0, wet + uDt * 1.4);
   else wet *= exp(-uDt / 3.0);
   if (b > uR2) wet *= exp(-uDt / 1.5);
@@ -329,7 +350,8 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     return t;
   };
-  const state = [tex(init), tex(init)];
+  // U^n, U^1 and U^{n+1} of the SSP-RK2 step rotate through three atlases (each keeps the bed rows).
+  const state = [tex(init), tex(init), tex(init)];
   const fbo = state.map((t) => {
     const fb = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
@@ -342,7 +364,7 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "island link");
   const loc = {};
-  for (const name of ["st", "ocean", "uDt", "uDx", "uDy", "uG", "uEps", "uClip", "uOrigin", "uWind", "uL", "uDepth", "uMapOrigin", "uMapSpan", "uHm", "uAtlasH", "uAtlasW", "uSweY", "uDLo", "uDHi", "uOmega", "uR2", "uN", "uK"]) {
+  for (const name of ["st", "st0", "uStage", "ocean", "uDt", "uDx", "uDy", "uG", "uEps", "uOrigin", "uWind", "uL", "uDepth", "uMapOrigin", "uMapSpan", "uHm", "uAtlasH", "uAtlasW", "uSweY", "uDLo", "uDHi", "uOmega", "uR2", "uN", "uK"]) {
     loc[name] = gl.getUniformLocation(prog, name);
   }
   let cur = 0;
@@ -364,13 +386,13 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
   function step(dt, oceanTex, L, windX, windZ, windSpeed, hs, tp) {
     const period = Math.max(2, Number(tp) || 5);
     lastR2 = stockdonR2(hs || 0.8, period, profile.faceSlope);
+    const mid = (cur + 1) % 3, nxt = (cur + 2) % 3;
     guard(() => {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[1 - cur]);
       gl.viewport(0, HM, nx, ny);
       gl.useProgram(prog);
-      gl.activeTexture(gl.TEXTURE0);
+      gl.activeTexture(gl.TEXTURE2);
       gl.bindTexture(gl.TEXTURE_2D, state[cur]);
-      gl.uniform1i(loc.st, 0);
+      gl.uniform1i(loc.st0, 2);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, oceanTex);
       gl.uniform1i(loc.ocean, 1);
@@ -379,7 +401,6 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
       gl.uniform1f(loc.uDy, dy);
       gl.uniform1f(loc.uG, GRAVITY);
       gl.uniform1f(loc.uEps, 1e-4);
-      gl.uniform1f(loc.uClip, -1e-4);
       gl.uniform2f(loc.uOrigin, originX, originZ);
       gl.uniform2f(loc.uWind, windX, windZ);
       gl.uniform1f(loc.uL, L);
@@ -396,8 +417,17 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
       gl.uniform1f(loc.uR2, lastR2);
       gl.uniform1i(loc.uN, nx);
       gl.uniform1f(loc.uK, 0.012);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      cur = 1 - cur;
+      for (const [stage, from, to] of [[0, cur, mid], [1, mid, nxt]]) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[to]);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, state[from]);
+        gl.uniform1i(loc.st, 0);
+        gl.uniform1i(loc.uStage, stage);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      cur = nxt;
     });
   }
 
@@ -437,6 +467,7 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
     let seamN = 0;
     let wetMax = 0;
     let runup = 0;
+    const front = [];
     let runX = 0;
     let runZ = 0;
     // Bin 0 is downwind (lee). Bin 4 is the shore the waves run into.
@@ -473,6 +504,7 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
         }
         const wet = data[(j * nx + i) * 4 + 3];
         if (wet > wetMax) wetMax = wet;
+        if (h > 0.008 && b >= 0) front.push(b + h);
         if (h > 0.008 && b > runup) {
           runup = b;
           runX = x;
@@ -520,6 +552,9 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
       windwardInlandM: azInland[4] < -1e8 ? null : Math.round(azInland[4] * 100) / 100,
       seam,
       r2: lastR2,
+      // Simulated run-up: 98th percentile of the wet-front water level (bed + h) over wet
+      // cells on the beach face (bed at or above still water), this snapshot. Beside Stockdon r2.
+      r2Sim: front.length ? front.sort((a, c) => a - c)[Math.min(front.length - 1, Math.floor(0.98 * front.length))] : null,
       tex: state[cur],
     };
   }
@@ -573,14 +608,12 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
       guard(() => {
         const alive = gl.isTexture(state[0]);
         if (!alive) {
-          state[0] = tex(init);
-          state[1] = tex(init);
-          fbo[0] = gl.createFramebuffer();
-          fbo[1] = gl.createFramebuffer();
-          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[0]);
-          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, state[0], 0);
-          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[1]);
-          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, state[1], 0);
+          for (let i = 0; i < state.length; i += 1) {
+            state[i] = tex(init);
+            fbo[i] = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[i]);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, state[i], 0);
+          }
         }
       });
       uploadAll();
@@ -597,6 +630,9 @@ export function createIslandGpu(gl, depthIn, sizeIn) {
     step, read, measures, updateShadow, setDepth, sync,
     get depth() { return bedDepth; },
     get dx() { return dx; },
+    // Fastest signal the hyperbolic step sees: it runs only where still depth < dHi (sweW is 0
+    // deeper), plus the shelf crest cap (0.45 D) and 3 m/s of flow.
+    get cMax() { return Math.sqrt(GRAVITY * profile.dHi * 1.45) + 3; },
     get dy() { return dy; },
     get profile() { return profile; },
     texture: () => state[cur],
