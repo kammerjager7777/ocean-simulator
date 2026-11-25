@@ -875,11 +875,15 @@ const PHYS_SEA = String.raw`
     vec4 t1 = texture(foamLace, qs / 40.0);
     vec4 t2 = texture(foamLace, R2 * qs / 12.0 + 0.31);
     vec4 t3 = texture(foamLace, R3 * qs / 3.5 + 0.67);
-    // fresh: 0.6 m bubble pits (A) and cell walls (G), the 0.17 m cells where resolved
-    float dHi = 0.45 * t2.a + 0.35 * t2.g + 0.2 * mix(0.4, t3.a, o3);
-    // old: blurred pits (A at mip 2.5-3, blotches, no wall lines) and the wind streaks
-    float dLo = 0.3 * (texture(foamLace, qs / 10.0 + 0.43, 3.0).a + texture(foamLace, R2 * qs / 3.0 + 0.11, 2.5).a) + 0.4 * strk + 0.15 * t1.g;
-    float detail = mix(clamp((dHi - 0.04) / 0.6, 0.0, 1.0), clamp((dLo - 0.2) / 0.55, 0.0, 1.0), smoothstep(0.2, 0.8, oldK));
+    // fresh: 0.6 m bubble pits (A) and the 0.17 m pits where resolved. The cell walls (G, a
+    // sparse connected ridge network) are never a positive term: thresholded they drew a bright
+    // Voronoi crackle on the water. They only open faint holes between bubbles (x 0.6 at most),
+    // so the raft reads as holey bubbles, not filaments of light. Mean kept at ~0.27.
+    float dHi = (0.5 * t2.a + 0.22 * mix(0.4, t3.a, o3)) * (1.0 - 0.4 * t2.g);
+    // old: blurred pits (A at mip 2.5-3, blotches, no wall lines), the wind streaks and the 40 m
+    // pit field (organic patches), mean as before
+    float dLo = 0.3 * (texture(foamLace, qs / 10.0 + 0.43, 3.0).a + texture(foamLace, R2 * qs / 3.0 + 0.11, 2.5).a) + 0.4 * strk + 0.1 * t1.a;
+    float detail = mix(clamp((dHi - 0.04) / 0.6, 0.0, 1.0), clamp((dLo - 0.22) / 0.55, 0.0, 1.0), smoothstep(0.2, 0.8, oldK));
     foamDetailG = detail;
     // A1: opacity through the mask. The edge is wider on old foam and where the halo is thin
     // (the rim of a patch, a lone fleck), so no patch has a hard cut-out outline.
