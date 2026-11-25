@@ -6,7 +6,10 @@
 
 const GRID = 256;
 const CAUST = 1024;
-const SHADOW = 512;
+// 2048 over the ~360 m light window is ~0.18 m a texel. At 512 (0.7 m) a
+// hull was four texels wide and a rock's noon shadow, 0.2-0.4 m long, was
+// smaller than one texel, so neither read on the sand.
+const SHADOW = 2048;
 // One draw. The grid is a little larger than the shallow window so a ray
 // from just outside can still land inside it. 256² is the ceiling.
 const SPAN = 1.12;
@@ -17,11 +20,12 @@ const TILE = 280;
 // procedural). Shadow depth is packed into RGB under it, because an 8-bit
 // red channel over a kilometre of range cannot see a boat two metres off
 // the sand. Two samplers would push the sea past the 16-unit Mac limit.
-export const LIGHT_ATLAS = { w: CAUST, h: CAUST + SHADOW, cau: CAUST, sh: SHADOW };
+export const LIGHT_ATLAS = { w: Math.max(CAUST, SHADOW), h: CAUST + SHADOW, cau: CAUST, sh: SHADOW };
 
 export function lightSampleGlsl() {
   const { w, h, cau, sh } = LIGHT_ATLAS;
   const yScale = (cau / h).toFixed(6);
+  const xScale = (cau / w).toFixed(6);
   const xInset = (0.5 / w).toFixed(6);
   const yInset = (0.5 / h).toFixed(6);
   const yMax = ((cau - 12) / h).toFixed(6);
@@ -33,8 +37,8 @@ float cauEdge(vec2 uv) {
 }
 float lightCau(vec2 uv) {
   vec2 f = clamp(uv, vec2(0.0), vec2(1.0));
-  vec2 a = vec2(f.x, f.y * ${yScale});
-  a = clamp(a, vec2(${xInset}, ${yInset}), vec2(${(1 - 0.5 / w).toFixed(6)}, ${yMax}));
+  vec2 a = vec2(f.x * ${xScale}, f.y * ${yScale});
+  a = clamp(a, vec2(${xInset}, ${yInset}), vec2(${((cau - 0.5) / w).toFixed(6)}, ${yMax}));
   vec2 gx = clamp(dFdx(a), vec2(-${grad}), vec2(${grad}));
   vec2 gy = clamp(dFdy(a), vec2(-${grad}), vec2(${grad}));
   return textureGrad(uLight, a, gx, gy).r;
@@ -87,39 +91,99 @@ float shadowDepthAt(ivec2 ip) {
 // Percentage-closer, by hand. The atlas is RGB-packed depth, so linear
 // filtering cannot compare. Each of the four texels is a smooth 0..1 test (a
 // thin ramp past the bias, not a hard step), then the four are blended with
-// hermite weights. One unit of depth is the whole light range (about 1 km), so
-// the bias is ~0.2 m and the ramp ~0.4 m: a hull 2-3 m over the sand is fully
-// blocked, a face is not shadowed by its own texel.
+// hermite weights. One unit of depth is the whole light range (about 1 km).
+// The sea floor is not a caster, so the bias only covers depth precision:
+// ~2 cm, ramp ~5 cm. Any occluder blocks fully, down to the low rim of a rock
+// a few centimetres off the sand (a wider ramp let that rim leak light, and a
+// rock's shadow read as a faint grey). The boat and the reef offset along
+// their normals before the test, so they do not shadow themselves.
 float shadowBilin(vec2 uv, float z) {
   vec2 g = uv * ${sh}.0 - 0.5;
   vec2 f = fract(g);
   f = f * f * (3.0 - 2.0 * f);
   ivec2 i0 = ivec2(floor(g));
-  const float bias = 0.0002;
-  const float soft = 0.0004;
+  const float bias = 0.00002;
+  const float soft = 0.00005;
   float a = smoothstep(bias, bias + soft, z - shadowDepthAt(i0));
   float b = smoothstep(bias, bias + soft, z - shadowDepthAt(i0 + ivec2(1, 0)));
   float c = smoothstep(bias, bias + soft, z - shadowDepthAt(i0 + ivec2(0, 1)));
   float d = smoothstep(bias, bias + soft, z - shadowDepthAt(i0 + ivec2(1, 1)));
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
+// Blocker search tap, smooth in position: the four texels of the bilinear
+// footprint each add their depth, weighted by the bilinear weight and by how
+// surely they block. A raw texel test here switched the penumbra width at
+// every texel edge and drew squares in the soft edge.
+void shadowBlk(vec2 t, float z, inout float sumD, inout float sumW) {
+  vec2 g = t - 0.5;
+  vec2 f = fract(g);
+  ivec2 i0 = ivec2(floor(g));
+  float d0 = shadowDepthAt(i0), d1 = shadowDepthAt(i0 + ivec2(1, 0));
+  float d2 = shadowDepthAt(i0 + ivec2(0, 1)), d3 = shadowDepthAt(i0 + ivec2(1, 1));
+  float w0 = (1.0 - f.x) * (1.0 - f.y) * smoothstep(0.00002, 0.00007, z - d0);
+  float w1 = f.x * (1.0 - f.y) * smoothstep(0.00002, 0.00007, z - d1);
+  float w2 = (1.0 - f.x) * f.y * smoothstep(0.00002, 0.00007, z - d2);
+  float w3 = f.x * f.y * smoothstep(0.00002, 0.00007, z - d3);
+  sumD += w0 * d0 + w1 * d1 + w2 * d2 + w3 * d3;
+  sumW += w0 + w1 + w2 + w3;
+}
+// Light position and the in-water fill. Returns false off the map.
+bool shadowSetup(vec3 w, out vec3 p, out float fill) {
+  vec4 lp = uShVP * vec4(w, 1.0);
+  p = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
+  fill = clamp(1.0 - exp(-max(0.0, -w.y) * 0.08), 0.0, 0.6);
+  return !(p.x < 0.02 || p.x > 0.98 || p.y < 0.02 || p.y > 0.98);
+}
+// Sea floor. Under water the sun arrives as a forward-scattered cone, not a
+// point, so the penumbra grows with the gap between occluder and sand
+// (percentage-closer soft shadows). A rock half a metre tall gets a soft
+// contact shadow round its foot even at noon, when its hard shadow is only
+// 0.2 m long and mostly under it; a hull 2-3 m up keeps a dark core and a
+// ~0.7 m soft edge.
 float shadowFactor(vec3 w) {
   if (uCausDay < 0.01) return 1.0;
-  vec4 lp = uShVP * vec4(w, 1.0);
-  vec3 p = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
-  if (p.x < 0.02 || p.x > 0.98 || p.y < 0.02 || p.y > 0.98) return 1.0;
-  float depthM = max(0.0, -w.y);
-  // Four filtered taps on a rotated grid about half a texel out. The hull is
-  // only ~4 texels wide (0.7 m each), so a wider disc pulls lit sand into the
-  // middle of the shadow. Deeper sand gets a slightly wider penumbra.
-  float rad = (0.5 + min(depthM, 10.0) * 0.03) / ${sh}.0;
+  vec3 p; float fill;
+  if (!shadowSetup(w, p, fill)) return 1.0;
+  // Metres per shadow texel and per unit of stored depth, read off the
+  // orthographic light matrix, so they follow the sea size.
+  float texM = 2.0 / (length(vec3(uShVP[0][0], uShVP[1][0], uShVP[2][0])) * ${sh}.0);
+  float zM = 2.0 / length(vec3(uShVP[0][2], uShVP[1][2], uShVP[2][2]));
+  vec2 tc = p.xy * ${sh}.0;
+  float sr = clamp(0.5 / texM, 1.5, 6.0);
+  float sumD = 0.0, sumW = 0.0;
+  shadowBlk(tc, p.z, sumD, sumW);
+  shadowBlk(tc + vec2(sr, 0.3 * sr), p.z, sumD, sumW);
+  shadowBlk(tc + vec2(-0.76 * sr, 0.7 * sr), p.z, sumD, sumW);
+  shadowBlk(tc + vec2(-0.24 * sr, -sr), p.z, sumD, sumW);
+  float distM = sumW > 1e-4 ? max(p.z - sumD / sumW, 0.0) * zM : 0.0;
+  distM *= smoothstep(0.0, 0.3, sumW);
+  float penM = clamp(0.06 + distM * 0.8, 0.06, 0.7);
+  float rad = max(penM / texM, 1.0);
+  float blocked = 0.0;
+  for (int i = 0; i < 8; i++) {
+    float r = sqrt((float(i) + 0.5) / 8.0) * rad;
+    float a = float(i) * 2.3999632 + 0.5;
+    blocked += shadowBilin((tc + vec2(cos(a), sin(a)) * r) / ${sh}.0, p.z);
+  }
+  // The cone is about half blocked at a rock's foot, so a linear average
+  // read as a pale grey. Square the lit part: full light and full shadow
+  // stay put, the contact penumbra deepens.
+  float lit = 1.0 - blocked * 0.125;
+  return mix(lit * lit, 1.0, fill);
+}
+// Four filtered taps, fixed ~1.5 texel spread. For the water surface, the
+// boat and the reef heads, where a wide penumbra is not needed.
+float shadowFactorFast(vec3 w) {
+  if (uCausDay < 0.01) return 1.0;
+  vec3 p; float fill;
+  if (!shadowSetup(w, p, fill)) return 1.0;
+  float rad = 1.5 / ${sh}.0;
   float blocked = 0.25 * (
       shadowBilin(p.xy + vec2(-0.8, -0.3) * rad, p.z)
     + shadowBilin(p.xy + vec2(0.3, -0.8) * rad, p.z)
     + shadowBilin(p.xy + vec2(0.8, 0.3) * rad, p.z)
     + shadowBilin(p.xy + vec2(-0.3, 0.8) * rad, p.z));
-  float fill = 1.0 - exp(-depthM * 0.08);
-  return mix(1.0 - blocked, 1.0, clamp(fill, 0.0, 0.6));
+  return mix(1.0 - blocked, 1.0, fill);
 }
 `;
 }

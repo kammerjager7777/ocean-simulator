@@ -6,7 +6,7 @@ import { createBoatView, createBuoyView } from "./boatView.js?v=33.91";
 import { BED_GLSL, bedRelief, setBedRippleDir } from "./seabed.js?v=30.31";
 import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
 import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js?v=30.29";
-import { createLightMaps, lightSampleGlsl, shadowGlsl } from "./light.js?v=33.92";
+import { createLightMaps, lightSampleGlsl, shadowGlsl } from "./light.js?v=33.93";
 import { assertFragmentSamplers } from "./samplerBudget.js?v=33.17";
 // Beach bisect toggles: ?beach=nodamp drops the damp darkening, ?beach=nosurf the shore foam.
 const BEACH_MODE = (() => {
@@ -442,6 +442,13 @@ float floorMul(vec3 bedP, vec2 slope) {
   float strength = ashore * clamp(fine * 0.9 + far * 0.14, 0.0, 0.78) * max(uCausDay, 0.0);
   return mix(1.0, ratio, strength);
 }
+// Sun on the floor under the sea. The caustic sparkle needs the sun, so it
+// fades out inside a shadow instead of rippling over it; then the shadow
+// leaves the shallow sand only its sky light.
+float floorLight(vec3 bedP, vec2 slope, float H, float shF) {
+  float cm = mix(1.0, floorMul(bedP, slope), shF);
+  return cm * mix(mix(0.06, 0.55, smoothstep(0.3, 8.0, H)), 1.0, shF);
+}
 vec3 underLight(vec3 rgb, vec3 w) {
   // The side wall is a vertical cut. A caustic map in x/z is constant down
   // the face, so it draws bright columns, and those columns flicker as the
@@ -726,19 +733,22 @@ const PHYS_SEA = String.raw`
         float down = max(H - hr, 0.0), path = tb * (down / max(H, 1e-3));
         vec3 T = exp(-Kd * (down + path));
         T = mix(vec3(1.0), T, veil);
-        float shF = shadowVis(vWorld + dr * tb);
-        Rw = Rcol * (1.0 - T) + alb * T * floorMul(vWorld + dr * tb, n.xz) * mix(mix(0.08, 0.55, smoothstep(0.3, 8.0, H)), 1.0, shF);
+        // Rock and coral (scene alpha > 0) are already shaded with their own
+        // shadow in the cluster pass. The bed point under them would put the
+        // rock in its own shadow a second time.
+        float shF = sc.a > 0.001 ? 1.0 : shadowVis(vWorld + dr * tb);
+        Rw = Rcol * (1.0 - T) + alb * T * floorLight(vWorld + dr * tb, n.xz, H, shF);
       } else {
         vec3 T = exp(-2.0 * Kd * H);
         T = mix(vec3(1.0), T, veil);
         float shF = shadowVis(vWorld + dr * tb);
-        Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorMul(vWorld + dr * tb, n.xz) * mix(mix(0.08, 0.55, smoothstep(0.3, 8.0, H)), 1.0, shF);
+        Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorLight(vWorld + dr * tb, n.xz, H, shF);
       }
     } else {
       vec3 T = exp(-2.0 * Kd * H);
       T = mix(vec3(1.0), T, veil);
       float shF = shadowVis(vWorld + dr * tb);
-      Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorMul(vWorld + dr * tb, n.xz) * mix(mix(0.08, 0.55, smoothstep(0.3, 8.0, H)), 1.0, shF);
+      Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorLight(vWorld + dr * tb, n.xz, H, shF);
     }
     // v30.6 aeration: bubbles are bright, non-absorbing scatterers; in a shallow layer (za ~ 2 m) they
     // raise the backscatter, so light comes back up after a short path: red still absorbed, green-blue
@@ -777,7 +787,7 @@ const PHYS_SEA = String.raw`
     // and returns on sun-facing faces), (b) wave-face subsurface glow on raised crests, strongest
     // looking toward the sun, (c) troughs darkened (less light reaches them, the next wave occludes).
     // A soft dim where the boat, buoy or reef blocks the sun. Foam is added later.
-    body *= mix(0.42, 1.0, shadowVis(vec3(vWorld.x, min(vWorld.y, -0.05), vWorld.z)));
+    body *= mix(0.42, 1.0, uBisect > 2.5 ? 1.0 : shadowFactorFast(vec3(vWorld.x, min(vWorld.y, -0.05), vWorld.z)));
     float sunFace = clamp(dot(n, L) / max(L.y, 0.25), 0.4, 1.8);
     body *= mix(1.0, sunFace, 0.65 * (1.0 - 0.8 * lowSun));
     float crestH = max(vWorld.y, 0.0), troughH = max(-vWorld.y, 0.0);
@@ -2169,7 +2179,7 @@ void main() {
     // Normal offset toward the sun side, so a rock face is not shadowed by
     // its own shadow texel. Neighbouring rocks and the boat still block it.
     vec3 nSun = dot(nFace, Ls) < 0.0 ? -nFace : nFace;
-    float sh = shadowFactor(vW + nSun * 0.3);
+    float sh = shadowFactorFast(vW + nSun * 0.3);
     float col = max(0.05, -vW.y);
     vec3 Rf = refract(-normalize(uSun), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
     if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
