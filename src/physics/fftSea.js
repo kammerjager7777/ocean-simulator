@@ -426,6 +426,22 @@ export function latticeIntegrals(setup, depth, gravity, L, pmFor) {
   });
   return out;
 }
+// A band's whole deep-water variance: the lattice's frequency window and soft edges, but no
+// FFT share, tile cut, shoaling or Hs cap. Stockdon's H0 is the incident deep-water sea.
+export function deepVariance(b) {
+  if (!b.on) return 0;
+  const w0 = Math.max(b.lo * (1 - BAND_EDGE), 0.05);
+  const w1 = b.hiHard ? b.hi : b.hi * (1 + BAND_EDGE);
+  if (!(w1 > w0)) return 0;
+  const n = 160;
+  let v = 0;
+  for (let j = 0; j <= n; j += 1) {
+    const w = w0 + ((w1 - w0) * j) / n;
+    const wt = (j === 0 || j === n ? 1 : j % 2 ? 4 : 2) * ((w1 - w0) / n) / 3;
+    v += wt * b.spectrum.density(w) * bandWindow(w, b.lo, b.hi, b.hiHard);
+  }
+  return v;
+}
 
 export function fftSeaProblem(gl) {
   if (gl.getParameter(gl.MAX_DRAW_BUFFERS) < 4) return "fewer than 4 draw buffers";

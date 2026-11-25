@@ -253,6 +253,10 @@ function frame(now) {
         islandGpu._sun = [sun[0], sun[1], sun[2]];
       }
     }
+    // Stockdon (2006) forcing, once: deep-water Hs of the swell and wind sea (no chop, shoaling or
+    // cap) and the wind sea's peak period, both from the live retuned bands (gpuSurface.js).
+    const H0 = state.stockdonH0 > 0 ? state.stockdonH0 : 0.4;
+    const Tp = state.windSeaTp > 0 ? state.windSeaTp : 5;
     if (state.gpu && state.gpu.A && !held && !pause.checked) {
       // Advance the same simulation step as the sea, in CFL-stable pieces.
       // At h ≈ 8 m, c ≈ 12 m/s and dx ≈ 0.89 m, a 0.03 s step is the limit.
@@ -266,25 +270,11 @@ function frame(now) {
       const sub = seaDt / nSub;
       globalThis.__swashCfl = { seaDt, dtCfl, nSub, sub, dx: islandGpu.dx };
       const dir = state.fx ? state.fx.dir : Math.PI / 2;
-      let hsNow = 0;
-      if (state.bands) for (const band of state.bands) hsNow += (band.significantHeight || 0) ** 2;
-      hsNow = Math.sqrt(hsNow) || 0.4;
-      let tp = 5;
-      const wb = scenario.bands.find((b) => b.id === "wind-sea");
-      if (wb) tp = 6.2831853 / ((wb.omegaMin + wb.omegaMax) * 0.5);
-      tp *= 0.75 + (Number(scenario.seaAge) || 0);
-      for (let s = 0; s < nSub; s += 1) islandGpu.step(sub, state.gpu.A, state.gpu.fft.L, Math.cos(dir), Math.sin(dir), state.fx ? state.fx.speed : 12, hsNow, tp);
+      for (let s = 0; s < nSub; s += 1) islandGpu.step(sub, state.gpu.A, state.gpu.fft.L, Math.cos(dir), Math.sin(dir), state.fx ? state.fx.speed : 12, H0, Tp);
     }
-    let hs = 0;
-    if (state.bands) for (const band of state.bands) hs += (band.significantHeight || 0) ** 2;
-    hs = Math.sqrt(hs);
     const shore = islandGpu.profile || useIslandSize(scenario.size);
-    let tpR = 5;
-    const wR = scenario.bands.find((b) => b.id === "wind-sea");
-    if (wR) tpR = 6.2831853 / ((wR.omegaMin + wR.omegaMax) * 0.5);
-    tpR *= 0.75 + (Number(scenario.seaAge) || 0);
-    const r2 = stockdonR2(hs || 0.4, tpR, shore.faceSlope);
-    globalThis.__swashCap = { r2, hs, tp: tpR, dx: islandGpu.dx, n: islandGpu.nx, slope: shore.faceSlope };
+    const r2 = stockdonR2(H0, Tp, shore.faceSlope);
+    globalThis.__swashCap = { r2, hs: H0, tp: Tp, dx: islandGpu.dx, n: islandGpu.nx, slope: shore.faceSlope };
     state.island = {
       on: 1, tex: islandGpu.texture(),
       cx: shore.cx, cz: shore.cz,
@@ -293,7 +283,7 @@ function frame(now) {
       dLo: shore.dLo, dHi: shore.dHi,
       sweN: islandGpu.nx, sweSpan: shore.span,
       sweOx: shore.cx - shore.span / 2, sweOz: shore.cz - shore.span / 2,
-      hs,
+      hs: H0,
       Rbeach: shore.Rbeach, Rbank: shore.Rbank, peak: shore.peak,
     };
     globalThis.__islandGpu = islandGpu;
@@ -303,7 +293,7 @@ function frame(now) {
       if (g && g.A && g.fft) {
         try {
           const m = islandGpu.measures(g.A, g.fft.L, g.fft.N, Math.cos(state.fx ? state.fx.dir : 0), Math.sin(state.fx ? state.fx.dir : 0));
-          globalThis.__shore = { runup: m.runup, inland: m.inland, wetMax: m.wetMax, hs, t: simTime, dx: islandGpu.dx, n: islandGpu.nx, az: m.az, leeInlandM: m.leeInlandM, windwardInlandM: m.windwardInlandM };
+          globalThis.__shore = { runup: m.runup, inland: m.inland, wetMax: m.wetMax, hs: H0, t: simTime, dx: islandGpu.dx, n: islandGpu.nx, az: m.az, leeInlandM: m.leeInlandM, windwardInlandM: m.windwardInlandM };
         } catch (err) { console.error(err); }
       }
     }

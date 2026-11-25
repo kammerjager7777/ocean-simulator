@@ -22,7 +22,7 @@ import { createBand, retuneBand, bandVariance } from "./band.js";
 import { createGpuChopPatch } from "./gpuPatch.js";
 import { initPassTimer, timed, passTimes, timeEmpty } from "./passTimer.js";
 import { slopeBudget } from "./roughness.js";
-import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare } from "./fftSea.js";
+import { SEA_RATE, createFftSea, fftSeaProblem, bandSetup, latticeIntegrals, fftShare, deepVariance } from "./fftSea.js";
 import { travelDirection, NO_FOAM_AHEAD, TRANSLUCENCY, crestReachAt, breakRuleAt, foamWindowAt, faceStepsAt, FACE_MAX } from "./surface.js";
 import { foamGain, peakScale } from "./steepness.js";
 
@@ -2169,6 +2169,10 @@ export function createGpuSurface(gl, scenario, wind) {
       chopPatch,
       finePatch,
       roughness,
+      // Stockdon forcing (main.js): deep-water Hs of the swell and wind sea (no chop, shoaling or
+      // cap) and the wind sea's spectral peak period. The bands below are the drawn sea.
+      stockdonH0: 4 * Math.sqrt(setup.reduce((s0, b) => s0 + (b.id === "swell" || b.id === "wind-sea" ? deepVariance(b) : 0), 0)),
+      windSeaTp: (() => { const w = bands.find((band) => band.spec.id === "wind-sea"); return w && w.omegaPeak > 0 ? TAU / w.omegaPeak : NaN; })(),
       bands: bands.map((band, i) => ({
         id: band.spec.id,
         label: band.spec.label,
@@ -2176,6 +2180,7 @@ export function createGpuSurface(gl, scenario, wind) {
         latticeVariance: lattice[i].variance,
         explicitVariance: explicitVar[i],
         spectrum: band.spectrum ? band.spectrum.model : "pm",
+        omegaPeak: band.omegaPeak,
       })),
     };
     return last;
