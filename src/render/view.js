@@ -1742,19 +1742,31 @@ export function seaFragmentSources(derivatives, island) {
     damp *= (1.0 - inland) * (uBeach > 0.5 && uBeach < 1.5 ? 0.0 : 1.0);
     // Surf: a wide analytic band around the waterline that runs up and back
     // with a slow swash, broken into rounded blobs that drift. No film texel.
-    float swash = sin(foamT * 0.75 + dot(rest, vec2(0.09, 0.06)) + grit2 * 2.5);
+    float swPh = foamT * 0.75 + dot(rest, vec2(0.09, 0.06)) + grit2 * 2.5;
+    float swash = sin(swPh);
     float c0 = 0.02 + 0.09 * swash;
     float band = smoothstep(c0 - 0.42, c0 - 0.12, bedN) * (1.0 - smoothstep(c0 - 0.02, c0 + 0.12, bedN));
     float foamN = sfNoise(rest * 1.35 + vec2(foamT * 0.16, foamT * 0.05));
     float foamN2 = sfNoise(rest * 3.2 - vec2(foamT * 0.09, foamT * 0.12) + 7.0);
     float blobs = smoothstep(0.4, 0.75, foamN * 0.6 + foamN2 * 0.4);
     // v32: the surf is the same foam language as the sea: a soft mask (the swash band, broken
-    // by the drifting blobs) revealed through the sea foam's lace detail (foamDetailG), so it
-    // erodes into lace and holes at its edges instead of drawing soft white discs.
-    float surfM = band * mix(0.35, 1.0, blobs) * (1.0 - inland);
-    surfM *= uBeach > 1.5 ? 0.0 : 1.0;
-    float surf = smoothstep(1.0 - surfM - 0.12, 1.0 - surfM + 0.12, foamDetailG) * smoothstep(0.02, 0.12, surfM);
-    if (cover > 0.002 || surf > 0.002) {
+    // by the drifting blobs) revealed through the sea foam's holey bubble detail (foamDetailG).
+    // The edge is wide and feathered (plus fwidth), never a binary cut of the lace, so the surf
+    // erodes into pits and holes. Residual surf is part-transparent; only the fresh lip (the
+    // landward front of the run-up while the swash advances) is close to opaque white.
+    float surfOn = uBeach > 1.5 ? 0.0 : 1.0;
+    float surfM = band * mix(0.35, 1.0, blobs) * (1.0 - inland) * surfOn;
+    float sT = 1.0 - surfM;
+    float sE = 0.2 + 0.15 * (1.0 - surfM) + 1.5 * fwidth(foamDetailG);
+    float surf = smoothstep(sT - sE, sT + sE, foamDetailG) * smoothstep(0.0, 0.3, surfM);
+    float lip = smoothstep(c0 - 0.14, c0 - 0.04, bedN) * (1.0 - smoothstep(c0 - 0.02, c0 + 0.1, bedN))
+              * smoothstep(0.0, 0.7, cos(swPh)) * blobs * (1.0 - inland) * surfOn;
+    float surfA = surf * mix(0.4, 0.78, lip);
+    // White -> turquoise aeration skirt on the water side of the surf (the open-ocean halo's
+    // milky turquoise), broken by the drifting noise, dying out into the clear shallows.
+    float aerS = smoothstep(c0 - 0.7, c0 - 0.3, bedN) * (1.0 - smoothstep(c0 - 0.1, c0 + 0.05, bedN))
+               * mix(0.3, 1.0, smoothstep(0.3, 0.7, foamN)) * (1.0 - inland) * surfOn;
+    if (cover > 0.002 || surf > 0.002 || aerS > 0.002) {
       // Dry and wet sand blended on the smooth contour, not the vertex height.
       vec3 sand = sfSandShore(rest, bedN, bedN);
       vec3 nBed = normalize(vec3(-(bPP + bPM - bMP - bMM) * 0.5, 2.0 * eB, -(bPP + bMP - bPM - bMM) * 0.5));
@@ -1762,7 +1774,10 @@ export function seaFragmentSources(derivatives, island) {
       sand *= 0.94 + 0.1 * ndl;
       color = mix(color, sand, clamp(cover, 0.0, 1.0));
       color = mix(color, color * vec3(0.8, 0.82, 0.82), damp * smoothstep(0.1, 0.6, cover) * 0.85);
-      color = mix(color, foamWhiteG * (0.9 + 0.1 * ndl), clamp(surf, 0.0, 0.72));
+      vec3 milkyS = mix(color, vec3(0.60, 0.86, 0.85), 0.55);
+      color = mix(color, milkyS, 0.4 * aerS * (1.0 - surfA));
+      vec3 surfC = mix(mix(color, vec3(0.60, 0.86, 0.85), 0.5), foamWhiteG * (0.9 + 0.1 * ndl), smoothstep(0.15, 0.7, surf) * mix(0.75, 1.0, lip));
+      color = mix(color, surfC, clamp(surfA, 0.0, 0.78));
     }
   }` : ""}
   color *= dayTint;
