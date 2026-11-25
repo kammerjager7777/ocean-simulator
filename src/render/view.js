@@ -428,14 +428,14 @@ float shadowVis(vec3 w) {
   if (uBisect > 2.5) return 1.0;
   return shadowFactor(w);
 }
-vec3 floorMul(vec3 bedP, vec2 slope) {
+vec3 floorMul(vec3 bedP, vec2 slope, float focus) {
   if (uCausDay < 0.01 || (uBisect > 0.5 && uBisect < 1.5)) return vec3(1.0);
   vec3 Rf = refract(-normalize(lightDir), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
   if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
   vec2 xz = bedP.xz - bedP.y * Rf.xz / Rf.y;
   float col = max(0.0, -bedP.y);
   // v32: per colour, split along the refracted sun ray (causDisp), wider with depth
-  vec3 ratio = (uBisect > 1.5 && uBisect < 2.5) ? vec3(1.0) : causNetRGB(xz, col, slope, causDisp(lightDir, col));
+  vec3 ratio = (uBisect > 1.5 && uBisect < 2.5) ? vec3(1.0) : causNetRGB(xz, col, slope, causDisp(lightDir, col), focus);
   // Off the dry beach and the swash. Strongest from about 0.3 m to 3 m, then it fades.
   float ashore = smoothstep(0.08, 0.45, col);
   float fine = exp(-max(col - 0.5, 0.0) * 0.28);
@@ -446,8 +446,8 @@ vec3 floorMul(vec3 bedP, vec2 slope) {
 // Sun on the floor under the sea. The caustic sparkle needs the sun, so it
 // fades out inside a shadow instead of rippling over it; then the shadow
 // leaves the shallow sand only its sky light.
-vec3 floorLight(vec3 bedP, vec2 slope, float H, float shF) {
-  vec3 cm = mix(vec3(1.0), floorMul(bedP, slope), shF);
+vec3 floorLight(vec3 bedP, vec2 slope, float H, float shF, float focus) {
+  vec3 cm = mix(vec3(1.0), floorMul(bedP, slope, focus), shF);
   return cm * mix(mix(0.06, 0.55, smoothstep(0.3, 8.0, H)), 1.0, shF);
 }
 vec3 underLight(vec3 rgb, vec3 w) {
@@ -718,6 +718,8 @@ const PHYS_SEA = String.raw`
     // Beer-Lambert per channel; the water column in between adds its in-scatter Rinf (1 - T).
     vec3 dr = refract(-V, n, 1.0 / 1.33);
     float tb = H / max(-dr.y, 0.08);
+    // v32 (C2): how strongly the live waves above the floor hit focus the sun there
+    float focusC = causFocus(vWorld + dr * tb);
     vec4 cp = viewProj * vec4(vWorld + dr * tb, 1.0);
     vec2 suv = cp.xy / cp.w * 0.5 + 0.5;
     if (sceneOn > 0.5 && H < 200.0 && cp.w > 0.0 && all(greaterThan(suv, vec2(0.0))) && all(lessThan(suv, vec2(1.0)))) {
@@ -738,18 +740,18 @@ const PHYS_SEA = String.raw`
         // shadow in the cluster pass. The bed point under them would put the
         // rock in its own shadow a second time.
         float shF = sc.a > 0.001 ? 1.0 : shadowVis(vWorld + dr * tb);
-        Rw = Rcol * (1.0 - T) + alb * T * floorLight(vWorld + dr * tb, n.xz, H, shF);
+        Rw = Rcol * (1.0 - T) + alb * T * floorLight(vWorld + dr * tb, n.xz, H, shF, focusC);
       } else {
         vec3 T = exp(-2.0 * Kd * H);
         T = mix(vec3(1.0), T, veil);
         float shF = shadowVis(vWorld + dr * tb);
-        Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorLight(vWorld + dr * tb, n.xz, H, shF);
+        Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorLight(vWorld + dr * tb, n.xz, H, shF, focusC);
       }
     } else {
       vec3 T = exp(-2.0 * Kd * H);
       T = mix(vec3(1.0), T, veil);
       float shF = shadowVis(vWorld + dr * tb);
-      Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorLight(vWorld + dr * tb, n.xz, H, shF);
+      Rw = Rcol * (1.0 - T) + SAND_ALBEDO * T * floorLight(vWorld + dr * tb, n.xz, H, shF, focusC);
     }
     // v30.6 aeration: bubbles are bright, non-absorbing scatterers; in a shallow layer (za ~ 2 m) they
     // raise the backscatter, so light comes back up after a short path: red still absorbed, green-blue
@@ -1767,6 +1769,29 @@ export function seaFragmentSources(derivatives, island) {
   gl_FragColor = vec4(color, 1.0);`)
     .replace("void main() {", PHYS_DECL + SEAFLOOR_FS + "#define HAS_FOAMNEAR 1\n#define FOAM_PIX " + ((typeof location !== "undefined" && new URLSearchParams(location.search).get("foampix") === "0") ? "false" : "true") + "\n" + FRAG_FFT_NORMAL.replace("in vec4 vSea;\n", "").replace("uniform highp sampler2D physG;\n", "").replace(/\bphysG\b/g, "physK") + `in vec3 vCurl;
 uniform vec3 dayTint;
+// v32 (C2): caustic focusing from the live surface. Sunlight refracted through a surface with height
+// Hessian Hh has its cross-section scaled by det(I + d (1 - 1/n) Hh) after a depth d (Evan Wallace's
+// area ratio for a near-vertical sun, before the rays cross), so its brightness goes as the inverse.
+// Hessian by central differences of the FFT shading slope (fftR1.z = dh/dx, fftR2.x = dh/dz, the
+// plain copy) one mip down (~2 m), the cross term left out: 4 taps on samplers the sea already
+// binds. Clamped 0.3..3. Read at the surface point the refracted sun ray through the bed point
+// leaves from (the same projection as floorMul).
+float causFocus(vec3 bedP) {
+  float d = max(0.0, -bedP.y);
+  if (d < 0.05) return 1.0;
+  vec3 Rf = refract(-normalize(lightDir), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
+  if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
+  vec2 xz = bedP.xz - bedP.y * Rf.xz / Rf.y;
+  const float lodC = 1.0;
+  float eM = 2.0 * fftL / float(physN);
+  vec2 uv = (xz + 0.5 * fftL) / fftL + 0.5 / float(physN);
+  vec2 du = vec2(eM / fftL, 0.0);
+  float hxx = (textureLod(fftR1, uv + du, lodC).z - textureLod(fftR1, uv - du, lodC).z) / (2.0 * eM);
+  float hzz = (textureLod(fftR2, uv + du.yx, lodC).x - textureLod(fftR2, uv - du.yx, lodC).x) / (2.0 * eM);
+  float k = d * (1.0 - 1.0 / 1.333);
+  float det = (1.0 + k * hxx) * (1.0 + k * hzz);
+  return clamp(1.0 / max(abs(det), 1e-3), 0.3, 3.0);
+}
 ${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `in vec4 vCoast;
 in vec2 vBedG;
 in float vFloorGrid;
@@ -2119,7 +2144,7 @@ void main() {
     vec3 Rf = refract(-normalize(uSun), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
     if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
     vec2 xz = vW.xz - vW.y * Rf.xz / Rf.y;
-    vec3 ratio = causNetRGB(xz, col, vec2(0.0), causDisp(uSun, col)); // v32: the same fringe as the sand
+    vec3 ratio = causNetRGB(xz, col, vec2(0.0), causDisp(uSun, col), 1.0); // v32: the same fringe as the sand
     float clar = max(uClarK, 0.35);
     float near = exp(-col * clar / 2.6);
     float deep = uCausDeep * 0.08 * exp(-col * clar / 16.0);
@@ -2147,6 +2172,7 @@ void main() {
     clusters.caustO = gl.getUniformLocation(prog, "uCaustO");
     clusters.caustTile = gl.getUniformLocation(prog, "uCaustTile");
     clusters.causT = gl.getUniformLocation(prog, "uCausT");
+    clusters.causRough = gl.getUniformLocation(prog, "uCausRough");
     // unit dome: 10 segments x 3 rings + apex, base ring slightly flared, flattened top
     const SEG = 10, RINGS = 3, P = [], I = [];
     for (let k = 0; k < RINGS; k += 1) {
@@ -2848,6 +2874,7 @@ void main() {
     gl.uniformMatrix4fv(clusters.shVP, false, I.vp);
     gl.uniform1f(clusters.causDay, I.day);
     if (clusters.causT) gl.uniform1f(clusters.causT, I.t || 0);
+    if (clusters.causRough) gl.uniform1f(clusters.causRough, I.rough || 0);
     gl.uniform1f(clusters.causDeep, I.deep);
     gl.uniform1f(clusters.seaL, I.seaL);
     if (clusters.caustO) gl.uniform2f(clusters.caustO, I.origin[0], I.origin[1]);
@@ -3197,6 +3224,7 @@ void main() {
             foot: seaFoot(eye, camTarget, canvas.width / Math.max(1, canvas.height)),
             bisect: fftParams.get("bisect") === "off" ? 1 : fftParams.get("bisect") === "read1" ? 2 : fftParams.get("bisect") === "noshadow" ? 3 : 0,
             t: state.fx ? state.fx.t : 0,
+            wind: state.fx ? state.fx.speed : 0,
           });
           lightMaps.clar = (state.clarity ?? 22.3) > 1 ? 22.3 / (state.clarity ?? 22.3) : 4;
           globalThis.__lightMaps = lightMaps;

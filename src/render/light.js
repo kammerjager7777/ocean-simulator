@@ -49,6 +49,7 @@ float lightSh(vec2 uv) {
   return texelFetch(uLight, ivec2(p.x, ${cau} + p.y), 0).r;
 }
 uniform float uCausT;
+uniform float uCausRough; // v32 (C3): 0 at 6 m/s .. 1 at 20 m/s
 float causLine(vec2 p) {
   float s = abs(sin(p.x) * sin(p.y));
   return pow(1.0 - s, 7.0);
@@ -99,7 +100,10 @@ float causL0(vec2 a, float t) {
   a += vec2(sin(a.y * 0.9 + t * 0.55), cos(a.x * 0.8 - t * 0.42)) * 0.5;
   return causLine(a + vec2(t * 0.22, -t * 0.16));
 }
-vec3 causNetRGB(vec2 xz, float depthM, vec2 slope, vec2 disp) {
+// focus (C2): the live surface's focusing gain (1 where it is not known). C3 (Dera, via Tessendorf):
+// a rougher sea smears the focused lines, so the net's contrast falls with the wind, but not in
+// the first few tens of centimetres, where the lines are still sharp.
+vec3 causNetRGB(vec2 xz, float depthM, vec2 slope, vec2 disp, float focus) {
   float d = max(depthM, 0.0);
   float cell = 0.22 + smoothstep(0.3, 3.0, d) * 0.38 + max(d - 1.2, 0.0) * 0.40;
   vec2 p = xz / cell;
@@ -115,7 +119,8 @@ vec3 causNetRGB(vec2 xz, float depthM, vec2 slope, vec2 disp) {
   float l2 = causLine(c2 + vec2(t * 0.1, t * 0.08));
   vec3 net = l0 * 0.72 + vec3(l1 * 0.36 + l2 * 0.3);
   net = mix(vec3(dot(net, vec3(1.0 / 3.0))), net, CAUS_CHROMA);
-  return 0.84 + net * 0.8;
+  float c3 = mix(1.0, 0.45, clamp(uCausRough, 0.0, 1.0) * smoothstep(0.6, 4.0, d));
+  return 0.84 + net * 0.8 * c3 * focus;
 }
 `;
 }
@@ -523,7 +528,7 @@ void main() {
     sh: { mvp: gl.getUniformLocation(shProg, "uMVP") },
     reef: { mvp: gl.getUniformLocation(reefProg, "uMVP"), depth: gl.getUniformLocation(reefProg, "depth") },
   };
-  const info = { causMs: 0, shMs: 0, causGpu: 0, costFrames: 0, deep: 1, day: 1, sun: [0, 1, 0], vp: new Float32Array(16), seaL: 250, origin: [0, 0], tile: TILE };
+  const info = { causMs: 0, shMs: 0, causGpu: 0, costFrames: 0, deep: 1, day: 1, sun: [0, 1, 0], vp: new Float32Array(16), seaL: 250, origin: [0, 0], tile: TILE, rough: 0 };
   const timer = gl.getExtension("EXT_disjoint_timer_query_webgl2");
   let pendingQuery = null;
 
@@ -560,6 +565,7 @@ void main() {
     info.sun = lit.dir;
     info.seaL = L;
     info.t = o.t || 0;
+    { const U = o.wind || 0, r = Math.min(1, Math.max(0, (U - 6) / 14)); info.rough = r * r * (3 - 2 * r); } // C3
     info.vp = lightVP(lit.dir, L);
     // The map is the shallow bank, not the whole FFT tile. Half a bank
     // radius past the shelf still covers the water that is clear enough
@@ -655,6 +661,7 @@ void main() {
     gl.uniformMatrix4fv(u("uShVP"), false, info.vp);
     gl.uniform1f(u("uCausDay"), info.bisect > 0.5 && info.bisect < 1.5 ? 0.0 : info.day);
     gl.uniform1f(u("uCausT"), info.t || 0);
+    gl.uniform1f(u("uCausRough"), info.rough || 0);
     gl.uniform1f(u("uBisect"), info.bisect || 0);
     gl.uniform1f(u("uCausDeep"), info.deep);
     gl.uniform1f(u("uSeaL"), info.seaL);
