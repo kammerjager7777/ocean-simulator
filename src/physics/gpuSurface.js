@@ -54,14 +54,24 @@ export function monahanW(U) { return U < 4 ? 0 : 3.84e-6 * Math.pow(U, 3.41); }
 export function foldShare(W) { const a = Math.exp(-0.15); return W * (1 - a) / (1 - a * W); }
 // The sim keeps less than the fold share in a light breeze (small breaks, the blur eats the specks)
 // and more in a strong one, so the trim used to start at 1 and spend the first ~10 s ramping (8 m/s
-// measured 0.1% vs 0.45% at 10.5 s). The trim now multiplies a wind prior, log-linear in U through
-// x1 at 12 m/s, ?fpri8= at 8 (2.5) and ?fpri20= at 20 (0.8), clamped to 8..20 m/s (?fprior=0 off).
-const FOAM_PRIOR = { lo: Number(FQ.get("fpri8") || 2.5), hi: Number(FQ.get("fpri20") || 0.8) };
+// measured 0.1% vs 0.45% at 10.5 s). The trim now multiplies a wind prior, log-linear in log U
+// through ?fpri8= at 8 m/s (3.5), ?fpri12= at 12 (1.25) and ?fpri20= at 20 (0.8), clamped to
+// 8..20 m/s (?fprior=0 off).
+const FOAM_PRIOR = { lo: Number(FQ.get("fpri8") || 3.5), mid: Number(FQ.get("fpri12") || 1.25), hi: Number(FQ.get("fpri20") || 0.8) };
 export function trimPrior(U) {
   if (FQ.get("fprior") === "0" || !(U > 0)) return 1;
   const x = Math.log(Math.min(20, Math.max(8, U)) / 12);
-  return x < 0 ? Math.pow(FOAM_PRIOR.lo, x / Math.log(8 / 12)) : Math.pow(FOAM_PRIOR.hi, x / Math.log(20 / 12));
+  const lm = Math.log(FOAM_PRIOR.mid);
+  return x < 0 ? Math.exp(lm + (Math.log(FOAM_PRIOR.lo) - lm) * x / Math.log(8 / 12))
+               : Math.exp(lm + (Math.log(FOAM_PRIOR.hi) - lm) * x / Math.log(20 / 12));
 }
+// Seed ramp width: a fold injects smoothstep(lT, lT - w, lambda_min). In a light breeze the folds
+// that pass lT barely pass it, so with w = 0.15 they were (most likely) born weak, under the 0.4
+// visibility gate, and the blur ate them: 8 m/s stayed at ~0.1% whatever the trim did. w now
+// grows with the wind, ?flw8= at 8 m/s (0.04) to ?flw20= at 20 (0.15, as before), linear in U, so
+// a light-wind crest that folds is born as dense, visible foam.
+const FOAM_LW = { lo: Number(FQ.get("flw8") || 0.04), hi: Number(FQ.get("flw20") || 0.15) };
+const seedRamp = (U) => FOAM_LW.lo + (FOAM_LW.hi - FOAM_LW.lo) * Math.min(1, Math.max(0, (U - 8) / 12));
 const FOAM_VIS = Number(FQ.get("foamvis") || 0.3); // v30.20: FOAM SEA counts cells at or above this foam strength
 const FOAM_JTH = Number(FQ.get("fjth") || 0.75); // Jacobian below this = surface folding at the tip
 // v30.22f whitecap coverage vs wind (Monahan-style: ~1% at 10 m/s, 3-5% at 15, 8-15% at 20-25). ?fcov=0 restores
@@ -650,7 +660,7 @@ void main() {
 // shortest waves on the grid do not seed (Crest "Filter Waves"; the ripple patches are not in
 // these textures at all). Its minimum eigenvalue (Tessendorf 2004) is the onset of folding, and
 // its eigenvector is the horizontal direction of the fold.
-//   inject = smoothstep(lT, lT - 0.15, lambda_min), only while the crest is sharpening
+//   inject = smoothstep(lT, lT - w, lambda_min) (w = seedRamp(U), 0.04 .. 0.15), only while the crest is sharpening
 //            (lambda_min fell since the last step), stretched along the crest (perpendicular to
 //            the eigenvector) and pushed half a texel forward on the leading lip.
 // lT is solved on the CPU from the live lambda_min distribution (LAMCDF_FS) against Monahan W(U).
@@ -682,6 +692,7 @@ uniform vec2 uShift;    // drift this step, in foam texels
 uniform float uBlur;    // share of the 3x3 binomial blur per step (eddy diffusivity x dt / texel^2)
 uniform vec3 uDecay;    // per-step decay of fresh, residual, birth
 uniform float uLamT;    // fold threshold (from the CDF solver); < -0.5 = no wind foam
+uniform float uLamW;    // seed ramp width below uLamT (narrower in a light breeze)
 uniform float uEps;     // rising-fold gate: lambda_min must fall by this much per step
 uniform vec2 uTravel;   // wave travel direction (picks the forward sign of the fold vector)
 uniform float uDepth;
@@ -725,7 +736,7 @@ void main() {
         float lq = lamMin(jq);
         vec2 eq = foldVec(jq, lq);
         float al = dot(eq, eq) > 1e-10 ? abs(dot(normalize(eq), e)) : 1.0;
-        s = max(s, exp(-0.12 * float(i * i)) * smoothstep(0.6, 0.9, al) * smoothstep(uLamT, uLamT - 0.15, lq));
+        s = max(s, exp(-0.12 * float(i * i)) * smoothstep(0.6, 0.9, al) * smoothstep(uLamT, uLamT - uLamW, lq));
       }
       inject = rising * s;
     }
@@ -2081,6 +2092,7 @@ export function createGpuSurface(gl, scenario, wind) {
           gl.uniform1f(u.uBlur, blur);
           gl.uniform3f(u.uDecay, dec[0], dec[1], dec[2]);
           gl.uniform1f(u.uLamT, wind.speed < 4 ? -1 : cov.lamT);
+          gl.uniform1f(u.uLamW, seedRamp(wind.speed));
           gl.uniform1f(u.uEps, FOAM_EPS);
           gl.uniform2f(u.uTravel, tx, tz);
           gl.uniform1f(u.uDepth, depth);
