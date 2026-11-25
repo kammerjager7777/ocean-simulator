@@ -922,7 +922,10 @@ const PHYS_SEA = String.raw`
       float st = 0.35 * m0 + 0.55 * m1 + mix(0.12, 0.25 * m2, oF) * lineK + 0.12 * slc;   // v30.19.1: fewer hard strand lines inside the band   // ~0..1.4
       float D = clamp(WC_D * denseR * (0.8 + 0.6 * fr), 0.0, 1.0);   // v30.16.1: WC_D < 1 keeps the dense front holed (no sheets)
       float thr = mix(WC_T0, WC_T1, D);                                   // dense front: low threshold
-      float w = 0.25 + fwidth(st); // v30.18.4: soft, pillowy whitecap edge (was 0.10)
+      // v32: the 0.25 edge (v30.18.4) was half the strand range, so every cap read as a soft
+      // pillow with its holes filled. A narrow edge keeps the lace cells and holes; the fresh lip
+      // is crisp, the trail a little softer. fwidth still covers the pixel (no shimmer).
+      float w = mix(0.16, 0.07, clamp(fr, 0.0, 1.0)) + fwidth(st);
       float wkF = smoothstep(3.0, 8.0, length(foamDrift));              // v30.19.3: ~0 below 15 m/s, 1 at 25 m/s
       float eG = smoothstep(0.15 * WC_G, mix(1.6, WC_GE, wkF) * WC_G, denseR); // v30.19.2 wide edge zone; v30.19.3 narrower in strong wind (coverage)
       // edge breaks into lace/holes: toward the rim only the strongest lace cells stay, with a soft falloff
@@ -936,6 +939,9 @@ const PHYS_SEA = String.raw`
       wcM *= mix(1.0, smoothstep(0.2, 0.7, 0.6 * lfW + 0.4 * t1.g), far);
       if (FOAM_NEW) { float dWr = Sb.g * 4.0 / jv; wcM *= smoothstep(0.08, 0.33, sM + 0.1 * smoothstep(2.0, 5.0, dWr)); } // v30.22h: whitecap frays into the streak lace (no round discs)
       aD = wcM * mix(mix(0.5, WC_HW, wkF), 1.0, smoothstep(0.25, 0.95, 0.6 * m0 + 0.5 * m1 + 0.3 * D)); // v30.19.2 mottled interior; v30.19.3 less mottle in strong wind
+      // v32: whitewater thins as it stops being fed. Fresh breaking foam is nearly opaque;
+      // once the crest has passed the same cap shows the water through it before it frays.
+      aD *= mix(0.7, 1.0, smoothstep(0.0, 0.6, fr));
     }
     float edgeZone = (WC_STRANDS && strandsOn > 0.5 ? 0.35 : 1.0) * smoothstep(0.05, 0.25, dn) * (1.0 - aD);
     // v31.1 edges: dense foam stays crisp, thin foam stays soft, and the rim is clumpy
@@ -952,6 +958,17 @@ const PHYS_SEA = String.raw`
         float across = dot(qd, vec2(-dd.y, dd.x));
         float row = 0.5 + 0.5 * sin(across * 0.42);
         aR *= mix(1.0, 0.62 + 0.38 * row, smoothstep(14.0, 20.0, windU) * smoothstep(0.35, 0.8, age));
+      }
+      // v32 residual: aged foam is drawn out along the wind into streaks (a world-locked
+      // noise, 9 m along x 1.2 m across, so it does not swim or pop), and it is a thin,
+      // semi-transparent raft. It never reaches the opacity of fresh whitewater, which
+      // is what made old patches read as cotton pads sitting on the sea.
+      { vec2 qw = vec2(dot(qd, dd), dot(qd, vec2(-dd.y, dd.x)));
+        float oS = 1.0 - smoothstep(0.08, 0.3, fpM);                        // fine streak only where it is resolved
+        float strk = 0.65 * valueNoise(vec2(qw.x / 9.0, qw.y / 1.2) + 71.0) + 0.35 * mix(0.5, valueNoise(vec2(qw.x / 3.5, qw.y / 0.45) + 83.0), oS);
+        float oldK = smoothstep(0.3, 0.85, age);
+        aR *= mix(1.0, smoothstep(0.28, 0.7, strk), 0.7 * oldK);
+        aR *= mix(0.85, 0.5, oldK);
       } }
     float fa = clamp(max(aD, aR) + edgeZone * s, 0.0, 1.0);
     // Lighting: wrap-Lambert on the wave normal plus the foam height bump (B channel), sun and sky;
@@ -975,10 +992,15 @@ const PHYS_SEA = String.raw`
     vec3 foamWhite = foamC; // lit surface foam, before thin foam shows the water through it
     // v30.15: thin foam shows bubbly (milky turquoise) water under it, never a grey film
     vec3 milkyW = mix(water, vec3(0.60, 0.86, 0.85), 0.6);
-    float thick = max(max(smoothstep(0.04, 0.22, dn), smoothstep(0.04, 0.18, sl)), smoothstep(0.12, 0.4, aR));
-    foamC = mix(mix(milkyW, foamC, 0.5), foamC, thick);
+    // v32: "thick" (fully lit white) comes from the whitewater only: the dense phase and
+    // the young strands. It used to include the residual lace alpha, so any old patch over
+    // 0.4 was painted solid white. Residual lace is the bubble raft over milky water.
+    float thick = max(smoothstep(0.1, 0.45, aD), max(smoothstep(0.04, 0.22, dn), smoothstep(0.04, 0.18, sl)) * (1.0 - 0.75 * smoothstep(0.35, 0.85, age)));
+    foamC = mix(mix(milkyW, foamC, 0.45), foamC, thick);
     foamC *= mix(0.94, 1.0, smoothstep(0.0, 0.6, fa));
-    color = mix(water, foamC, fa);
+    // The water under and between the residual lace is bubble-tinted, not clear and not grey.
+    vec3 waterB = mix(water, milkyW, 0.35 * rr * (1.0 - fa));
+    color = mix(waterB, foamC, fa);
     // v30.14 distance LOD: where strands are sub-pixel the mip average is a foam FRACTION, not a line;
     // draw it as brighter milky turquoise (bubbly water), not as grey translucent shapes. Whitecaps stay white.
     {
@@ -999,8 +1021,13 @@ const PHYS_SEA = String.raw`
         // v31.6: blending that partial area with the water turned a visible shoal grey.
         // Lift the interior of the same footprint to the lit foam colour. The skirt
         // below about 0.18 stays at or under the old weight, so the outline does not grow.
-        float shown = smoothstep(0.08, 0.42, area);
-        vec3 farC = mix(water, foamWhite, shown);
+        // v32: that lift filled every mid-range patch with solid white (the cotton blobs at the
+        // default camera). The strand fraction is now drawn as what it is: bubble-tinted water
+        // over the whole footprint, and lit white only in proportion to the area that is still
+        // whitewater (dense or fresh). Residual far foam stays milky, the caps stay bright.
+        float whiteK = clamp(max(aD, smoothstep(0.15, 0.55, denseR) * (0.45 + 0.55 * fr)), 0.0, 1.0);
+        vec3 farC = mix(water, milkyW, 0.7 * smoothstep(0.02, 0.45, area));
+        farC = mix(farC, foamWhite, clamp(area * mix(0.25, 1.0, whiteK), 0.0, 0.92));
         color = mix(color, farC, farW);
       }
     }
