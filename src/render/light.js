@@ -89,7 +89,7 @@ float shadowFactor(vec3 w) {
   vec3 p = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
   if (p.x < 0.02 || p.x > 0.98 || p.y < 0.02 || p.y > 0.98) return 1.0;
   float depthM = max(0.0, -w.y);
-  float rad = (6.0 + depthM * 0.5) / ${sh}.0;
+  float rad = (1.15 + depthM * 0.05) / ${sh}.0;
   float bias = 0.00035;
   float acc = 0.0;
   acc += p.z > shadowDecode(p.xy + vec2(-rad, -0.35 * rad)) + bias ? 1.0 : 0.0;
@@ -398,11 +398,17 @@ void main() {
   let pendingQuery = null;
 
   function sunLit(sun) {
-    const sky = globalThis.__oceanSky;
-    const geo = sky && sky.dirs && sky.dirs.sun;
-    const on = sky && sky.dirs ? sky.dirs.sunOn : (sun && sun[1] > 0.02 ? 1 : 0);
-    const dir = geo && on ? geo : sun;
+    // The clock sun, not the art-directed light. The art vector sits near
+    // 25° even at 11:57 and was stretching every rock into a long smear.
+    const tod = globalThis.__oceanTodMin;
+    let dir = sun;
+    if (Number.isFinite(tod)) {
+      const e = Math.asin(Math.cos(20 * Math.PI / 180) * Math.cos(((tod / 60 - 12) * 15) * Math.PI / 180));
+      const a = -Math.PI / 2 - (tod - 720) * Math.PI / 720;
+      dir = [Math.cos(e) * Math.cos(a), Math.sin(e), Math.cos(e) * Math.sin(a)];
+    }
     const elev = dir ? dir[1] : 0;
+    const on = elev > 0.02 ? 1 : 0;
     const day = on ? Math.min(1, Math.max(0, (elev - 0.02) / 0.28)) : 0;
     return { dir: dir || [0, 1, 0], day };
   }

@@ -20,7 +20,7 @@ for (const fx of [-0.42, -0.14, 0.14, 0.40]) for (const fz of [-0.42, 0, 0.42]) 
 const AREA = (LEN * BEAM * 0.78) / PTS.length;
 // Just off the beach, on a 250 m slice (the wall is at 125 m). The old pin
 // (158, 25) sat in the void. place() pulls this inside the current sea.
-const HOME_X = 86, HOME_Z = 18;
+const HOME_X = 76, HOME_Z = 12;
 export function createBoat() {
   const b = { x: HOME_X, y: -0.2, z: HOME_Z, vx: 0, vy: 0, vz: 0, yaw: 0.6, pitch: 0, roll: 0, wy: 0, wp: 0, wr: 0, length: LEN, homeX: HOME_X, homeZ: HOME_Z };
   // Stay on the slice: half the sea, minus 15 m so an 8 m hull does not hang
@@ -36,7 +36,7 @@ export function createBoat() {
     const pr = Math.hypot(x, z) || 1;
     if (pr > maxR) { x *= maxR / pr; z *= maxR / pr; }
     if (island) {
-      const w = clampToWater(x, z, depth > 0 ? depth : 40, 1.2);
+      const w = clampToWater(x, z, depth > 0 ? depth : 40, 3.0);
       if (Math.hypot(w[0], w[1]) <= maxR + 0.5) { x = w[0]; z = w[1]; }
     }
     b.homeX = x; b.homeZ = z;

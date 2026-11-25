@@ -226,22 +226,24 @@ float islandBed(vec2 xz) {
 // h, wetness, and 1 when this point is inside the solver grid.
 // textureLod: a vertex-shader texture() has no derivatives. On a Mac that
 // fetch is undefined and came back huge, which is what shot the sheet up.
-vec3 sweAt(vec2 world) {
-  vec2 g = (world - uSweOrigin) / uSweSpan * uSweN;
-  if (g.x < 0.5 || g.y < 0.5 || g.x > uSweN - 0.5 || g.y > uSweN - 0.5) return vec3(0.0);
-  vec2 uv = vec2((g.x + 0.5) / max(uAtlasW, 1.0), (uHm + g.y + 0.5) / max(uAtlasH, 1.0));
+// Manual bilinear. The atlas is nearest on a Mac without float-linear,
+// and a nearest film cell was a square of foam and a stair in the damp band.
+vec3 sweCell(ivec2 c) {
+  if (c.x < 0 || c.y < 0 || float(c.x) > uSweN - 1.0 || float(c.y) > uSweN - 1.0) return vec3(0.0);
+  vec2 uv = vec2((float(c.x) + 1.0) / max(uAtlasW, 1.0), (uHm + float(c.y) + 1.0) / max(uAtlasH, 1.0));
   vec4 s = textureLod(coastState, uv, 0.0);
   return vec3(max(s.r, 0.0), clamp(s.a, 0.0, 1.0), 1.0);
 }
-// A short box, half a cell, on a linearly filtered atlas. One cell was a stair.
 vec3 sweBlur(vec2 world) {
-  float c = 0.55 * uSweSpan / max(uSweN, 1.0);
-  vec3 s = sweAt(world);
-  s += sweAt(world + vec2(c, 0.0));
-  s += sweAt(world - vec2(c, 0.0));
-  s += sweAt(world + vec2(0.0, c));
-  s += sweAt(world - vec2(0.0, c));
-  return s * 0.2;
+  vec2 g = (world - uSweOrigin) / max(uSweSpan, 1.0) * uSweN - 0.5;
+  vec2 f = fract(g);
+  f = f * f * (3.0 - 2.0 * f);
+  ivec2 i0 = ivec2(floor(g));
+  vec3 a = sweCell(i0);
+  vec3 b = sweCell(i0 + ivec2(1, 0));
+  vec3 c = sweCell(i0 + ivec2(0, 1));
+  vec3 d = sweCell(i0 + ivec2(1, 1));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 // Shadow lives in the heightmap (.g), the top rows of the atlas. The rows
 // under that are the shallow-water state. A tap one texel past the heightmap
