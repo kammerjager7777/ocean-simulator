@@ -84,6 +84,14 @@ float causNet(vec2 xz, float depthM, vec2 slope) {
 #define CAUS_DISP_GAIN 5.0
 #define CAUS_DISP_MIN 0.006
 #define CAUS_CHROMA 0.8
+// Even x5 the physical split is ~1-2 cm at 0.5-1 m, a fraction of a fine line's width, and the
+// fringe washed out to grey. In 0.3-3 m of water the fine-line split is held at least at
+// CAUS_FRINGE (in line-phase units; a fine line's half-width is ~0.09), so red leads on one side
+// of a bright line and blue on the other, and the colour difference is lifted (CAUS_CHROMA_SH).
+// Past a few metres both fall back to the physical split and the grey-leaning CAUS_CHROMA.
+#define CAUS_FRINGE 0.075
+#define CAUS_FRINGE_MAX 0.09
+#define CAUS_CHROMA_SH 1.4
 float causTanRefr(float s, float n) { float q = s / n; return q / sqrt(max(1.0 - q * q, 1e-4)); }
 // Half the red-blue split at the floor (m): red samples the surface at +d, blue at -d.
 vec2 causDisp(vec3 sunDir, float depthM) {
@@ -108,6 +116,10 @@ vec3 causNetRGB(vec2 xz, float depthM, vec2 slope, vec2 disp, float focus) {
   float cell = 0.22 + smoothstep(0.3, 3.0, d) * 0.38 + max(d - 1.2, 0.0) * 0.40;
   vec2 p = xz / cell;
   vec2 dp = disp / cell;
+  float shK = smoothstep(0.15, 0.4, d) * (1.0 - smoothstep(3.0, 5.0, d)); // the ankle-to-waist shallows
+  float dpL = length(dp);
+  vec2 dpDir = dpL > 1e-6 ? dp / dpL : vec2(0.6, 0.8);
+  dp = dpDir * mix(dpL, clamp(max(dpL, CAUS_FRINGE), 0.0, CAUS_FRINGE_MAX), shK);
   vec2 warp = slope * 6.0;
   float t = uCausT;
   vec3 l0 = vec3(causL0(p + warp + dp, t), causL0(p + warp, t), causL0(p + warp - dp, t)); // red +disp, blue -disp
@@ -118,7 +130,7 @@ vec3 causNetRGB(vec2 xz, float depthM, vec2 slope, vec2 disp, float focus) {
   c2 += vec2(sin(c2.y * 0.42 + t * 0.27), cos(c2.x * 0.4 - t * 0.2)) * 0.6;
   float l2 = causLine(c2 + vec2(t * 0.1, t * 0.08));
   vec3 net = l0 * 0.72 + vec3(l1 * 0.36 + l2 * 0.3);
-  net = mix(vec3(dot(net, vec3(1.0 / 3.0))), net, CAUS_CHROMA);
+  net = mix(vec3(dot(net, vec3(1.0 / 3.0))), net, mix(CAUS_CHROMA, CAUS_CHROMA_SH, shK));
   float c3 = mix(1.0, 0.45, clamp(uCausRough, 0.0, 1.0) * smoothstep(0.6, 4.0, d));
   return 0.84 + net * 0.8 * c3 * focus;
 }
