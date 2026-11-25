@@ -1685,23 +1685,36 @@ export function createGpuSurface(gl, scenario, wind) {
   gl.bindTexture(gl.TEXTURE_2D, probeTex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, PROBE_W, 1);
   for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
   const probeFb = target([probeTex]);
-  const probePack = gl.createBuffer();
-  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, probePack); gl.bufferData(gl.PIXEL_PACK_BUFFER, PROBE_W * 4 * 4, gl.STREAM_READ); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  // v32 async readbacks (probe, COVSTAT, lambda_min CDF): each has two PIXEL_PACK buffers used in
+  // turn, one read in flight at a time. A buffer gets fresh storage (orphan) right before its
+  // readPixels and is only written again after its fence has signalled and it has been read back,
+  // so Chrome keeps its shadow copy instead of logging "READ-usage buffer was written, then fenced,
+  // but written again before being read back" (and falling back to a synchronous read). The
+  // poll / solve cadence and the data are unchanged.
+  const packRing = (bytes) => {
+    const r = { bufs: [gl.createBuffer(), gl.createBuffer()], i: 0, cur: null, bytes };
+    for (const b of r.bufs) { gl.bindBuffer(gl.PIXEL_PACK_BUFFER, b); gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ); }
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    return r;
+  };
+  // bind the next buffer of the ring with fresh storage, for a readPixels (caller unbinds)
+  const packBegin = (r) => { r.cur = r.bufs[r.i]; r.i ^= 1; gl.bindBuffer(gl.PIXEL_PACK_BUFFER, r.cur); gl.bufferData(gl.PIXEL_PACK_BUFFER, r.bytes, gl.STREAM_READ); };
+  // read back the buffer the last readPixels went to (only after its fence has signalled)
+  const packRead = (r, dst) => { gl.bindBuffer(gl.PIXEL_PACK_BUFFER, r.cur); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, dst); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); };
+  const probePack = packRing(PROBE_W * 4 * 4);
   // v30.7 coverage controller state
   const covTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, covTex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 16, 16);
   for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
   const covFb = target([covTex]);
-  const covPack = gl.createBuffer();
-  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, covPack); gl.bufferData(gl.PIXEL_PACK_BUFFER, 256 * 16, gl.STREAM_READ); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  const covPack = packRing(256 * 16);
   let covFence = null, covT = 0, covLastT = 0; const cov = { active: 0, visible: 0, target: 0, lamT: -1, trim: 1, foldTarget: 0, foamSea: 0 };
   // v32 lambda_min CDF readback (LAM_BINS x 16), solved about twice a second
   const lamTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, lamTex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, LAM_BINS, 16);
   for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
   const lamFb = target([lamTex]);
-  const lamPack = gl.createBuffer();
-  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, lamPack); gl.bufferData(gl.PIXEL_PACK_BUFFER, LAM_BINS * 16 * 16, gl.STREAM_READ); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  const lamPack = packRing(LAM_BINS * 16 * 16);
   const lamBuf = new Float32Array(LAM_BINS * 16 * 4);
   let lamFence = null, lamT = -1e9, coverAcc = 0, lamChopK = 1, lamChopBase = 0;
   const probeBufs = [new Float32Array(PROBE_W * 4), new Float32Array(PROBE_W * 4)]; let probeBi = 0; const covBuf = new Float32Array(1024); // v30.22g perf: reused readback arrays (no per-frame garbage)
@@ -2143,7 +2156,7 @@ export function createGpuSurface(gl, scenario, wind) {
     // ~3 s, ?ftrim=0 off) scale the CDF target so the measured visible cover tracks W. HUD FOAM SEA
     // is that measured cover.
     if (lamFence && gl.clientWaitSync(lamFence, 0, 0) !== gl.TIMEOUT_EXPIRED) {
-      const d = lamBuf; gl.bindBuffer(gl.PIXEL_PACK_BUFFER, lamPack); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, d); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      const d = lamBuf; packRead(lamPack, d);
       gl.deleteSync(lamFence); lamFence = null;
       let pos = 0; const cnt = new Float64Array(LAM_BINS);
       for (let r = 0; r < 16; r++) { pos += d[r * LAM_BINS * 4 + 1]; for (let b2 = 0; b2 < LAM_BINS; b2++) cnt[b2] += d[(r * LAM_BINS + b2) * 4]; }
@@ -2193,11 +2206,11 @@ export function createGpuSurface(gl, scenario, wind) {
     if (!lamFence && time - lamT >= 0.5) {
       lamChopK = chopK; lamChopBase = chopFor(depth) / chopK; // the choppiness this readback is taken at
       run(programs.lamcdf, lamFb, LAM_BINS, { tR2: fft.R[2], tR3: fft.R[3] }, (u) => { gl.uniform1f(u.uChop, chopFor(depth)); gl.uniform1f(u.uLod, FOAM_LOD); }, 16);
-      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, lamPack); gl.readPixels(0, 0, LAM_BINS, 16, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      packBegin(lamPack); gl.readPixels(0, 0, LAM_BINS, 16, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       lamFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); lamT = time;
     }
     if (covFence && gl.clientWaitSync(covFence, 0, 0) !== gl.TIMEOUT_EXPIRED) {
-      const d = covBuf; gl.bindBuffer(gl.PIXEL_PACK_BUFFER, covPack); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, d); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      const d = covBuf; packRead(covPack, d);
       gl.deleteSync(covFence); covFence = null;
       let a = 0, v = 0; for (let i = 0; i < 256; i++) { a += d[i * 4]; v += d[i * 4 + 1]; }
       cov.active = a / 256; cov.visible = v / 256; cov.foamSea = cov.visible; // HUD FOAM SEA: the foam the sim holds now
@@ -2210,18 +2223,18 @@ export function createGpuSurface(gl, scenario, wind) {
     }
     if (!covFence && time - covT >= 0.25) {
       run(programs.covstat, covFb, 16, { tK: tex.K[kCur] }, (u) => gl.uniform1i(u.uM, M));
-      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, covPack); gl.readPixels(0, 0, 16, 16, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      packBegin(covPack); gl.readPixels(0, 0, 16, 16, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       covFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); covT = time;
     }
     if (probeFence && gl.clientWaitSync(probeFence, 0, 0) !== gl.TIMEOUT_EXPIRED) {
-      const d = probeBufs[probeBi]; probeBi ^= 1; gl.bindBuffer(gl.PIXEL_PACK_BUFFER, probePack); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, d); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      const d = probeBufs[probeBi]; probeBi ^= 1; packRead(probePack, d);
       gl.deleteSync(probeFence); probeFence = null; probeOut.data = d; probeOut.time = probeTime;
     }
     if ((probePts || uiOn) && !probeFence) {
       const pw = uiOn ? PROBE_W : 16;
       run(programs.probe, probeFb, pw, { tA: tex.A, tG: tex.G }, (u) => { gl.uniform2fv(u["uPts[0]"] || u.uPts, probePts || uiPts); if (u["uPts2[0]"] || u.uPts2) gl.uniform2fv(u["uPts2[0]"] || u.uPts2, uiPts); if (u.uSec) gl.uniform4f(u.uSec, uiSec[0], uiSec[1], uiSec[2], uiSec[3]); gl.uniform1f(u.uTile, L); });
       gl.viewport(0, 0, pw, 1);
-      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, probePack); gl.readPixels(0, 0, pw, 1, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      packBegin(probePack); gl.readPixels(0, 0, pw, 1, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       probeFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); probeTime = time;
     }
     run(programs.reduce, fbs.reduce, blocks, { tL: tex.L, tC: tex.C, tF: tex.F, tG: tex.G });
