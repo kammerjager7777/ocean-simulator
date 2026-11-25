@@ -680,9 +680,9 @@ void main() {
   #define UV(pc) (((pc) + 0.5) / float(uN))
   // --- advect (semi-Lagrangian drift) and blur: 4 bilinear taps at +-0.5 texel = 3x3 binomial ---
   vec2 src = gl_FragCoord.xy - uShift;
-  vec4 c0 = texture(tK, src / M);
-  vec4 bl = 0.25 * (texture(tK, (src + vec2(-0.5, -0.5)) / M) + texture(tK, (src + vec2(0.5, -0.5)) / M)
-                  + texture(tK, (src + vec2(-0.5, 0.5)) / M) + texture(tK, (src + vec2(0.5, 0.5)) / M));
+  vec4 c0 = textureLod(tK, src / M, 0.0);
+  vec4 bl = 0.25 * (textureLod(tK, (src + vec2(-0.5, -0.5)) / M, 0.0) + textureLod(tK, (src + vec2(0.5, -0.5)) / M, 0.0)
+                  + textureLod(tK, (src + vec2(-0.5, 0.5)) / M, 0.0) + textureLod(tK, (src + vec2(0.5, 0.5)) / M, 0.0));
   vec3 F = mix(c0.xyz, bl.xyz, uBlur) * uDecay;
   // --- fold seed on the visible surface ---
   vec3 j0 = jacAt(UV(pc0));
@@ -1546,17 +1546,19 @@ export function createGpuSurface(gl, scenario, wind) {
     return tex;
   }
   // v32 foam coverage: half float (filterable) with linear, repeating reads, so the 30 Hz step
-  // advects and blurs with hardware bilinear taps across the periodic tile. Shaders that want
-  // exact cells still use texelFetch.
+  // advects and blurs with hardware bilinear taps across the periodic tile, and a full mip chain
+  // (rebuilt after every step) that the sea reads as the soft under-foam halo and the far
+  // coverage. Shaders that want exact cells still use texelFetch.
   function foamTexture(size) {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA16F, size, size);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texStorage2D(gl.TEXTURE_2D, Math.round(Math.log2(size)) + 1, gl.RGBA16F, size, size);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, size, size, gl.RGBA, gl.FLOAT, new Float32Array(size * size * 4).map((v, i) => (i % 4 === 3 ? -10 : 0))); // .w: no previous fold, so the first step does not burst
+    gl.generateMipmap(gl.TEXTURE_2D);
     return t;
   }
   function layerTarget(t, layer) {
@@ -2048,6 +2050,8 @@ export function createGpuSurface(gl, scenario, wind) {
           gl.uniform1f(u.uLod, FOAM_LOD);
         });
         kCur = 1 - kCur;
+        // A2: the mips of the step just written are the halo / far coverage the sea reads
+        timed("coverMip", () => { gl.bindTexture(gl.TEXTURE_2D, tex.K[kCur]); gl.generateMipmap(gl.TEXTURE_2D); gl.bindTexture(gl.TEXTURE_2D, null); });
       }
       if (globalThis.__airPts && globalThis.__airPts.length) {
         const fb = fbs.cover[1 - kCur].fb;

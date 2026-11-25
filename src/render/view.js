@@ -659,6 +659,7 @@ export function waterFromZsd(z) {
 const PHYS_DECL = `uniform highp sampler2D sceneTex;\nuniform mat4 viewProj;\nuniform float sceneOn;\nuniform highp sampler2D physK;\nuniform highp sampler2D physA;\nuniform vec2 foamOff;\nuniform float waterTurb;\nuniform vec2 waterSc;\nuniform highp sampler2D foamLace;\nuniform float foamT;\nuniform highp sampler2DArray physS;\nuniform float strandsOn;\nuniform float uAirOn;\nuniform float fineWin;\nuniform vec2 fineCam;\n#define WATER_TURB waterTurb\n#define WATER_SA waterSc.x\n#define WATER_SB waterSc.y\n#define SAND_ALBEDO vec3(${PQ("sandr", 0.26)}, ${PQ("sandg", 0.42)}, ${PQ("sandb", 0.34)})\n#define SAND_K ${PQ("sandk", 1.2)}\n#define WATER_E ${PQ("wate", 1.0)}\n#define PHYS_EXPO ${PQ("expo", 0.86)}\n#define PHYS_GLINT ${PQ("glk", 0.35)}\n#define FOAM_CELL ${PQ("fcell", 2.2)}\n#define WC_D ${PQ("wcd", 0.8)}\n#define WC_G ${PQ("wcg", 0.15)}\n#define WC_GE ${PQ("wcge", 0.8)}\n#define WC_HW ${PQ("wchw", 0.9)}\n#define WC_T0 ${PQ("wct0", 0.6)}\n#define WC_T1 ${PQ("wct1", 0.1)}\n#define LACE_FAR ${PQ("flf", PHYS_Q.get("fcov") === "0" ? 0.04 : 2.0)}\n#define FOAM_NEW ${PHYS_Q.get("fcov") === "0" ? "false" : "true"}\n#define LACE_YLO ${PQ("fly", 0.12)}\n#define LACE_SOFT ${PQ("lsoft", 0.8)}\n#define FAR_STREAK ${PQ("fstreak", 1.0)}\n#define FAR_MILK ${PQ("fmilk", PHYS_Q.get("fcov") === "0" ? 0.85 : 0.2)}\n#define WC_ON ${PHYS_Q.get("wc") === "0" ? "false" : "true"}\n#define FOAM_DEBUG ${PHYS_Q.get("foamdebug") === "1" ? "true" : "false"}\n`;
 const PHYS_SEA = String.raw`
   // ===== v30c physical sea colour + physics foam (replaces the v30a grade and v30b foam look) =====
+  float foamDetailG = 0.5; vec3 foamWhiteG = vec3(0.9); // v32: the foam's detail and lit white, for the shore surf
   {
     float spK = fftL / float(physN);
     vec2 pk = vSea.xy - foamOff;
@@ -682,24 +683,11 @@ const PHYS_SEA = String.raw`
     // surface density = carried coverage / area change (Jacobian): gathers where the surface converges
     float jv = clamp(J, 0.25, 2.5);
     float dense = clamp(K.x / jv, 0.0, 1.0), resid = clamp(K.y / jv, 0.0, 1.0), freshK = K.z;
-    // v30.9 Lagrangian foam strands (physics/gpuSurface STRAND_*): R = old strands (lace), G = young (whitecap)
-    vec2 stUv = ukK / float(kN);
-    vec4 Sd = strandsOn > 0.5 ? texture(physS, vec3(stUv, 0.0), 1.8) : vec4(0.0);   // v30.19.1: softer lines (was bias 1.0)   // v30.14: layer 0 coarse (1024^2, 2x the M grid, so +1 lod)
-    vec4 Sb = strandsOn > 0.5 ? 0.5 * (textureLod(physS, vec3(stUv, 0.0), 2.0) + textureLod(physS, vec3(stUv, 0.0), 3.0)) : vec4(0.0); // v30.18.4: wider blur -> soft dense edge
-    // v30.14 camera-following fine foam layer: the same strands drawn into a 1024^2 toroidal window
-    // (~125 m, 0.12 m texels) around the camera target; blended in near the camera, out by the window edge.
-    if (fineWin > 0.0) {
-      vec2 tm = stUv * fftL / fineWin;                      // tile metres in window units (window divides the tile)
-      float wF = 1.0 - smoothstep(0.28, 0.44, max(abs(vWorld.x - fineCam.x), abs(vWorld.z - fineCam.y)) / fineWin);
-      if (wF > 0.0) {
-        vec2 gx = dFdx(tm), gy = dFdy(tm);
-        vec4 SdF = textureGrad(physS, vec3(fract(tm), 1.0), gx, gy);
-        vec4 SbF = textureLod(physS, vec3(fract(tm), 1.0), 1.5);
-        Sd = mix(Sd, SdF, wF); Sb = mix(Sb, SbF, wF);
-      }
-    }
-    float dW = clamp(Sb.g * 4.0 / jv, 0.0, 1.0);
-    const bool WC_STRANDS = WC_ON;
+    // v32 (A2): the same coverage 2.5 mips down (~3 m): a wide, soft under-foam mask for the
+    // aeration skirt, the foam rim and the glint cut. Same sampler, another LOD.
+    vec2 uvK = (ukK + 0.5) / float(kN);
+    vec4 Kh = textureLod(physK, uvK, 2.5);
+    float halo = clamp(1.6 * (0.4 * Kh.x + Kh.y) / jv, 0.0, 1.0);
     // --- water body: Beer-Lambert per channel, single-scattering reflectance, sand return ---
     vec3 aW = (vec3(0.35, 0.06, 0.02) + WATER_TURB * vec3(0.03, 0.05, 0.12)) * WATER_SA;       // absorption 1/m (R,G,B)
     vec3 bb = (vec3(0.0005, 0.0011, 0.0024) + (0.0035 + 0.012 * WATER_TURB) * vec3(0.75, 1.75, 0.9)) * WATER_SB; // backscatter 1/m
@@ -767,11 +755,11 @@ const PHYS_SEA = String.raw`
     // kept -> lighter turquoise, through the same Beer-Lambert. Mottled at metre scale.
     {
       // Underwater bubbles under the surface foam. v32: there is no separate 15-30 s air
-      // store any more (K.w now holds the fold gate). The bubbles are the foam's own
-      // footprint: the residual and fresh coverage (already blurred by the 30 Hz sim), so
-      // the tint dies with the foam and never lingers over empty sea. The lift is of this
+      // store any more (K.w now holds the fold gate). The bubbles are a blurred copy of the
+      // foam itself (the halo, ~3 m wide), so the milky turquoise skirt sits under and around
+      // the white and dies with it, never lingering over empty sea. The lift is of this
       // water's own backscatter, so a weak crash stays a small lightening.
-      float aer = clamp(0.7 * K.y + 0.3 * K.x, 0.0, 1.0) * uAirOn;
+      float aer = halo * uAirOn;
       vec3 bbA = bb + aer * vec3(0.02, 0.16, 0.13) * (0.35 + 0.65 * aer);
       vec3 RinfA = 0.33 * bbA / (1.15 * aW + bbA);
       Rw = mix(Rw, RinfA, aer * 0.75 * (1.0 - exp(-2.0 * Kd * 2.0)));
@@ -834,220 +822,90 @@ const PHYS_SEA = String.raw`
       float wk = uWarm.w * ((0.025 + 1.6 * Fr) * (0.5 + 0.9 * toSun * toSun) + 0.3 * pow(toSun, 8.0) * (0.25 + 3.0 * Fr)) * (0.5 + 0.5 * seen);
       lin += warmC * wk;
     }
-    lin += vec3(glintRadiance) * PHYS_GLINT * uGlitM; // v30.24: the glitter takes the sun's colour (warm path at sunset)
+    // v30.24: the glitter takes the sun's colour (warm path at sunset). v32 (A4, Atlas): foam is
+    // rough, so there is no mirror glint on it (the foam itself is drawn below).
+    lin += vec3(glintRadiance) * PHYS_GLINT * uGlitM * (1.0 - smoothstep(0.05, 0.5, max(dense, resid)));
     lin *= PHYS_EXPO;
     lin = lin / (1.0 + 0.35 * lin);                   // gentle shoulder
     vec3 water = pow(max(lin, 0.0), vec3(1.0 / 2.2));
-    // --- foam (v30.6) ---
-    // Lace from an offline physics-made texture (assets/foam-lace.png, tools/make_lace.py: a bubble
-    // raft power diagram with log-normal bubbles, stretched by a curl-noise flow, strands drained to
-    // uneven widths). Three scales (2 m, 0.6 m and 0.17 m cells), each rotated; hardware mips handle
-    // LOD (no shimmer). Coverage thresholds the strand value, so as foam ages the thinnest strands
-    // break first and the holes open.
+    // --- foam (v32: one soft mask, revealed through the lace; Sea of Thieves / Tessendorf 2020) ---
+    // The 30 Hz sim (gpuSurface COVER_FS) is the mask: fresh whitewater, residual foam and the
+    // crest tip. The detail texture (assets/foam-lace.png: a bubble-raft power diagram, R/G/B/A at
+    // several scales) is shown where it beats the mask's threshold m = 1 - F, so as F decays the
+    // foam erodes into lace and holes instead of fading as a uniform decal. The detail moves from
+    // high-frequency bubble cells (fresh) to a low-frequency blotch-and-streak texture (old).
     vec2 qd = vSea.xy - foamOff;
     float fpM = max(length(dFdx(vWorld)), length(dFdy(vWorld)));
-    float age = clamp(resid / max(resid + dense, 1e-3), 0.0, 1.0);
+    float eyeD = length(eye - vWorld);
     vec2 dd = length(foamDrift) > 1e-4 ? normalize(foamDrift) : vec2(1.0, 0.0);
-    // v32 wind streaks: one world-locked field, long along the wind and narrow across it,
-    // shared by the near lace, the whitecap trail and the far LOD so they streak the same
-    // way. Three octaves (16 x 2.2 m, 7 x 0.8 m, 3 x 0.35 m); each fades to its mean once a
-    // pixel can no longer resolve it, so it never shimmers and never scrolls.
+    float fFr = clamp(dense / 0.9, 0.0, 1.0), fRe = clamp(resid / 0.9, 0.0, 1.0);
+    float Fm = max(fFr, fRe);
+    float freshW = clamp(fFr / max(Fm, 1e-3), 0.0, 1.0);   // 1 = still being fed, 0 = residual only
+    float oldK = 1.0 - freshW;
+    float tip = clamp(freshK / 0.9, 0.0, 1.0);             // the lip while it is still folding
+    float age = oldK;
+    // v32 wind streaks: one world-locked field, long along the wind and narrow across it. Three
+    // octaves (16 x 2.2 m, 7 x 0.8 m, 3 x 0.35 m); each fades to its mean once a pixel can no
+    // longer resolve it, so it never shimmers and never scrolls. Old foam lines up along it.
     vec2 qw = vec2(dot(qd, dd), dot(qd, vec2(-dd.y, dd.x)));
     float oSm = 1.0 - smoothstep(0.5, 1.6, fpM), oSf = 1.0 - smoothstep(0.08, 0.3, fpM);
     float strk = 0.5 * valueNoise(vec2(qw.x / 16.0, qw.y / 2.2) + 71.0)
                + 0.3 * mix(0.5, valueNoise(vec2(qw.x / 7.0, qw.y / 0.8) + 77.0), oSm)
                + 0.2 * mix(0.5, valueNoise(vec2(qw.x / 3.0, qw.y / 0.35) + 83.0), oSf);
-    // FOAM_FLOW_BEGIN
-    // v31.1: the lace used to scroll on a prescribed eddy (not the simulated orbital
-    // motion). It is world-locked now, so a patch does not swim under a fixed camera.
-    vec2 qf = qd, qf2 = qd;
-    float flowW = 1.0;
-    // FOAM_FLOW_END
-    // stretched along the flow as the foam ages (accumulated strain, capped)
+    // stretched along the wind as the foam ages (accumulated strain, capped)
     float stx = mix(1.0, clamp(0.84 * sqrt(max(jv, 0.36)), 0.78, 0.92), smoothstep(0.4, 0.85, age));
-    vec2 qs = vec2(dot(qf, dd) * stx, dot(qf, vec2(-dd.y, dd.x)));
-    vec2 qs2 = vec2(dot(qf2, dd) * stx, dot(qf2, vec2(-dd.y, dd.x)));
+    vec2 qs = vec2(qw.x * stx, qw.y);
     const mat2 R2 = mat2(0.809, 0.588, -0.588, 0.809), R3 = mat2(0.276, -0.961, 0.961, 0.276);
     float o2 = 1.0 - smoothstep(0.03, 0.08, fpM), o3 = 1.0 - smoothstep(0.009, 0.025, fpM);
     vec4 t1 = texture(foamLace, qs / 40.0);
     vec4 t2 = texture(foamLace, R2 * qs / 12.0 + 0.31);
     vec4 t3 = texture(foamLace, R3 * qs / 3.5 + 0.67);
-    if (flowW < 1.0) {
-      t1 = mix(texture(foamLace, qs2 / 40.0), t1, flowW);
-      t2 = mix(texture(foamLace, R2 * qs2 / 12.0 + 0.31), t2, flowW);
-    }
-    float s = clamp(mix(0.85 * t1.g, 0.3 * t1.g + 0.85 * t2.g, o2) + 0.15 * mix(0.11, t3.r, o3), 0.0, 1.0); // v30.8d: closed cells at every scale; finest cells take over when resolved // v30.8b: 0.6 m closed cells dominate (GAD 0.3-1.5 m)
-    float sw = 0.06 + fwidth(s);
-    float wallW = 0.1 * smoothstep(0.05, 0.25, fpM); // v30.8.1: walls thicken where the pixel is coarse, so they don't blend to grey
-    float rr = smoothstep(0.04, 0.4, resid);                           // clear water below ~0.3
-    float cR = 0.3 + 0.45 * rr; // v30.7: thin residual already shows its thickest strands
-    float aR = rr > 0.0 ? smoothstep(1.0 - cR - wallW - sw, 1.0 - cR - wallW + sw, s) : 0.0;
-    aR *= mix(0.8, 1.0, t2.b) * smoothstep(0.0, 0.2, rr);
-    float sl = 0.0, sM = s;
-    if (strandsOn > 0.5) {
-      float ysh = clamp(0.5 * Sb.g / max(Sd.r + 0.5 * Sb.g, 1e-4), 0.0, 1.0); // v30.22f: young (dense-phase) share: its lace mask is lower (holed patch, not specks)
-      sl = (Sd.r + 0.5 * Sb.g) / jv;
-      float dns_ = smoothstep(0.1, 0.5, Sb.r / jv), dth_ = FOAM_NEW ? (1.5 + 0.25 * (1.0 - smoothstep(1.5, 3.0, length(foamDrift)))) * 0.25 * dns_ : 0.0; // v30.22g/h: denser strand foam lowers the lace threshold (connected lace, not twig fragments); a little more at low wind (~1% at 10 m/s)
-      sM = s; if (FOAM_NEW) { vec2 qk = vec2(qs.x * mix(1.0, 0.86, smoothstep(0.4, 0.9, age)), qs.y); sM = clamp(0.55 * texture(foamLace, qk / 10.0 + 0.43).g + 0.6 * texture(foamLace, R2 * qk / 4.0 + 0.11).g * (1.0 - 0.5 * smoothstep(0.08, 0.3, fpM)), 0.0, 1.0);
-        // v30.24 item 12 (Michael 0bd581d5: big crack / line patterns across the foam patches): the lace (G) is a net of
-        // thin walls (90% of texels 0), so the mask drew a crazed white net over every patch. The soft mask is the
-        // blurred bubble-pit field (A, mip 3: median 0.39, 5-95% 0.05-0.72): blotches and holes, no lines;
-        // LACE_SOFT (?lsoft=, 0 = v30.22h) is its share
-        float sMb = 0.5 * (texture(foamLace, qk / 10.0 + 0.43, 3.0).a + texture(foamLace, R2 * qk / 3.0 + 0.11, 2.5).a);
-        sM = mix(sM, clamp(1.4 * (sMb - 0.26), 0.0, 1.0), LACE_SOFT);
-      }
-      // v31.1 zoom: the old far end of this mix was 1.0, so once a pixel was coarser than
-      // LACE_FAR the holes were discarded and the mip average read as a white sheet.
-      // t1.a is the coarse lace sample already taken above (qs/40). A second fetch at qs/32,
-      // plus the web/rem pair, ran on every water pixel and the age mix replaced the lace
-      // as soon as the dense phase ended, which is why a 6 s trail collapsed to specks.
-      float gapKeep = smoothstep(0.08, 0.52, clamp(t1.a, 0.0, 1.0));
-      aR = (1.0 - exp(-2.5 * sl)) * /* v30.18.2: non-saturating, opacity follows strand age */ mix(0.8, 1.0, t2.b) * mix(smoothstep(max(mix(0.35, LACE_YLO, ysh) - dth_, 0.0), max(mix(0.6, LACE_YLO + 0.25, ysh) - dth_, FOAM_NEW ? mix(0.12, 0.22, smoothstep(1.5, 2.5, length(foamDrift))) : -1.0), sM), gapKeep, smoothstep(LACE_FAR, LACE_FAR > 0.1 ? LACE_FAR + 0.6 : 0.25, fpM));
-      if (FOAM_NEW) aR *= smoothstep(0.05, 0.15, Sb.r / jv); // v30.22g: an isolated strand line (low blurred lace) is not drawn (white twig specks) (was 0.04: flat pale fill at medium range) // close up the splatted strand (0.4 m cells) breaks into the fine lace walls
-    }
-    float denseR = strandsOn > 0.5 ? max(dW, 0.85 * dense) : dense;
-    // Dense whitewater: the same strands at a low threshold, so the texture shows inside the white
-    float dn = denseR * (0.9 + 0.45 * (s - 0.15) + 0.3 * (t3.a - 0.4) * o3 + 0.25 * (t1.g - 0.1));
-    float fr = clamp(freshK * 2.0, 0.0, 1.0);
-    float aD = smoothstep(0.22, 0.5 - 0.2 * fr, dn); // crisp where fresh (the roller's leading edge), soft in the trail // v30.7: dense >= ~0.3 shows (was ~0.8)
-    // v30.15 whitecaps from strands, not a white fill: three layers of crest-aligned filaments
-    // (broad bands ~5x20 m, mid 1-2 m, fine 0.1-0.3 m, plus the fine-layer strand lines) summed; the
-    // whitecap density sets the threshold, so the breaking front is nearly closed (still holed),
-    // the trail keeps only the strongest strands and frays into lace. Opacity varies per strand.
-    float wcM = 0.0;
-    if (strandsOn > 0.5 && WC_STRANDS) {
-      vec2 qc = vec2(dot(qf, dd), dot(qf, vec2(-dd.y, dd.x)));         // across-crest, along-crest (m)
-      // Fresh foam is nearly round. Aged foam keeps the long along-crest streaks.
-      float along = mix(4.0, 1.2, clamp(fr, 0.0, 1.0));
-      float m0 = texture(foamLace, vec2(qc.x / 5.0, qc.y / (5.0 * along)) + 0.71).g;
-      float m1 = texture(foamLace, vec2(qc.x / 1.5, qc.y / (1.5 * along)) + 0.13).g;
-      float oF = 1.0 - smoothstep(0.02, 0.06, fpM);
-      // The finest lace is round on fresh foam. A 4:1 sample there drew lines that popped on.
-      float m2 = texture(foamLace, vec2(qc.x / 0.5, qc.y / mix(1.6, 0.55, clamp(fr, 0.0, 1.0))) + 0.52).g;
-      float slc = clamp(2.0 * sl, 0.0, 1.0);
-      float lineK = 1.0 - 0.7 * clamp(fr, 0.0, 1.0);
-      float st = 0.35 * m0 + 0.55 * m1 + mix(0.12, 0.25 * m2, oF) * lineK + 0.12 * slc;   // v30.19.1: fewer hard strand lines inside the band   // ~0..1.4
-      float D = clamp(WC_D * denseR * (0.8 + 0.6 * fr), 0.0, 1.0);   // v30.16.1: WC_D < 1 keeps the dense front holed (no sheets)
-      float thr = mix(WC_T0, WC_T1, D);                                   // dense front: low threshold
-      // v32: below a gale the caps are small, so a little lower threshold lets each one
-      // open to a visible white horse (Beaufort 5-6) instead of a few white pixels.
-      thr -= 0.1 * (1.0 - smoothstep(3.0, 8.0, length(foamDrift))) * smoothstep(0.05, 0.3, denseR);
-      // v32: the 0.25 edge (v30.18.4) was half the strand range, so every cap read as a soft
-      // pillow with its holes filled. A narrow edge keeps the lace cells and holes; the fresh lip
-      // is crisp, the trail a little softer. fwidth still covers the pixel (no shimmer).
-      float w = mix(0.16, 0.07, clamp(fr, 0.0, 1.0)) + fwidth(st);
-      float wkF = smoothstep(3.0, 8.0, length(foamDrift));              // v30.19.3: ~0 below 15 m/s, 1 at 25 m/s
-      float eG = smoothstep(0.15 * WC_G, mix(1.6, WC_GE, wkF) * WC_G, denseR); // v30.19.2 wide edge zone; v30.19.3 narrower in strong wind (coverage)
-      // edge breaks into lace/holes: toward the rim only the strongest lace cells stay, with a soft falloff
-      float eL = smoothstep(0.75 - 0.5 * eG, 1.05 - 0.4 * eG, 0.55 * s + 0.45 * m1 + 0.25 * m0);
-      wcM = smoothstep(thr - w, thr + w, st) * eG * mix(eL, 1.0, eG * eG);
-      float far = smoothstep(0.3, 0.9, fpM);                            // v30.20: strands kept much farther out (was 0.08-0.5)
-      vec2 qsF = qs; // v31.7: the 5:1 far resample reshaped the same lace when the camera pulled back. Holes stay on the world coordinate.
-      float lfW = texture(foamLace, qsF / 160.0 + 0.19).g;             // v30.20: 160 m lace cells break up far whitecap blobs
-      // v31.1: do not replace the whitecap with a filled coverage blob when the pixel gets coarse.
-      // Keep the near shape and only open the same world-locked gaps.
-      wcM *= mix(1.0, smoothstep(0.2, 0.7, 0.6 * lfW + 0.4 * t1.g), far);
-      if (FOAM_NEW) { float dWr = Sb.g * 4.0 / jv; wcM *= smoothstep(0.08, 0.33, sM + 0.1 * smoothstep(2.0, 5.0, dWr)); } // v30.22h: whitecap frays into the streak lace (no round discs)
-      aD = wcM * mix(mix(0.5, WC_HW, wkF), 1.0, smoothstep(0.25, 0.95, 0.6 * m0 + 0.5 * m1 + 0.3 * D)); // v30.19.2 mottled interior; v30.19.3 less mottle in strong wind
-      // v32: whitewater thins as it stops being fed. Fresh breaking foam is nearly opaque;
-      // once the crest has passed the same cap shows the water through it before it frays.
-      aD *= mix(0.82, 1.0, smoothstep(0.0, 0.6, fr));
-      // The trailing part of the cap (not fresh) frays into the wind streaks.
-      aD *= mix(1.0, smoothstep(0.3, 0.55, strk + 0.35 * D), 0.6 * (1.0 - fr));
-    }
-    float edgeZone = (WC_STRANDS && strandsOn > 0.5 ? 0.35 : 1.0) * smoothstep(0.05, 0.25, dn) * (1.0 - aD);
-    // v31.1 edges: dense foam stays crisp, thin foam stays soft, and the rim is clumpy
-    // rather than a single feathered outline. A few detached flecks sit just outside.
-    { float crisp = smoothstep(0.08, 0.5, max(denseR, aD));
-      float rim = smoothstep(0.04, 0.4, aR) * (1.0 - smoothstep(0.45, 0.9, aR));
-      float rimN = valueNoise(qd / 4.5 + 12.0);
-      aR *= mix(1.0, smoothstep(0.3, 0.62, rimN), rim * (1.0 - crisp));
-      float fleckN = valueNoise(qd / 2.4 + 33.0);
-      float fleck = (1.0 - smoothstep(0.06, 0.4, max(aR, aD))) * smoothstep(0.7, 0.98, fleckN) * smoothstep(0.1, 0.32, sl) * (1.0 - crisp);
-      aR = clamp(aR + fleck * 0.28, 0.0, 1.0);
-      float windU = length(foamDrift);
-      if (windU > 14.0) {
-        float across = dot(qd, vec2(-dd.y, dd.x));
-        float row = 0.5 + 0.5 * sin(across * 0.42);
-        aR *= mix(1.0, 0.62 + 0.38 * row, smoothstep(14.0, 20.0, windU) * smoothstep(0.35, 0.8, age));
-      }
-      // v32 residual. The strand footprint is a round splat, and fading it out with the
-      // strand density drew soft disks of white (the pads and leopard blobs). The footprint
-      // edge is now a threshold on (density + lace + wind streak): the core stays, the rim
-      // breaks into lace and into fingers drawn out along the wind. Old foam also keeps
-      // only the streaks and is a thin, semi-transparent raft, never fresh-whitewater opaque.
-      if (strandsOn > 0.5) {
-        float edgeV = 1.0 - exp(-2.5 * sl);
-        float oldK = smoothstep(0.3, 0.85, age);
-        float rag = edgeV + 0.45 * (s - 0.45) + mix(0.3, 0.55, oldK) * (strk - 0.5);
-        aR *= smoothstep(0.18, 0.4 + 0.15 * oldK, rag);
-        aR *= mix(1.0, smoothstep(0.32, 0.62, strk + 0.25 * edgeV), 0.65 * oldK);
-        aR *= mix(0.95, 0.62, oldK);
-      } }
-    float fa = clamp(max(aD, aR) + edgeZone * s, 0.0, 1.0);
-    // Lighting: wrap-Lambert on the wave normal plus the foam height bump (B channel), sun and sky;
-    // contact darkening at the thin strand edges, thin foam shows the water colour under it.
+    // fresh: 0.6 m bubble pits (A) and cell walls (G), the 0.17 m cells where resolved
+    float dHi = 0.45 * t2.a + 0.35 * t2.g + 0.2 * mix(0.4, t3.a, o3);
+    // old: blurred pits (A at mip 2.5-3, blotches, no wall lines) and the wind streaks
+    float dLo = 0.3 * (texture(foamLace, qs / 10.0 + 0.43, 3.0).a + texture(foamLace, R2 * qs / 3.0 + 0.11, 2.5).a) + 0.4 * strk + 0.15 * t1.g;
+    float detail = mix(clamp((dHi - 0.04) / 0.6, 0.0, 1.0), clamp((dLo - 0.2) / 0.55, 0.0, 1.0), smoothstep(0.2, 0.8, oldK));
+    foamDetailG = detail;
+    // A1: opacity through the mask. The edge is wider on old foam and where the halo is thin
+    // (the rim of a patch, a lone fleck), so no patch has a hard cut-out outline.
+    float Fn = pow(Fm, 0.8);
+    float mT = 1.0 - Fn;
+    float wE = mix(0.05, 0.15, oldK) + 0.1 * (1.0 - smoothstep(0.15, 0.6, halo)) + fwidth(detail);
+    float aN = smoothstep(mT - wE, mT + wE, detail) * smoothstep(0.0, 0.1, Fm);
+    aN = max(aN, smoothstep(0.3, 0.8, tip) * smoothstep(0.1, 0.35, detail));  // the folding lip is nearly closed
+    // A5: once the lace is sub-pixel or past ~150 m, the foam is the mip-averaged coverage
+    // (Dupuy-Bruneton): thresholding a ~uniform detail by 1 - F covers about F of the area,
+    // so the far opacity is the coverage at the pixel's footprint, a smooth whitening.
+    float lodK = log2(max(fpM * float(kN) / fftL, 1.0));
+    vec4 Kf = textureLod(physK, uvK, lodK + 0.5);
+    float FmF = clamp(max(Kf.x, Kf.y) / (0.9 * jv), 0.0, 1.0);
+    float farW = max(smoothstep(0.35, 1.0, fpM), smoothstep(120.0, 180.0, eyeD));
+    float fa = clamp(mix(aN, 0.9 * pow(FmF, 0.8), farW), 0.0, 1.0);
+    float freshV = mix(freshW * smoothstep(0.1, 0.5, fFr), clamp(Kf.x / max(max(Kf.x, Kf.y), 1e-3), 0.0, 1.0), farW);
+    // Lighting: wrap-Lambert on the wave normal plus the foam height bump (B channel), sun and sky.
     float e1 = 1.0 / 1024.0;
     float bh = t2.b, bhx = texture(foamLace, R2 * qs / 12.0 + 0.31 + vec2(e1, 0.0)).b, bhz = texture(foamLace, R2 * qs / 12.0 + 0.31 + vec2(0.0, e1)).b;
-    // v30.8 foam volume: the roller is an aerated lump standing ~0.03 U m proud of the surface
-    // (0.3-0.8 m at 10-25 m/s, foam-realism-2 rank 5), older foam a thin raft. Its height field
-    // (coverage-shaped, plus the lace bubble height) gives a foam normal: sunlit sides white, sides
-    // facing away lit only by the blue sky (multiple scattering keeps them bright-ish, ~0.6-0.7).
-    float rollH = clamp(0.1 * length(foamDrift), 0.2, 0.8); // ~0.2 m at 10 m/s .. 0.8 m at 25 m/s
-    float hf = (0.3 * smoothstep(0.1, 0.8, denseR) + 0.15 * smoothstep(0.05, 0.5, resid)) * rollH + 0.08 * bh * o2;
+    // foam volume: the roller stands ~0.03 U m proud of the surface, older foam is a thin raft
+    float rollH = clamp(0.1 * length(foamDrift), 0.2, 0.8);
+    float hf = (0.3 * smoothstep(0.1, 0.8, fFr) + 0.15 * smoothstep(0.05, 0.5, fRe)) * rollH + 0.08 * bh * o2;
     vec3 pF = vWorld + vec3(0.0, hf, 0.0);
     vec3 nR = normalize(cross(dFdx(pF), dFdy(pF))); if (nR.y < 0.0) nR = -nR;
     vec3 nF = normalize(mix(n, nR, 0.85) + vec3(bh - bhx, 0.0, bh - bhz) * 3.0 * o2);
     float sunT = clamp(dot(nF, L), 0.0, 1.0);
     vec3 foamC = mix(vec3(0.84, 0.87, 0.89), vec3(0.98, 0.99, 1.0) * mix(vec3(1.0), uSunC, 0.45), 0.55 + 0.45 * sunT);
-    foamC = mix(foamC, foamC * (0.55 + 0.9 * uWarm.rgb * vec3(0.58, 0.72, 0.83)), 0.3 * uWarm.w); // v30.24: a pink/orange cast at sunset
-    foamC *= mix(0.96, 1.04, aD * mix(0.78, 1.0, fr));
-    foamC *= 1.0 - 0.22 * t3.a * aD * o3;                               // 1-3 cm bubble pits
-    vec3 foamWhite = foamC; // lit surface foam, before thin foam shows the water through it
-    // v30.15: thin foam shows bubbly (milky turquoise) water under it, never a grey film
+    foamC = mix(foamC, foamC * (0.55 + 0.9 * uWarm.rgb * vec3(0.58, 0.72, 0.83)), 0.3 * uWarm.w); // a pink/orange cast at sunset
+    foamC *= 1.0 - 0.22 * t3.a * o3 * freshV;                       // 1-3 cm bubble pits
+    // A4: foam albedo ~0.45 for aged foam (Koepke 1984 via Dupuy-Bruneton), the active crest
+    // brighter (~0.85). foamC above is the lit colour at fresh albedo, in display space.
+    foamWhiteG = foamC; // the surf is fresh foam
+    float alb = mix(0.45, 0.85, max(freshV, tip));
+    foamC *= pow(alb / 0.85, 1.0 / 2.2);
+    // A2: white -> turquoise skirt -> deep blue. Thin residual foam shows the bubbly water under
+    // it, and the halo tints the water around and between the foam.
     vec3 milkyW = mix(water, vec3(0.60, 0.86, 0.85), 0.6);
-    // v32: "thick" (fully lit white) comes from the whitewater only: the dense phase and
-    // the young strands. It used to include the residual lace alpha, so any old patch over
-    // 0.4 was painted solid white. Residual lace is the bubble raft over milky water.
-    float thick = max(smoothstep(0.1, 0.45, aD), max(smoothstep(0.04, 0.22, dn), smoothstep(0.04, 0.18, sl)) * (1.0 - 0.75 * smoothstep(0.35, 0.85, age)));
-    foamC = mix(mix(milkyW, foamC, 0.45), foamC, thick);
-    foamC *= mix(0.94, 1.0, smoothstep(0.0, 0.6, fa));
-    // The water under and between the residual lace is bubble-tinted, not clear and not grey.
-    vec3 waterB = mix(water, milkyW, 0.35 * rr * (1.0 - fa));
-    color = mix(waterB, foamC, fa);
-    // v30.14 distance LOD: where strands are sub-pixel the mip average is a foam FRACTION, not a line;
-    // draw it as brighter milky turquoise (bubbly water), not as grey translucent shapes. Whitecaps stay white.
-    {
-      float farW = smoothstep(0.25, 0.8, fpM);   // v30.20: lace kept to ~4x farther (was 0.04-0.3: flat 'leopard' blobs at mid distance)
-      if (farW > 0.0 && strandsOn > 0.5) {
-        float covF = clamp((1.4 * Sd.r + 0.6 * Sb.g) / jv, 0.0, 1.0);
-        // The mip strand fraction is the foam area in this pixel. Lace grain keeps
-        // the world-locked holes. The blend weight is that area, so the shoal is
-        // not snapped up to solid white and not repainted as milky water.
-        vec2 qsF2 = qs; // same world lace as the close view; the hole weights below are unchanged
-        float lf = texture(foamLace, qsF2 / 160.0 + 0.19).g, lf2 = texture(foamLace, qsF2 / 22.0 + 0.57, 1.0).a;
-        lf = mix(lf, 0.7 * lf + 0.5 * lf2, FAR_STREAK);
-        float hole = mix(0.4, 1.0, smoothstep(0.15, 0.8, 0.55 * lf + 0.45 * t1.g));
-        hole *= mix(1.0, smoothstep(0.2, 0.65, lf2), 0.55 * FAR_STREAK);
-        // Weight is the strand fraction. The coverage knee is unchanged from v31.5,
-        // so this does not recruit water outside that footprint.
-        float area = smoothstep(0.02, 0.22, covF) * hole;
-        // v32: the same wind streaks as the near view, thresholded against the coverage, so a
-        // patch at the default camera is a set of streaks with gaps and a broken rim, not a pad.
-        area *= smoothstep(0.32, 0.6, strk + 0.3 * smoothstep(0.1, 0.6, covF) - 0.1);
-        // v31.6: blending that partial area with the water turned a visible shoal grey.
-        // Lift the interior of the same footprint to the lit foam colour. The skirt
-        // below about 0.18 stays at or under the old weight, so the outline does not grow.
-        // v32: that lift filled every mid-range patch with solid white (the cotton blobs at the
-        // default camera). The strand fraction is now drawn as what it is: bubble-tinted water
-        // over the whole footprint, and lit white only in proportion to the area that is still
-        // whitewater (dense or fresh). Residual far foam stays milky, the caps stay bright.
-        float whiteK = clamp(max(aD, smoothstep(0.15, 0.55, denseR) * (0.45 + 0.55 * fr)), 0.0, 1.0);
-        vec3 farC = mix(water, milkyW, 0.45 * smoothstep(0.02, 0.45, area));
-        farC = mix(farC, foamWhite, clamp(area * mix(0.25, 1.0, whiteK), 0.0, 0.92));
-        color = mix(color, farC, farW);
-      }
-    }
+    vec3 foamCol = mix(mix(milkyW, foamC, 0.55), foamC, max(freshV, smoothstep(0.5, 0.9, mix(Fm, FmF, farW))));
+    vec3 waterB = mix(water, milkyW, 0.4 * halo * (1.0 - fa));
+    color = mix(waterB, foamCol, fa);
     if (FOAM_DEBUG) color = vec3(clamp(max(dense, 0.6 * resid), 0.0, 1.0));
     // 3 = (dW young strands, Sd.r old strands, fpM / 2 m)
     if (SAND_DBG2) color = texture(sceneTex, gl_FragCoord.xy / vec2(textureSize(sceneTex, 0))).rgb;
@@ -1100,7 +958,7 @@ const LIGHT_DEFS = `#define UPWELL ${UPWELL.toFixed(4)}\n#define SKY_HORIZON_C $
 // GAD 18:03: TRANSL_COLOR is back to the v28 teal and is NOT part of the 265 hue rotation (the rotated
 // 0.3177, 0.5570, 0.7756 drew blue slivers ~(66,115,160) on the lips).
 const TRANSL_DEFS = "#define TRANSL_COLOR 0.22, 0.60, 0.50\n#define TRANSL_G 0.7\n#define TRANSL_SCATTER 80.0\n#define TRANSL_SKY 6.5\n#define TRANSL_TIP 0.8\n#define TRANSL_MAX 0.85\n";
-const LACE_DEFS = `#define BUMP_ON ${SEA_PARAMS.get("bump") === "0" ? "0.0" : "1.0"}\n#define FOAM_BUMP 2.2\n` + "#define FOAM_WHITE 0.94\n#define FOAM_HOLE_M 1.2\n#define FOAM_HOLE_AT 0.82\n#define FOAM_OLD_DIM 0.94\n#define FRESH_LO 0.1\n#define FRESH_HI 0.38\n#define CREST_ALPHA 0.9\n#define FRESH_GRAIN 0.25\n#define DIM_LACE 0.3\n#define DIM_DENSE 0.64\n#define LACE_HOLE_BASE 0.06\n#define LACE_HOLE_DENSE 0.08\n#define LACE_HOLE_SOFT 0.08\n#define LACE_CAP 0.62\n#define LACE_WARP 0.5\n#define LACE_EDGE 0.3\n#define LACE_RIDGE_LO 0.65\n#define LACE_RIDGE_HI 0.9\n#define LACE_MASK_LO 0.6\n#define LACE_SHIFT_X 2.5\n#define LACE_SHIFT_Y 1.5\n#define LACE_DASH 0.45\n#define LACE_SHOULDER 0.8\n#define LACE_FINE_LINE 0.35\n#define LACE_SH_LO 0.45\n#define LACE_SH_HI 0.65\n#define LACE_MASK_HI 0.95\n" + `#define LACE_GRAIN ${Number(new URLSearchParams(globalThis.location?.search ?? "").get("lacegrain") ?? 0.8).toFixed(3)}\n`;
+const LACE_DEFS = `#define BUMP_ON ${SEA_PARAMS.get("bump") === "0" ? "0.0" : "1.0"}\n#define FOAM_BUMP 2.2\n` + "#define FOAM_WHITE 0.94\n#define FOAM_HOLE_M 1.2\n#define FOAM_HOLE_AT 0.82\n#define FOAM_OLD_DIM 0.75\n#define FRESH_LO 0.1\n#define FRESH_HI 0.38\n#define CREST_ALPHA 0.9\n#define FRESH_GRAIN 0.25\n#define DIM_LACE 0.3\n#define DIM_DENSE 0.64\n#define LACE_HOLE_BASE 0.06\n#define LACE_HOLE_DENSE 0.08\n#define LACE_HOLE_SOFT 0.08\n#define LACE_CAP 0.62\n#define LACE_WARP 0.5\n#define LACE_EDGE 0.3\n#define LACE_RIDGE_LO 0.65\n#define LACE_RIDGE_HI 0.9\n#define LACE_MASK_LO 0.6\n#define LACE_SHIFT_X 2.5\n#define LACE_SHIFT_Y 1.5\n#define LACE_DASH 0.45\n#define LACE_SHOULDER 0.8\n#define LACE_FINE_LINE 0.35\n#define LACE_SH_LO 0.45\n#define LACE_SH_HI 0.65\n#define LACE_MASK_HI 0.95\n" + `#define LACE_GRAIN ${Number(new URLSearchParams(globalThis.location?.search ?? "").get("lacegrain") ?? 0.8).toFixed(3)}\n`;
 
 // Sun glitter and sky reflection spread by the physical slope distribution (roughness.js).
 // The glint adds to the water and rolls off softly below foam brightness.
@@ -1697,7 +1555,8 @@ void main() {
   }
   // Foam takes the fine chop's shading only where it darkens: never brighter than the
   // big grid's lighting alone would make it.
-  // v30b: fresh foam is near white (luma ~236 lit, FOAM_WHITE); it dulls only as it ages (FOAM_OLD_DIM).
+  // v30b: fresh foam is near white (luma ~236 lit, FOAM_WHITE); it dulls as it ages (FOAM_OLD_DIM).
+  // v32: aged foam at albedo ~0.45 against ~0.85 fresh (Koepke), (0.45 / 0.85)^(1 / 2.2) = 0.75.
   vec3 foamColor = FOAM_WHITE * vec3(0.985, 1.0, 1.0) * (0.95 + 0.05 * min(lightFoam, lightBig)) * mix(1.0, FOAM_OLD_DIM, oldness);
   // Old streaks also take a little shade on ripple sides turned from the sun
   // (up to 15% darker). Fresh foam is not touched.
@@ -1874,9 +1733,12 @@ export function seaFragmentSources(derivatives, island) {
     float foamN = sfNoise(rest * 1.35 + vec2(foamT * 0.16, foamT * 0.05));
     float foamN2 = sfNoise(rest * 3.2 - vec2(foamT * 0.09, foamT * 0.12) + 7.0);
     float blobs = smoothstep(0.4, 0.75, foamN * 0.6 + foamN2 * 0.4);
-    float lace = 0.75 + 0.25 * smoothstep(0.35, 0.7, sfNoise(rest * 7.0 + foamT * 0.2));
-    float surf = band * blobs * lace * (1.0 - inland);
-    surf *= uBeach > 1.5 ? 0.0 : 1.0;
+    // v32: the surf is the same foam language as the sea: a soft mask (the swash band, broken
+    // by the drifting blobs) revealed through the sea foam's lace detail (foamDetailG), so it
+    // erodes into lace and holes at its edges instead of drawing soft white discs.
+    float surfM = band * mix(0.35, 1.0, blobs) * (1.0 - inland);
+    surfM *= uBeach > 1.5 ? 0.0 : 1.0;
+    float surf = smoothstep(1.0 - surfM - 0.12, 1.0 - surfM + 0.12, foamDetailG) * smoothstep(0.02, 0.12, surfM);
     if (cover > 0.002 || surf > 0.002) {
       // Dry and wet sand blended on the smooth contour, not the vertex height.
       vec3 sand = sfSandShore(rest, bedN, bedN);
@@ -1885,7 +1747,7 @@ export function seaFragmentSources(derivatives, island) {
       sand *= 0.94 + 0.1 * ndl;
       color = mix(color, sand, clamp(cover, 0.0, 1.0));
       color = mix(color, color * vec3(0.8, 0.82, 0.82), damp * smoothstep(0.1, 0.6, cover) * 0.85);
-      color = mix(color, vec3(0.94, 0.96, 0.97) * (0.9 + 0.1 * ndl), clamp(surf, 0.0, 0.72));
+      color = mix(color, foamWhiteG * (0.9 + 0.1 * ndl), clamp(surf, 0.0, 0.72));
     }
   }` : ""}
   color *= dayTint;
