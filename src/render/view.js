@@ -849,6 +849,15 @@ const PHYS_SEA = String.raw`
     float fpM = max(length(dFdx(vWorld)), length(dFdy(vWorld)));
     float age = clamp(resid / max(resid + dense, 1e-3), 0.0, 1.0);
     vec2 dd = length(foamDrift) > 1e-4 ? normalize(foamDrift) : vec2(1.0, 0.0);
+    // v32 wind streaks: one world-locked field, long along the wind and narrow across it,
+    // shared by the near lace, the whitecap trail and the far LOD so they streak the same
+    // way. Three octaves (16 x 2.2 m, 7 x 0.8 m, 3 x 0.35 m); each fades to its mean once a
+    // pixel can no longer resolve it, so it never shimmers and never scrolls.
+    vec2 qw = vec2(dot(qd, dd), dot(qd, vec2(-dd.y, dd.x)));
+    float oSm = 1.0 - smoothstep(0.5, 1.6, fpM), oSf = 1.0 - smoothstep(0.08, 0.3, fpM);
+    float strk = 0.5 * valueNoise(vec2(qw.x / 16.0, qw.y / 2.2) + 71.0)
+               + 0.3 * mix(0.5, valueNoise(vec2(qw.x / 7.0, qw.y / 0.8) + 77.0), oSm)
+               + 0.2 * mix(0.5, valueNoise(vec2(qw.x / 3.0, qw.y / 0.35) + 83.0), oSf);
     // FOAM_FLOW_BEGIN
     // v31.1: the lace used to scroll on a prescribed eddy (not the simulated orbital
     // motion). It is world-locked now, so a patch does not swim under a fixed camera.
@@ -922,6 +931,9 @@ const PHYS_SEA = String.raw`
       float st = 0.35 * m0 + 0.55 * m1 + mix(0.12, 0.25 * m2, oF) * lineK + 0.12 * slc;   // v30.19.1: fewer hard strand lines inside the band   // ~0..1.4
       float D = clamp(WC_D * denseR * (0.8 + 0.6 * fr), 0.0, 1.0);   // v30.16.1: WC_D < 1 keeps the dense front holed (no sheets)
       float thr = mix(WC_T0, WC_T1, D);                                   // dense front: low threshold
+      // v32: below a gale the caps are small, so a little lower threshold lets each one
+      // open to a visible white horse (Beaufort 5-6) instead of a few white pixels.
+      thr -= 0.1 * (1.0 - smoothstep(3.0, 8.0, length(foamDrift))) * smoothstep(0.05, 0.3, denseR);
       // v32: the 0.25 edge (v30.18.4) was half the strand range, so every cap read as a soft
       // pillow with its holes filled. A narrow edge keeps the lace cells and holes; the fresh lip
       // is crisp, the trail a little softer. fwidth still covers the pixel (no shimmer).
@@ -941,7 +953,9 @@ const PHYS_SEA = String.raw`
       aD = wcM * mix(mix(0.5, WC_HW, wkF), 1.0, smoothstep(0.25, 0.95, 0.6 * m0 + 0.5 * m1 + 0.3 * D)); // v30.19.2 mottled interior; v30.19.3 less mottle in strong wind
       // v32: whitewater thins as it stops being fed. Fresh breaking foam is nearly opaque;
       // once the crest has passed the same cap shows the water through it before it frays.
-      aD *= mix(0.7, 1.0, smoothstep(0.0, 0.6, fr));
+      aD *= mix(0.82, 1.0, smoothstep(0.0, 0.6, fr));
+      // The trailing part of the cap (not fresh) frays into the wind streaks.
+      aD *= mix(1.0, smoothstep(0.3, 0.55, strk + 0.35 * D), 0.6 * (1.0 - fr));
     }
     float edgeZone = (WC_STRANDS && strandsOn > 0.5 ? 0.35 : 1.0) * smoothstep(0.05, 0.25, dn) * (1.0 - aD);
     // v31.1 edges: dense foam stays crisp, thin foam stays soft, and the rim is clumpy
@@ -959,16 +973,18 @@ const PHYS_SEA = String.raw`
         float row = 0.5 + 0.5 * sin(across * 0.42);
         aR *= mix(1.0, 0.62 + 0.38 * row, smoothstep(14.0, 20.0, windU) * smoothstep(0.35, 0.8, age));
       }
-      // v32 residual: aged foam is drawn out along the wind into streaks (a world-locked
-      // noise, 9 m along x 1.2 m across, so it does not swim or pop), and it is a thin,
-      // semi-transparent raft. It never reaches the opacity of fresh whitewater, which
-      // is what made old patches read as cotton pads sitting on the sea.
-      { vec2 qw = vec2(dot(qd, dd), dot(qd, vec2(-dd.y, dd.x)));
-        float oS = 1.0 - smoothstep(0.08, 0.3, fpM);                        // fine streak only where it is resolved
-        float strk = 0.65 * valueNoise(vec2(qw.x / 9.0, qw.y / 1.2) + 71.0) + 0.35 * mix(0.5, valueNoise(vec2(qw.x / 3.5, qw.y / 0.45) + 83.0), oS);
+      // v32 residual. The strand footprint is a round splat, and fading it out with the
+      // strand density drew soft disks of white (the pads and leopard blobs). The footprint
+      // edge is now a threshold on (density + lace + wind streak): the core stays, the rim
+      // breaks into lace and into fingers drawn out along the wind. Old foam also keeps
+      // only the streaks and is a thin, semi-transparent raft, never fresh-whitewater opaque.
+      if (strandsOn > 0.5) {
+        float edgeV = 1.0 - exp(-2.5 * sl);
         float oldK = smoothstep(0.3, 0.85, age);
-        aR *= mix(1.0, smoothstep(0.28, 0.7, strk), 0.7 * oldK);
-        aR *= mix(0.85, 0.5, oldK);
+        float rag = edgeV + 0.45 * (s - 0.45) + mix(0.3, 0.55, oldK) * (strk - 0.5);
+        aR *= smoothstep(0.18, 0.4 + 0.15 * oldK, rag);
+        aR *= mix(1.0, smoothstep(0.32, 0.62, strk + 0.25 * edgeV), 0.65 * oldK);
+        aR *= mix(0.95, 0.62, oldK);
       } }
     float fa = clamp(max(aD, aR) + edgeZone * s, 0.0, 1.0);
     // Lighting: wrap-Lambert on the wave normal plus the foam height bump (B channel), sun and sky;
@@ -1018,6 +1034,9 @@ const PHYS_SEA = String.raw`
         // Weight is the strand fraction. The coverage knee is unchanged from v31.5,
         // so this does not recruit water outside that footprint.
         float area = smoothstep(0.02, 0.22, covF) * hole;
+        // v32: the same wind streaks as the near view, thresholded against the coverage, so a
+        // patch at the default camera is a set of streaks with gaps and a broken rim, not a pad.
+        area *= smoothstep(0.32, 0.6, strk + 0.3 * smoothstep(0.1, 0.6, covF) - 0.1);
         // v31.6: blending that partial area with the water turned a visible shoal grey.
         // Lift the interior of the same footprint to the lit foam colour. The skirt
         // below about 0.18 stays at or under the old weight, so the outline does not grow.
@@ -1026,7 +1045,7 @@ const PHYS_SEA = String.raw`
         // over the whole footprint, and lit white only in proportion to the area that is still
         // whitewater (dense or fresh). Residual far foam stays milky, the caps stay bright.
         float whiteK = clamp(max(aD, smoothstep(0.15, 0.55, denseR) * (0.45 + 0.55 * fr)), 0.0, 1.0);
-        vec3 farC = mix(water, milkyW, 0.7 * smoothstep(0.02, 0.45, area));
+        vec3 farC = mix(water, milkyW, 0.45 * smoothstep(0.02, 0.45, area));
         farC = mix(farC, foamWhite, clamp(area * mix(0.25, 1.0, whiteK), 0.0, 0.92));
         color = mix(color, farC, farW);
       }
