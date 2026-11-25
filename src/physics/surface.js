@@ -263,7 +263,7 @@ export function createSurface(scenario, wind) {
         normals[index * 3 + 1] = ny / len;
         normals[index * 3 + 2] = nz / len;
         const slope = Math.hypot(bdx, bdz);
-        const depthLimited = bh > 0 && bh >= scenario.depthBreakRatio * depth;
+        const depthLimited = bh > 0 && 2 * bh >= scenario.depthBreakRatio * depth;
         heights[index] = height;
         { let xh = 0, xdx = 0, xdz = 0;
           for (const c of longComps) {

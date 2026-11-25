@@ -13,7 +13,8 @@ export const scenario = {
   size: 250,
   resolution: 192,
   breakSlope: 0.2,
-  depthBreakRatio: 0.78,
+  depthBreakRatio: 0.78, // McCowan breaker index on a single wave's full height, H/d
+  hsDepthRatio: 0.55, // depth-limited Hs/d of a random sea (Thornton & Guza; Nelson ~0.55)
   choppiness: 1.5,
   crestReach: 4,
   // Seconds foam lingers after a sample was last flagged, fading smoothly to nothing.

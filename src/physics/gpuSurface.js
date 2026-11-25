@@ -177,7 +177,7 @@ void main() {
   float len = length(vec3(nx, ny, nz));
   if (len == 0.0) len = 1.0;
   float slope = length(vec2(bdx, bdz));
-  bool depthLimited = bh > 0.0 && bh >= uDepthLimit;
+  bool depthLimited = bh > 0.0 && 2.0 * bh >= uDepthLimit; // bh is elevation (~H/2); McCowan H/d = 0.78 is on the full height
   float steep = (slope >= uBreakSlope || depthLimited) ? 1.0 : 0.0;
   oA = vec4(height, uChop * shiftX, uChop * shiftZ, ny);
   oB = vec4(nx / len, ny / len, nz / len, steep);
@@ -721,7 +721,7 @@ void main() {
   src = min(1.0, uSrcK * smoothstep(0.3, 0.6, src)); // v30.8.3: weak isolated seeds (fragments) die
   { ivec2 cq = (ivec2(floor(pc0 + 0.5)) % uN + uN) % uN; vec4 cu = texelFetch(tCU, cq, 0); if (cu.x < -0.5) src = max(src, clamp(cu.y, 0.0, 1.0)); } // v30.22c: whitewater where a curl's lip lands
   // slow turbulent spreading of the patch (~0.05 m^2/s eddy diffusion)
-  vec4 nb = 0.25 * (kAt(c + ivec2(-1, 0)) + kAt(c + ivec2(2, 0)) + kAt(c + ivec2(0, -1)) + kAt(c + ivec2(0, 2)));
+  vec4 nb = 0.25 * (kAt(c + ivec2(-1, 0)) + kAt(c + ivec2(1, 0)) + kAt(c + ivec2(0, -1)) + kAt(c + ivec2(0, 1)));
   k = mix(k, nb, 0.04 * rM * rM); // same eddy diffusivity on the finer grid
   float d0 = k.x;
   float dense = d0 * exp(-uDt / uTauD);
@@ -1849,17 +1849,18 @@ export function createGpuSurface(gl, scenario, wind) {
     const L = scenario.size;
     bands.forEach((band, i) => retuneBand(band, winds[i], depth, GRAVITY, dt, L / n));
     const setup = bandSetup(bands, winds, depth, GRAVITY, L, n);
-    // v29.1 depth-limited waves: the drawn sea's Hs is capped at the breaker index x depth
-    // (scenario.depthBreakRatio, 0.78) by one amplitude scale on every wave (grid, explicit waves,
-    // ripple patches); the finite-depth dispersion and shoaling are unchanged. The break test keeps
-    // the unscaled heights, so where the cap bites the depth-limited breaking (bh >= 0.78 d) rises.
-    // Deep water (Hs below the limit, e.g. ~12.6 m at 25 m/s vs 15.6 m at 20 m depth) is scale 1.
+    // v29.1 depth-limited waves: the drawn sea's Hs is capped at the random-sea saturation ratio
+    // x depth (scenario.hsDepthRatio, 0.55; Thornton & Guza, Nelson) by one amplitude scale on every
+    // wave (grid, explicit waves, ripple patches); the finite-depth dispersion and shoaling are
+    // unchanged. The single-wave McCowan index (depthBreakRatio, 0.78) stays on the break test,
+    // which keeps the unscaled heights, so where the cap bites the depth-limited breaking
+    // (2 bh >= 0.78 d) rises. Deep water (Hs below 0.55 d: ~12.6 m at 25 m/s needs d > 23 m) is scale 1.
     {
       const lat0 = latticeIntegrals(setup, depth, GRAVITY, L);
       const dk0 = TAU / L;
       let v = lat0.reduce((s0, b) => s0 + b.variance, 0);
       bands.forEach((band) => band.components.forEach((c) => { v += (c.amplitude * c.amplitude / 2) * Math.max(0, 1 - fftShare(c.k, dk0)); }));
-      const hs = 4 * Math.sqrt(v), lim = scenario.depthBreakRatio * depth;
+      const hs = 4 * Math.sqrt(v), lim = scenario.hsDepthRatio * depth;
       ampScale = hs > lim ? lim / hs : 1;
       setup.ampScale = ampScale;
       bands.forEach((band) => { band.ampScale = ampScale; });
@@ -1961,7 +1962,7 @@ export function createGpuSurface(gl, scenario, wind) {
       setOffsets(u);
       gl.uniform1i(u.uReach, reach);
       gl.uniform1i(u.uR, r);
-      if (u.uDepthEta) gl.uniform1f(u.uDepthEta, ampScale < 1 ? 0.06 * lastDepth : 1e9 /* TUNED: short-wave crest elevation >= 0.06 d (0.3 m at 6 m gave 169 breaking, 0.6 m 12, 1.5 m 0) */);
+      if (u.uDepthEta) gl.uniform1f(u.uDepthEta, ampScale < 1 ? 0.06 * lastDepth : 1e9 /* TUNED: short-wave crest elevation >= 0.06 d (0.3 m at 6 m gave 169 breaking, 0.6 m 12, 1.5 m 0, under the old 1.56 d McCowan test). Kept at 0.06 d with the 2 bh McCowan test and the 0.55 d Hs cap: it reads the drawn (capped) heights, so against drawn Hs it is now 0.11 Hs rather than 0.077 Hs and backs off as McCowan takes over */);
       gl.uniform4f(u.uBrk, brk.mode, brk.ak, brk.rb, brk.ts); gl.uniform1f(u.uBrkLg, brk.lg ?? 1); gl.uniform2f(u.uBrkMod, brk.M || 0, brk.kL || 0);
       gl.uniform1f(u.uSpacing, spacing);
       gl.uniform4f(u.uTransl, TRANSLUCENCY.skin, TRANSLUCENCY.length, TRANSLUCENCY.maxThickness, Number(FQ.get("wgC") ?? 0));

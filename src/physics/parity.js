@@ -42,7 +42,7 @@ function edgeMargin(cpu, sc, index) {
       if (fx < 0 || fz < 0 || fx >= n || fz >= n) break;
       const q = fz * n + fx;
       m = Math.min(m, Math.abs(Math.hypot(breakSlopeX[q], breakSlopeZ[q]) - sc.breakSlope));
-      if (bh[q] > 0) m = Math.min(m, Math.abs(bh[q] - depthLimit));
+      if (bh[q] > 0) m = Math.min(m, Math.abs(bh[q] - depthLimit / 2));
     }
   }
   return m;
@@ -63,7 +63,7 @@ function calmAt(cpu, sc, index) {
     if (x < 0 || z < 0 || x >= n || z >= n) continue;
     const q = z * n + x;
     if (Math.hypot(breakSlopeX[q], breakSlopeZ[q]) >= 0.75 * sc.breakSlope) return false;
-    if (bh[q] > 0 && bh[q] >= depthLimit) return false;
+    if (bh[q] > 0 && 2 * bh[q] >= depthLimit) return false;
   }
   return true;
 }
@@ -482,11 +482,11 @@ export async function runParity(gl, { speeds = [0, 5, 10, 17.5, 25], seconds = 3
         hMax = Math.max(hMax, Math.abs(T0[idx * 4 + 1] + hx - g.heights[idx]));
         const slope = Math.hypot(T4[idx * 4] + bx, T4[idx * 4 + 1] + bz);
         const bhT = T3[idx * 4 + 3] + bh;
-        const steep = slope >= sc.breakSlope || (bhT > 0 && bhT >= limit);
+        const steep = slope >= sc.breakSlope || (bhT > 0 && 2 * bhT >= limit);
         if (steep) steepN += 1;
         if (steep !== g.steep[idx] > 0.5) {
           brkMis += 1;
-          const m = Math.min(Math.abs(slope - sc.breakSlope), bhT > 0 ? Math.abs(bhT - limit) : Infinity);
+          const m = Math.min(Math.abs(slope - sc.breakSlope), bhT > 0 ? Math.abs(bhT - limit / 2) : Infinity);
           brkEdge = Math.max(brkEdge, m);
           if (m > EDGE) brkOff += 1;
         }
