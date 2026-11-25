@@ -428,25 +428,26 @@ float shadowVis(vec3 w) {
   if (uBisect > 2.5) return 1.0;
   return shadowFactor(w);
 }
-float floorMul(vec3 bedP, vec2 slope) {
-  if (uCausDay < 0.01 || (uBisect > 0.5 && uBisect < 1.5)) return 1.0;
+vec3 floorMul(vec3 bedP, vec2 slope) {
+  if (uCausDay < 0.01 || (uBisect > 0.5 && uBisect < 1.5)) return vec3(1.0);
   vec3 Rf = refract(-normalize(lightDir), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
   if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
   vec2 xz = bedP.xz - bedP.y * Rf.xz / Rf.y;
   float col = max(0.0, -bedP.y);
-  float ratio = (uBisect > 1.5 && uBisect < 2.5) ? 1.0 : causNet(xz, col, slope);
+  // v32: per colour, split along the refracted sun ray (causDisp), wider with depth
+  vec3 ratio = (uBisect > 1.5 && uBisect < 2.5) ? vec3(1.0) : causNetRGB(xz, col, slope, causDisp(lightDir, col));
   // Off the dry beach and the swash. Strongest from about 0.3 m to 3 m, then it fades.
   float ashore = smoothstep(0.08, 0.45, col);
   float fine = exp(-max(col - 0.5, 0.0) * 0.28);
   float far = exp(-col * max(uClarK, 0.35) / 12.0);
   float strength = ashore * clamp(fine * 0.9 + far * 0.14, 0.0, 0.78) * max(uCausDay, 0.0);
-  return mix(1.0, ratio, strength);
+  return mix(vec3(1.0), ratio, strength);
 }
 // Sun on the floor under the sea. The caustic sparkle needs the sun, so it
 // fades out inside a shadow instead of rippling over it; then the shadow
 // leaves the shallow sand only its sky light.
-float floorLight(vec3 bedP, vec2 slope, float H, float shF) {
-  float cm = mix(1.0, floorMul(bedP, slope), shF);
+vec3 floorLight(vec3 bedP, vec2 slope, float H, float shF) {
+  vec3 cm = mix(vec3(1.0), floorMul(bedP, slope), shF);
   return cm * mix(mix(0.06, 0.55, smoothstep(0.3, 8.0, H)), 1.0, shF);
 }
 vec3 underLight(vec3 rgb, vec3 w) {
@@ -2106,13 +2107,13 @@ void main() {
     vec3 Rf = refract(-normalize(uSun), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
     if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
     vec2 xz = vW.xz - vW.y * Rf.xz / Rf.y;
-    float ratio = causNet(xz, col, vec2(0.0));
+    vec3 ratio = causNetRGB(xz, col, vec2(0.0), causDisp(uSun, col)); // v32: the same fringe as the sand
     float clar = max(uClarK, 0.35);
     float near = exp(-col * clar / 2.6);
     float deep = uCausDeep * 0.08 * exp(-col * clar / 16.0);
     float strength = clamp(near + deep, 0.0, 1.0) * uCausDay;
     rho *= mix(0.5, 1.0, sh);
-    rho *= mix(1.0, ratio, strength);
+    rho *= mix(vec3(1.0), ratio, strength);
   }
   if (raw > 0.5) { fragColor = vec4(sfEncode(clamp(rho, 0.0, 1.0)), clamp((vW.y + depth) / 4.0, 0.0, 1.0)); return; } // v30.5 scene pass
   float gain = SF_GAIN * mix(1.65, 1.35, rock);

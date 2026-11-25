@@ -75,6 +75,48 @@ float causNet(vec2 xz, float depthM, vec2 slope) {
   // Light on sand. The lines stay brighter than the cells, not white wires.
   return 0.84 + net * 0.8;
 }
+// v32 (C1, C4): the rainbow fringe. Water disperses sunlight (n ~1.331 red, 1.337 green, 1.343
+// blue), so each colour's refracted ray meets the floor a little apart along the sun's refracted
+// azimuth, by depth x (tan theta_red - tan theta_blue): ~8 mm per metre at a 45 deg sun. That real
+// split is exaggerated (CAUS_DISP_GAIN) so it reads at 0.5-5 m, with a small floor so a high sun
+// still shows a faint edge. It widens with depth and turns with the clock sun, as the shadows do.
+#define CAUS_DISP_GAIN 5.0
+#define CAUS_DISP_MIN 0.006
+#define CAUS_CHROMA 0.8
+float causTanRefr(float s, float n) { float q = s / n; return q / sqrt(max(1.0 - q * q, 1e-4)); }
+// Half the red-blue split at the floor (m): red samples the surface at +d, blue at -d.
+vec2 causDisp(vec3 sunDir, float depthM) {
+  vec3 Ls = normalize(sunDir);
+  float s = clamp(length(Ls.xz), 0.0, 1.0);          // sine of the sun's zenith angle (in air)
+  vec2 az = s > 1e-3 ? Ls.xz / s : vec2(0.6, 0.8);  // toward the sun
+  float half_ = max(0.5 * CAUS_DISP_GAIN * (causTanRefr(s, 1.331) - causTanRefr(s, 1.343)), CAUS_DISP_MIN);
+  return az * half_ * max(depthM, 0.0);
+}
+// causNet per colour. Only the finest layer (l0, where the sharp lines and so the fringe live) is
+// sampled three times; the two coarser layers are shared. Kept close to grey (CAUS_CHROMA):
+// a Subnautica-like edge, not a prism.
+float causL0(vec2 a, float t) {
+  a += vec2(sin(a.y * 0.9 + t * 0.55), cos(a.x * 0.8 - t * 0.42)) * 0.5;
+  return causLine(a + vec2(t * 0.22, -t * 0.16));
+}
+vec3 causNetRGB(vec2 xz, float depthM, vec2 slope, vec2 disp) {
+  float d = max(depthM, 0.0);
+  float cell = 0.22 + smoothstep(0.3, 3.0, d) * 0.38 + max(d - 1.2, 0.0) * 0.40;
+  vec2 p = xz / cell;
+  vec2 dp = disp / cell;
+  vec2 warp = slope * 6.0;
+  float t = uCausT;
+  vec3 l0 = vec3(causL0(p + warp + dp, t), causL0(p + warp, t), causL0(p + warp - dp, t)); // red +disp, blue -disp
+  vec2 b = p * 2.15 + warp * 1.8;
+  b += vec2(sin(b.y * 0.65 - t * 0.48), cos(b.x * 0.6 + t * 0.36)) * 0.34;
+  float l1 = causLine(b + vec2(-t * 0.14, t * 0.19));
+  vec2 c2 = p * 0.48 + warp * 0.55;
+  c2 += vec2(sin(c2.y * 0.42 + t * 0.27), cos(c2.x * 0.4 - t * 0.2)) * 0.6;
+  float l2 = causLine(c2 + vec2(t * 0.1, t * 0.08));
+  vec3 net = l0 * 0.72 + vec3(l1 * 0.36 + l2 * 0.3);
+  net = mix(vec3(dot(net, vec3(1.0 / 3.0))), net, CAUS_CHROMA);
+  return 0.84 + net * 0.8;
+}
 `;
 }
 
