@@ -578,13 +578,28 @@ vec4 seafloorShade() {
 #ifdef ISLAND_ON
   if (uHasIsland > 0.5) bedLine = max(bedLine, islandBed(vWorld.xz));
 #endif
-  // The drawn cut is 38% of the real water column (the vertex shader). The
-  // opaque sand is only the bottom of that shorter face. No ripple, no caustic.
+  // The drawn cut is 38% of the real water column (the vertex shader), so the
+  // side is not a 40 m slab. The opaque sand on that cut is only a thin strip,
+  // SF_SLICE (0.4 m) at its bottom, as before the cut: the bottom 22% of the
+  // face was ~3.3 m of tan on a 40 m sea and read as a sand plinth under the
+  // water. The strip sits at the visual cut, not at the full depth, so 0.4 m
+  // of sand still reads here (the old full-depth lookup was already fog).
+  // No ripple, no caustic.
   float yVis = mix(0.0, bedLine, 0.38);
-  float span = max(vSurfY - yVis, 0.4);
-  bool inSlice = vWorld.y < yVis + 0.22 * span;
-  if (inSlice) {
-    wallA = 1.0;
+  // Column colour from the surface down, and the floor shows through it.
+  // The alpha follows the depth under the surface, not the long sideways
+  // path, which had turned the whole cut opaque.
+  float zCol = clamp(vSurfY - vWorld.y, 0.0, 16.0);
+  vec3 lin3 = mix(vec3(0.28, 0.66, 0.70), vec3(0.012, 0.045, 0.13), smoothstep(0.4, 12.0, zCol));
+  lin3 = mix(lin3, vec3(0.55, 0.72, 0.74), fr * 0.35);
+  outc = pow(max(lin3, 0.0), vec3(1.0 / 2.2));
+  wallA = clamp(1.0 - exp(-zCol * 0.085) * 0.84, 0.16, 0.92);
+  // Strip top, softened over a few centimetres (and at least a pixel) so it
+  // is not a hard line and does not shimmer when the strip gets thin on screen.
+  float stripTop = yVis + min(SF_SLICE, max(vSurfY - yVis - 0.05, 0.0));
+  float soft = max(0.04, 1.5 * fwidth(vWorld.y));
+  float sandW = 1.0 - smoothstep(stripTop - soft, stripTop + 0.5 * soft, vWorld.y);
+  if (sandW > 0.001) {
     // Sand in the wall plane. The horizontal coordinate is the undisplaced
     // perimeter, so the pattern stays put while the waves shift the vertices.
     // No orbital ripple: that wave stands up as columns on this cut.
@@ -595,18 +610,15 @@ vec4 seafloorShade() {
     float g = n1 * 0.5 + n2 * 0.32 + n3 * 0.18;
     vec3 sand = vec3(0.76, 0.70, 0.60) * (0.72 + 0.55 * (g - 0.5));
     sand = mix(sand, sand * vec3(0.92, 0.90, 0.86), 0.35 * sfNoise(vec2(face.y * 0.55, 2.0)));
-    float bury = clamp((yVis + 0.22 * span - vWorld.y) / max(0.22 * span, 0.3), 0.0, 1.0);
-    vec3 linS = sand * mix(0.94, 0.62, bury);
-    outc = sfCap(pow(max(linS, 0.0), vec3(1.0 / 2.2)));
-  } else {
-    // Column colour from the surface down, and the floor shows through it.
-    // The alpha follows the depth under the surface, not the long sideways
-    // path, which had turned the whole cut opaque.
-    float zCol = clamp(vSurfY - vWorld.y, 0.0, 16.0);
-    vec3 lin3 = mix(vec3(0.28, 0.66, 0.70), vec3(0.012, 0.045, 0.13), smoothstep(0.4, 12.0, zCol));
-    lin3 = mix(lin3, vec3(0.55, 0.72, 0.74), fr * 0.35);
-    outc = pow(max(lin3, 0.0), vec3(1.0 / 2.2));
-    wallA = clamp(1.0 - exp(-zCol * 0.085) * 0.84, 0.16, 0.92);
+    // Darker toward the bottom of the strip (buried, out of the light), and
+    // the water in front of the cut takes a little of the colour, so the
+    // strip is damp sand under the column, not a bright dry edge.
+    float bury = clamp((stripTop - vWorld.y) / SF_SLICE, 0.0, 1.0);
+    vec3 linS = sand * mix(0.86, 0.6, bury);
+    linS = mix(linS, linS * vec3(0.78, 0.9, 1.0), smoothstep(2.0, 14.0, zCol) * 0.6);
+    vec3 sandC = sfCap(pow(max(linS, 0.0), vec3(1.0 / 2.2)));
+    outc = mix(outc, sandC, sandW);
+    wallA = mix(wallA, 1.0, sandW);
   }
   // See-through above the sand. The floor behind this face is drawn without
   // caustics, so a transparent wall does not turn them into vertical bars.
