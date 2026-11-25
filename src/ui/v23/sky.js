@@ -3,6 +3,13 @@
 // moon opposite it by night) and __oceanDay (the v30.22b sea tint). 11:00 is the approved look: identity.
 const LAT = (20 * Math.PI) / 180, D2R = Math.PI / 180;
 export const elevAt = (min) => Math.asin(Math.cos(LAT) * Math.cos(((min / 60 - 12) * 15) * D2R)); // equinox (radians)
+// Geometric sun for shadows. Noon is -Z, same sweep as the sky dome. Not the
+// art-directed light, which stays higher so the sea does not go black.
+export function sunVector(min) {
+  const e = elevAt(min);
+  const a = -Math.PI / 2 - (min - 720) * Math.PI / 720;
+  return [Math.cos(e) * Math.cos(a), Math.sin(e), Math.cos(e) * Math.sin(a)];
+}
 export const azAt = (min) => { const h = ((min / 60 - 12) * 15) * D2R; return Math.atan2(Math.sin(h), Math.cos(h) * Math.sin(LAT)); };
 const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
 const lin = (c) => c.map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));

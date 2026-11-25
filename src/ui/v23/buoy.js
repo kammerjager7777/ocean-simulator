@@ -5,13 +5,14 @@
 // 2x hull-radius ring on the water), and a click opens the §7.3 card (208 x 128, leader 28 px; shifts sideways off
 // the HUD regions, then flips below). A drag leaves wake ripples;
 // a fast drag (> 2 m/s) also lays a foam trail into the drawn foam field (gpuSurface foam-trail pass).
-import { ui, $ } from "./core.js?v=32.10";
-import { bedRelief } from "../../render/seabed.js?v=30.29";
+import { ui, $ } from "./core.js?v=32.61";
+import { clampToWater, stillDepth, useIslandSize } from "../../physics/island.js?v=32.85";
+import { bedRelief } from "../../render/seabed.js?v=30.30";
 import { rippleHeight, addRipple } from "../../physics/ripples.js?v=30.29";
 import { elevAt } from "./sky.js?v=30.29";
 const T = ui.theme, D2R = Math.PI / 180;
 const SCALE = Number(ui.P.get("buoyx") || 1.45), MASTH = 4.8, HULL_R = 1.5; // mesh: 3 m hull, 4.8 m mast; displayed hull ~4.4 m
-const pos = (() => { try { const j = JSON.parse(ui.store.get("ocean.ui.buoy", "")); if (j && Number.isFinite(j.x) && Number.isFinite(j.z)) return [j.x, j.z]; } catch { /* default */ } return [38, -26]; })();
+const pos = (() => { try { const j = JSON.parse(ui.store.get("ocean.ui.buoy", "")); if (j && Number.isFinite(j.x) && Number.isFinite(j.z)) return [j.x, j.z]; } catch { /* default */ } return [72, -48]; })();
 const tgt = pos.slice(), vel = [0, 0];
 const b = { s: SCALE, y: 0, vy: 0, pitch: 0, vp: 0, roll: 0, vr: 0, lastT: -1, ring: new Float32Array(7200), rt: new Float64Array(7200), n: 0, i: 0, Hs: NaN, Tz: NaN, Tp: NaN, shown: {}, nextStat: 0, open: false };
 const trail = []; let lastWake = 0, lastDragT = 0, lastDragP = null, dragSpeed = 0;
@@ -39,10 +40,28 @@ function clampPos(p) {
   const S = ui.S(), m = S / 2 - (HULL_R * b.s + 2); let x = Math.max(-m, Math.min(m, p[0])), z = Math.max(-m, Math.min(m, p[1]));
   const bt = globalThis.__oceanState && globalThis.__oceanState.boat;
   if (bt) { const R = BOAT_CLEAR + HULL_R * b.s, dx = x - bt.x, dz = z - bt.z, d = Math.hypot(dx, dz); if (d < R) { const ux = d > 1e-3 ? dx / d : 0.6, uz = d > 1e-3 ? dz / d : -0.8; x = bt.x + ux * R; z = bt.z + uz * R; x = Math.max(-m, Math.min(m, x)); z = Math.max(-m, Math.min(m, z)); } }
+  // Draft about a metre: on land, or in water shallower than that, slide out
+  // to the nearest contour that can float the hull.
+  if (ui.P.get("island") === "1") {
+    useIslandSize(ui.S());
+    const w = clampToWater(x, z, ui.D(), 1.2);
+    x = Math.max(-m, Math.min(m, w[0]));
+    z = Math.max(-m, Math.min(m, w[1]));
+  }
   return [x, z];
 }
+// Spawn and a restored position (local storage; the share link has no buoy
+// point) go through the same clamp as a drag, before the first frame.
+{
+  const c0 = clampPos(pos);
+  pos[0] = c0[0]; pos[1] = c0[1];
+  tgt[0] = c0[0]; tgt[1] = c0[1];
+}
 let lastS = 0;
-function depthAt(x, z) { return ui.D() - bedRelief(x, z, ui.S(), ui.D()); }
+function depthAt(x, z) {
+  if (ui.P.get("island") === "1") return stillDepth(x, z, ui.D(), useIslandSize(ui.S()));
+  return ui.D() - bedRelief(x, z, ui.S(), ui.D());
+}
 function stats() {
   const n = b.n; if (n < 32) return; const idx = (k) => (b.i - n + k + 7200) % 7200;
   const t0 = b.rt[idx(0)], t1 = b.rt[idx(n - 1)]; if (t1 - t0 < 30) { b.Hs = NaN; return; }

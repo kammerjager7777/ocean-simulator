@@ -1,5 +1,5 @@
 import { GRAVITY } from "./gravity.js";
-import { createBand, retuneBand, sampleBand, bandVariance } from "./band.js?v=30.22";
+import { createBand, retuneBand, sampleBand, bandVariance } from "./band.js?v=32.11";
 import { createChopPatch } from "./chopPatch.js?v=30.22";
 import { slopeBudget } from "./roughness.js?v=30.22";
 import { fftShare, FFT_SPLIT } from "./fftSea.js?v=30.22";
@@ -183,7 +183,7 @@ export function createSurface(scenario, wind) {
   const finePatches = bands.map((band) => (band.spec.patch && band.spec.finePatch ? createChopPatch(band.spec, band.spec.finePatch) : null));
 
   function step(time, dt, depth) {
-    const winds = bands.map((band) => wind.sample(band.spec, time, dt));
+    const winds = bands.map((band) => Object.assign(wind.sample(band.spec, time, dt), { seaAge: scenario.seaAge }));
     bands.forEach((band, i) => retuneBand(band, winds[i], depth, GRAVITY, dt, scenario.size / Math.max(n - 1, 1)));
     // Fine patches are for shading only. Break detection and foam stay on the big grid.
     const patchStates = patches.map((patch, i) => (patch ? patch.step(bands[i], winds[i], depth, GRAVITY, dt) : null));

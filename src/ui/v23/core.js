@@ -131,6 +131,12 @@ ui.toast = () => {}; ui.syncHud = () => {}; // the HUD module (hud.js) replaces 
 const LNAME = Object.fromEntries(LAYERS.map(([k, n]) => [k, n]));
 ui.LNAME = LNAME;
 function syncLayerUI() { ui.root.classList.toggle("clean", clean); ui.syncHud(); }
+// A widget with no layer stays up whenever the HUD is showing. Sky & time
+// must not blank the chop card just because they share a file.
+function layerAlpha(o) {
+  if (!o.layer) return clean || UI_OFF ? 0 : 1;
+  return vis[o.layer] || 0;
+}
 function setLayer(k, on) { if (clean) { clean = false; store.set("ocean.ui.clean", "off"); } layers[k] = on; saveLayers(); syncLayerUI(); ui.toast(LNAME[k], on); }
 function setClean(on) { clean = on; store.set("ocean.ui.clean", on ? "on" : "off"); syncLayerUI(); ui.toast("Clean view", on); }
 ui.setLayer = setLayer; ui.setClean = setClean; ui.syncLayerUI = syncLayerUI;
@@ -254,7 +260,7 @@ function frame(t) {
   if (ui.V) { const P = []; for (const n of ["N", "A", "R", "F"]) { P.push(ui.P3(ui.corner(n))); P.push(ui.P3(ui.corner(n, true))); } ui.hull = hullOf(P); ui.debug.hull = ui.hull; }
   { const S = globalThis.__oceanSky; if (S) { const u = Number(inputs.spd.value), th = (Number(inputs.dir.value) * Math.PI) / 180, k = 0.0025 * (0.4 + u / 10); S.wind = [Math.cos(th) * k, Math.sin(th) * k]; } } // v30.24 cloud drift
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, ov.width, ov.height);
-  for (const o of ui.objs) if (o.update) o.update(vis[o.layer] || 0);
+  for (const o of ui.objs) if (o.update) o.update(layerAlpha(o));
   if (ui.doLayout) ui.doLayout();
   { // UI height probes (async readback in gpuSurface: buoy rim k16-19, the 256-sample section): only while needed
     ui.probe.edges = !UI_OFF;
@@ -263,7 +269,7 @@ function frame(t) {
     const st = globalThis.__oceanState; const pd = st && st.probe && st.probe.data && st.probe.data.length >= 84 * 4 ? st.probe.data : null;
     ui.probeData = need ? pd : null;
   }
-  if (ui.V && !UI_OFF) { ctx.setTransform(ui.dpr, 0, 0, ui.dpr, 0, 0); for (const o of ui.objs) { const a = vis[o.layer] || 0; if (a > 0.004 && o.draw) { ctx.save(); ctx.globalAlpha = a; o.draw(a); ctx.restore(); } else if (o.hide) o.hide(); } }
+  if (ui.V && !UI_OFF) { ctx.setTransform(ui.dpr, 0, 0, ui.dpr, 0, 0); for (const o of ui.objs) { const a = layerAlpha(o); if (a > 0.004 && o.draw) { ctx.save(); ctx.globalAlpha = a; o.draw(a); ctx.restore(); } else if (o.hide) o.hide(); } }
   const dt = performance.now() - t0; ui.timing.n++; ui.timing.sum += dt; ui.timing.last = dt;
   ui.timing.buf = ui.timing.buf || []; ui.timing.buf.push(dt); if (ui.timing.buf.length > 600) ui.timing.buf.shift();
   if (!(ui.timing.n % 30)) { const q = ui.timing.buf.slice().sort((x, y) => x - y); ui.timing.med = q[q.length >> 1]; ui.timing.p99 = q[Math.floor(0.99 * (q.length - 1))]; }

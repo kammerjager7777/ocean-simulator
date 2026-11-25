@@ -1,12 +1,15 @@
-import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=30.22";
+import { VERT_FFT, FRAG_FFT_NORMAL, buildFftMesh, visibleRanges } from "./fftView.js?v=33.13";
+import { currentIsland, useIslandSize, sandbarBed } from "../physics/island.js?v=32.85";
 import { LOBE_GLSL } from "../physics/roughness.js?v=30.22";
 import { timed } from "../physics/passTimer.js?v=30.22";
-import { createBoatView, createBuoyView } from "./boatView.js?v=31.8";
-import { BED_GLSL } from "./seabed.js?v=30.29";
+import { createBoatView, createBuoyView } from "./boatView.js?v=33.44";
+import { BED_GLSL, bedRelief, setBedRippleDir } from "./seabed.js?v=30.31";
 import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
 import { drawSkyDome, setV23Uniforms, setBedOnly } from "./v23hooks.js?v=30.29";
+import { createLightMaps, lightSampleGlsl } from "./light.js?v=33.70";
+import { assertFragmentSamplers } from "./samplerBudget.js?v=33.17";
 import { SEABED_LUT } from "./seabedLut.js?v=30.22";
-import { CURL_SHAPE_GLSL, CURL_SLOTS, curlX } from "../physics/gpuSurface.js?v=31.8";
+import { CURL_SHAPE_GLSL, CURL_SLOTS, curlX } from "../physics/gpuSurface.js?v=33.11";
 const FAR_HALVE_DEFAULT = 0; // 05:16 horizon bar: quarter-density far rings flattened the sun25 silhouette (?farhalve=1 to test)
 const CHUNK_DEFAULT = 1; // v28 chunk (Michael 09:23): only the one square tile of sea (size slider), no horizon rings (?chunk=0 for the full sea)
 const ONE_COPY_DEFAULT = 0; // GAD 01:08: onecopy=0 (all three FFT copies at every distance)
@@ -217,17 +220,11 @@ vec3 sfEncode(vec3 c) { c = clamp(c, 0.0, 1.0); return mix(12.92 * c, 1.055 * po
 float sfHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float sfNoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
   return mix(mix(sfHash(i), sfHash(i + vec2(1, 0)), f.x), mix(sfHash(i + vec2(0, 1)), sfHash(i + vec2(1, 1)), f.x), f.y); }
-// Sand albedo at x, z: wave-orbital ripples (shading only, crests across the wave travel, 8-12 cm,
-// Y-junctions from a slow phase wobble), and low coral / rock clusters (about 3 per 100 m^2,
-// 1-3 m across, 3-8 heads, soft contact shadow). Visual only: nothing is read back.
+// Carbonate grain and the reef contact shadow. The ripple field is sfSandTex;
+// this is only the sand colour, so a 10 cm stripe is not painted on twice.
 vec3 sfAlbedo(vec2 q) {
-  vec2 t = normalize(travel);
-  float along = dot(q, t), across = dot(q, vec2(-t.y, t.x));
-  float len = SF_RIPPLE_LEN * mix(0.8, 1.2, sfNoise(q / 3.0));
-  float ph = along / len + 1.5 * sfNoise(vec2(across, along) / 0.7) + 0.6 * sfNoise(q / 2.3);
-  float fw = fwidth(ph);
-  float amp = SF_RIPPLE_AMP * clamp(1.0 - fw * 2.0, 0.0, 1.0);   // mips flatten them; no sharpening
-  vec3 a = SF_SAND * (1.0 + amp * sin(6.2831853 * ph));
+  float g = sfNoise(q * 18.0) - 0.5;
+  vec3 a = vec3(0.76, 0.72, 0.64) * (1.0 + 0.08 * g);
   // clusters are instanced geometry (buildClusters); the sand keeps their soft contact shadow
   // (AO up to -20%), read from the cluster cell table (x, z inside the cell, radius, present).
   float ao = 1.0;
@@ -245,6 +242,101 @@ vec3 sfAlbedo(vec2 q) {
   }
   return a * ao;
 }
+// Orbital ripples. sp is the plane the pattern is drawn in (the floor, or the
+// wall face). worldXZ is the sea position the depth and the refraction use.
+uniform vec2 uWindDir;
+uniform vec2 uCurDir;
+uniform float uCurSpd;
+uniform float uTp;
+uniform float uHsRip;
+uniform float uRipDbg;
+uniform float uHasIsland;
+uniform vec2 uRipC;
+uniform float uRipBank;
+uniform float uRipFace;
+vec3 sfSandTex(vec2 sp, float bedY) {
+  vec2 worldXZ = vWorld.xz;
+  float h = max(0.08, -bedY);
+  vec2 travel = uRipDir;
+  float tlen = length(travel);
+  travel = tlen > 0.1 ? travel / tlen : vec2(0.0, 1.0);
+  vec2 wind = uWindDir;
+  float wlen = length(wind);
+  wind = wlen > 0.1 ? wind / wlen : travel;
+  bool dry = bedY > 0.02;
+  vec2 dir = travel;
+  float lee = 0.0;
+  if (uHasIsland > 0.5) {
+    vec2 rel = worldXZ - uRipC;
+    float r = length(rel);
+    vec2 radial = r > 1.0 ? rel / r : vec2(0.0, 1.0);
+    float turn = (1.0 - smoothstep(1.5, 16.0, h)) * (1.0 - smoothstep(uRipBank, uRipBank + 6.0, r));
+    lee = smoothstep(0.15, 0.75, dot(radial, travel)) * (1.0 - smoothstep(uRipFace, uRipBank, r));
+    // A full bend closes every crest into a circle around the island, lee side
+    // included. Keep a partial wrap; the lee stays with the open-sea direction.
+    dir = normalize(mix(travel, -radial, clamp(turn, 0.0, 0.45) * (1.0 - lee)));
+  }
+  if (uRipDbg > 0.5) {
+    float ang = atan(dir.y, dir.x);
+    return vec3(0.5 + 0.5 * cos(ang), 0.5 + 0.5 * sin(ang), 0.25 + 0.5 * lee);
+  }
+  float omega = 6.2831853 / max(uTp, 1.0);
+  float k = omega * omega / 9.81;
+  for (int i = 0; i < 3; i++) k = omega * omega / (9.81 * tanh(max(k, 1e-3) * h));
+  float L = 6.2831853 / max(k, 1e-3);
+  float snh = max(sinh(k * h), 0.2);
+  float d0 = uHsRip / snh;
+  float lam = clamp(0.65 * d0, 0.07, 0.55);
+  float ub = 3.14159265 * uHsRip / (max(uTp, 1.0) * snh);
+  float shields = (0.5 * 1025.0 * 0.04 * ub * ub) / (1650.0 * 9.81 * 0.0002);
+  float sheet = smoothstep(0.55, 0.95, shields);
+  float below = smoothstep(0.85, 1.15, h / max(L * 0.5, 1.0));
+  // No wind and no waves: orbital ripples are absent, not a bullseye.
+  float rip = (1.0 - sheet) * (1.0 - below) * smoothstep(0.06, 0.45, uHsRip);
+  vec3 vd = normalize(eye - vWorld);
+  float fp = max(length(dFdx(sp)), length(dFdy(sp)));
+  float gScale = clamp(2.8 / max(fp, 0.03), 0.45, 32.0);
+  vec3 col;
+  float eta = 0.0;
+  float amp = 0.0;
+  float grain = 0.5;
+  if (dry) {
+    float spacing = clamp(0.02 + 0.004 * uHsRip, 0.02, 0.10);
+    float ph = dot(sp, wind) / spacing;
+    eta = sin(6.2831853 * ph);
+    amp = 0.12 * spacing * (1.0 - smoothstep(spacing * 0.35, spacing * 1.4, fp));
+    vec2 puv = sp + vd.xz * eta * amp * 3.0;
+    grain = sfNoise(puv * gScale);
+    col = vec3(0.86, 0.82, 0.74) * (0.90 + 0.22 * (grain - 0.5));
+    float slope = amp * 6.2831853 / spacing * cos(6.2831853 * ph);
+    col *= 0.72 + 0.28 * clamp(dot(normalize(vec3(-wind * slope, 1.0)), normalize(lightDir)), 0.0, 1.0);
+  } else {
+    float ph = dot(sp, dir) / lam;
+    eta = sin(6.2831853 * ph);
+    float cross = lee * sin(6.2831853 * dot(sp, vec2(-dir.y, dir.x)) / (lam * 1.7));
+    eta = mix(eta, eta * 0.45 + cross, lee);
+    amp = 0.15 * lam * rip * mix(1.0, 0.4, lee);
+    amp *= 1.0 - smoothstep(lam * 0.3, lam * 1.25, fp);
+    float asym = uCurSpd > 0.05 ? 0.35 * sign(dot(dir, uCurDir)) : 0.0;
+    eta += asym * 0.35 * sin(12.5663706 * ph);
+    vec2 puv = sp + vd.xz * eta * amp * 4.0;
+    grain = sfNoise(puv * gScale);
+    float wet = smoothstep(0.35, -0.08, bedY);
+    vec3 dryC = vec3(0.84, 0.80, 0.72);
+    // Wet sand is the same sand, a little darker and cooler, not a charcoal band.
+    vec3 carbonate = mix(dryC, dryC * vec3(0.90, 0.93, 0.96), wet * 0.45);
+    col = carbonate * (0.88 + 0.24 * (grain - 0.5));
+    col += vec3(wet * 0.05 * pow(clamp(vd.y, 0.0, 1.0), 6.0));
+    float slope = amp * 6.2831853 / max(lam, 0.05) * cos(6.2831853 * ph);
+    col *= 0.78 + 0.22 * clamp(dot(normalize(vec3(-dir * slope, 1.0)), normalize(lightDir)), 0.0, 1.0);
+    col = mix(col, carbonate * 0.96, sheet);
+  }
+  float faceY = abs(normalize(cross(dFdx(vWorld), dFdy(vWorld))).y);
+  float onWall = 1.0 - smoothstep(0.22, 0.62, faceY);
+  float layer = sin(6.2831853 * (sp.y * 0.42 + sfNoise(sp * 0.16) * 1.6));
+  col *= 1.0 + onWall * (0.11 * layer + 0.18 * (sfNoise(sp * gScale * 0.4 + 3.0) - 0.5));
+  return col * sfAlbedo(sp) / vec3(0.76, 0.72, 0.64);
+}
 // GAD 2.2 hard cap on sand (floor and the wall's floor slice): no channel above sRGB 194, luma <= 150
 vec3 sfCap(vec3 o) { o = min(o, vec3(194.0 / 255.0)); float l = dot(o, vec3(0.2126, 0.7152, 0.0722)); return l > 150.0 / 255.0 ? o * (150.0 / 255.0) / l : o; }
 // floor: the baked spectral lookup, A(z) + GAIN rho T(z) (exact for the sand spectrum)
@@ -252,26 +344,123 @@ vec3 sfFloor(float z, vec3 rho) { return sbRow(z, 0.0) + SF_GAIN * rho * sbRow(z
 uniform float sfRaw;
 #define SAND_DBG ${typeof location !== "undefined" && new URLSearchParams(location.search).get("sanddbg") === "1" ? "true" : "false"}
 #define SAND_DBG2 SAND_DBG
+#ifdef ISLAND_ON
+uniform float uIsland;
+uniform vec2 uIslandC;
+uniform float uIRb, uIRf, uIRs, uIRbank, uIEase;
+uniform float uIPeak, uIYb, uIYf, uIYs, uIFace, uIShelf;
+uniform float uR2;
+float iHermite(float s, float y0, float y1, float m0, float m1) {
+  float s2 = s * s, s3 = s2 * s;
+  return (2.0 * s3 - 3.0 * s2 + 1.0) * y0 + (s3 - 2.0 * s2 + s) * m0
+       + (-2.0 * s3 + 3.0 * s2) * y1 + (s3 - s2) * m1;
+}
+// Same curve as sandbarBed. Uniforms follow the sea size; a wall ray has to
+// hit this, not the flat floor.
+float islandBed(vec2 xz) {
+  vec2 rel = xz - uIslandC;
+  float th = atan(rel.y, rel.x);
+  float lump = 0.055 * sin(3.0 * th) + 0.032 * sin(5.0 * th + 1.7) + 0.018 * sin(8.0 * th + 0.4);
+  float r = length(rel) / max(1.0 + lump, 0.75);
+  float yFloor = -max(depth, 0.5);
+  if (r >= uIRbank) return yFloor;
+  float Rb = uIRb;
+  float Rf = uIRf;
+  float Rs = uIRs;
+  float ease = uIEase > 0.0 ? uIEase : 8.0;
+  float join0 = Rf - ease;
+  float join1 = Rf + ease;
+  float y;
+  if (r <= Rb) y = iHermite(r / max(Rb, 1.0), uIPeak, uIYb, 0.0, -uIFace * Rb);
+  else if (r <= join0) y = uIYb - uIFace * (r - Rb);
+  else if (r < join1) {
+    float y0 = uIYb - uIFace * (join0 - Rb);
+    float y1 = uIYf - uIShelf * (join1 - Rf);
+    float span = max(join1 - join0, 1.0);
+    y = iHermite((r - join0) / span, y0, y1, -uIFace * span, -uIShelf * span);
+  } else if (r <= Rs) y = uIYf - uIShelf * (r - Rf);
+  else {
+    float span = max(uIRbank - Rs, 1.0);
+    y = iHermite((r - Rs) / span, uIYs, yFloor, -uIShelf * span, 0.0);
+  }
+  y += 0.16 * uIPeak * exp(-((r - Rb) / 4.0) * ((r - Rb) / 4.0));
+  if (r < Rb) y += 0.10 * uIPeak * sin(0.42 * r + 2.0 * th) * sin(0.28 * r - 3.0 * th);
+  float spanB = max(uIRbank - Rs, 1.0);
+  float uB = clamp((r - Rs) / spanB, 0.0, 1.0);
+  y += 0.55 * uIPeak * sin(7.0 * th + 0.8) * sin(3.14159265 * uB);
+  return y < yFloor ? yFloor : y;
+}
+// The same ripples and grain the scene pass puts on the open floor, so the
+// beach, the bank and the seabed are one sand.
+vec3 sfSandDetail(vec2 sp) { return sfSandTex(sp, vWorld.y); }
+#endif
+${lightSampleGlsl()}
+uniform mat4 uShVP;
+uniform float uCausDay;
+uniform float uCausDeep;
+uniform float uSeaL;
+uniform vec2 uCaustO;
+uniform float uCaustTile;
+uniform float uBisect;
+float shadowVis(vec3 w) {
+  if (uCausDay < 0.0 || uBisect > 2.5) return 1.0;
+  vec4 lp = uShVP * vec4(w, 1.0);
+  vec3 p = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
+  if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0) return 1.0;
+  float caster = lightSh(p.xy);
+  float blocked = p.z > caster + 0.012 ? 1.0 : 0.0;
+  float fill = 1.0 - exp(-max(0.0, -w.y) * 0.11);
+  return mix(1.0 - blocked, 1.0, clamp(fill, 0.0, 0.75));
+}
+float floorMul(vec3 bedP, vec2 slope) {
+  if (uCausDay < 0.01 || (uBisect > 0.5 && uBisect < 1.5)) return 1.0;
+  vec3 Rf = refract(-normalize(lightDir), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
+  if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
+  vec2 xz = bedP.xz - bedP.y * Rf.xz / Rf.y;
+  float col = max(0.12, -bedP.y);
+  float ratio = (uBisect > 1.5 && uBisect < 2.5) ? 1.0 : causNet(xz, col, slope);
+  float clar = max(uClarK, 0.35);
+  float near = exp(-col * clar / 2.6);
+  float deep = 0.08 * exp(-col * clar / 16.0);
+  float strength = clamp(near + deep, 0.0, 1.0) * max(uCausDay, 0.0);
+  return mix(1.0, ratio, strength);
+}
+vec3 underLight(vec3 rgb, vec3 w) {
+  // The side wall is a vertical cut. A caustic map in x/z is constant down
+  // the face, so it draws bright columns, and those columns flicker as the
+  // live map is redrawn. The cut stays the water colour. Light hits the floor.
+  if (vKind < 1.5) return rgb;
+  float sh = shadowVis(w);
+  float below = smoothstep(0.15, -0.2, w.y);
+  float col0 = max(0.05, -w.y);
+  // A hard 0.46 darken in the first metre turned the wet sand into asphalt
+  // and smeared the coarse shadow map across the bank.
+  float dunk = mix(0.86, 0.58, smoothstep(0.6, 8.0, col0));
+  rgb *= mix(1.0, mix(dunk, 1.0, sh), below);
+  if (below < 0.01 || uCausDay < 0.01 || (uBisect > 0.5 && uBisect < 1.5)) return rgb;
+  return rgb * floorMul(w, vec2(0.0));
+}
 vec4 seafloorShade() {
   vec3 fog = SB_FOG;
   if (vKind > 1.5 && sfRaw > 0.5) { // v30.5 scene pass: bare albedo, height 0
     // v30.6 sand texture: wave-formed ripples (~0.8 m crests, wavy, bifurcating via a warped phase)
     // lit on their sun side, plus fine grain; both fade with pixel footprint (no shimmer).
-    vec2 sp = vWorld.xz;
-    float fpS = max(length(dFdx(vWorld)), length(dFdy(vWorld)));
-    float ph = dot(sp, vec2(0.81, 0.59)) * 3.9 + 5.0 * valueNoise(sp * 0.22) + 1.6 * valueNoise(sp * 1.1 + 9.0);
-    float rip = (sin(ph) + 0.35 * sin(2.0 * ph + 1.0)) * (1.0 - smoothstep(0.2, 0.6, fpS)) * mix(0.5, 1.0, valueNoise(sp * 0.12 + 4.0));
-    float grain = (valueNoise(sp * 22.0) - 0.5) * (1.0 - smoothstep(0.01, 0.04, fpS)) + (valueNoise(sp * 6.0 + 2.0) - 0.5) * 0.6 * (1.0 - smoothstep(0.04, 0.15, fpS));
-    vec3 al = sfAlbedo(sp) * (1.0 + 0.2 * rip + 0.25 * grain);
-    if (SAND_DBG) al = vec3(0.5 + 0.5 * rip, fpS, 0.0);
+    vec3 al = sfSandTex(vWorld.xz, vWorld.y);
+    if (SAND_DBG) {
+      vec2 sp = vWorld.xz;
+      float fpS = max(length(dFdx(vWorld)), length(dFdy(vWorld)));
+      float ph = dot(sp, vec2(0.81, 0.59)) * 3.9 + 5.0 * valueNoise(sp * 0.22) + 1.6 * valueNoise(sp * 1.1 + 9.0);
+      float rip = (sin(ph) + 0.35 * sin(2.0 * ph + 1.0)) * (1.0 - smoothstep(0.2, 0.6, fpS)) * mix(0.5, 1.0, valueNoise(sp * 0.12 + 4.0));
+      al = vec3(0.5 + 0.5 * rip, fpS, 0.0);
+    }
     return vec4(sfEncode(clamp(al, 0.0, 1.0)), 0.0);
   }
-  if (vKind > 1.5) return vec4(sfCap(sfEncode(SF_UPWELL * sfFloor(depth, sfAlbedo(vWorld.xz)))), 1.0);
+  if (vKind > 1.5) return vec4(sfCap(sfEncode(SF_UPWELL * sfFloor(depth, sfSandTex(vWorld.xz, vWorld.y)))), 1.0);
   // wall: one-way column tint from v28's lit face to the fog, the same Kd
   float z = max(vSurfY - vWorld.y, 0.0);
   vec3 c = fog + (SF_FACE - fog) * sbRow(z, 2.0);   // one-way, the same spectral model
   if (z < 0.10) c = mix(c, SF_MENISCUS, 0.5);
-  if (vWorld.y < -depth + bedRelief(vWorld.xz, depth) + SF_SLICE) c = fog + (SF_GAIN * sfAlbedo(vWorld.xz + vec2(vWorld.y)) - fog) * sbRow(depth, 2.0);
+  if (vWorld.y < -depth + bedRelief(vWorld.xz, depth) + 3.0) c = fog;
   vec3 v = normalize(eye - vWorld);
   // QM corner fix: the wall's face and corner line come from the undisplaced perimeter position
   // (vSea.xy, linear along each wall, exactly |x| = |z| on the shared corner edge), not from the
@@ -304,7 +493,22 @@ vec4 seafloorShade() {
     vec3 d = refract(-v, nW, 1.0 / 1.333);
     float H = max(abs(pW.x), abs(pW.y));
     vec3 q = vec3(clamp(vWorld.x, -H, H), vWorld.y, clamp(vWorld.z, -H, H));
-    float tF = d.y < -1e-4 ? (-depth - q.y) / d.y : 1e9;
+    float tF = 1e9;
+#ifdef ISLAND_ON
+    if (uIsland > 0.5 && d.y < -1e-4) {
+      float t = 0.05;
+      for (int i = 0; i < 12; i++) {
+        vec3 p = q + d * t;
+        float bed = islandBed(p.xz);
+        if (p.y <= bed + 0.08) { tF = t; break; }
+        t += clamp((p.y - bed) / max(-d.y, 0.05), 0.35, 14.0);
+        if (t > 500.0) break;
+      }
+      float tFlat = (-depth - q.y) / d.y;
+      tF = min(tF, tFlat);
+    } else
+#endif
+    if (d.y < -1e-4) tF = (-depth - q.y) / d.y;
     float tT = d.y > 1e-4 ? (vSurfY - q.y) / d.y : 1e9;
     float tX = abs(d.x) > 1e-4 ? (sign(d.x) * H - q.x) / d.x : 1e9;
     float tZ = abs(d.z) > 1e-4 ? (sign(d.z) * H - q.z) / d.z : 1e9;
@@ -345,12 +549,28 @@ vec4 seafloorShade() {
   // still sees through. The floor drawn from above is a different pass.
   float vertT = clamp(dot(trKZ, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
   wallA = mix(1.0, wallA, smoothstep(0.02, 0.45, vertT));
-  bool inSlice = vWorld.y < -depth + bedRelief(vWorld.xz, depth) + SF_SLICE;
+  float bedLine = -depth + bedRelief(vWorld.xz, depth);
+#ifdef ISLAND_ON
+  if (uHasIsland > 0.5) bedLine = max(bedLine, islandBed(vWorld.xz));
+#endif
+  // The cut follows the bed, dunes included, and stays thick enough to
+  // read in a wide frame. The pattern is in the wall plane.
+  float cut = max(8.0, min(0.28 * depth, 14.0));
+  bool inSlice = vWorld.y < bedLine + cut;
   if (inSlice) {
     wallA = 1.0;
-    vec3 sand = SF_GAIN * sfAlbedo(vWorld.xz + vec2(vWorld.y));
-    vec3 linS = mix(body3 * trKZ, sand, clamp(trKZ, 0.0, 1.0));
-    linS = linS / (1.0 + 0.35 * linS);
+    // Sand in the wall plane. The horizontal coordinate is the undisplaced
+    // perimeter, so the pattern stays put while the waves shift the vertices.
+    // No orbital ripple: that wave stands up as columns on this cut.
+    vec2 face = abs(pW.x) > abs(pW.y) ? vec2(pW.y, vWorld.y) : vec2(pW.x, vWorld.y);
+    float n1 = sfNoise(face * 0.22);
+    float n2 = sfNoise(face * vec2(0.9, 1.6) + 3.0);
+    float n3 = sfNoise(face * 4.5 + 11.0);
+    float g = n1 * 0.5 + n2 * 0.32 + n3 * 0.18;
+    vec3 sand = vec3(0.76, 0.70, 0.60) * (0.72 + 0.55 * (g - 0.5));
+    sand = mix(sand, sand * vec3(0.92, 0.90, 0.86), 0.35 * sfNoise(vec2(face.y * 0.55, 2.0)));
+    float bury = clamp((bedLine + cut - vWorld.y) / max(cut, 1.0), 0.0, 1.0);
+    vec3 linS = sand * mix(0.94, 0.62, bury);
     outc = sfCap(pow(max(linS, 0.0), vec3(1.0 / 2.2)));
   } else {
     vec3 c3 = body3 * trKZ;
@@ -360,6 +580,10 @@ vec4 seafloorShade() {
   }
   // A thin cool edge on the vertical corner, closer to the instrument hairline
   // than a bright smear of the water colour. The water colour itself is unchanged.
+  // The floor behind this face is lit by the caustic map. Where the wall is
+  // transparent those lights read as vertical bars. The cut is the water
+  // colour, or the sand, and nothing shows through it.
+  wallA = 1.0;
   float ce = max(abs(pW.x), abs(pW.y)) - min(abs(pW.x), abs(pW.y));
   float edgeW = max(length(vec2(dFdx(ce), dFdy(ce))), 1e-4);
   float corner = 1.0 - smoothstep(0.15 * edgeW, 0.7 * edgeW, ce);
@@ -443,6 +667,17 @@ const PHYS_SEA = String.raw`
     vec3 bb = (vec3(0.0005, 0.0011, 0.0024) + (0.0035 + 0.012 * WATER_TURB) * vec3(0.75, 1.75, 0.9)) * WATER_SB; // backscatter 1/m
     vec3 Kd = 1.15 * aW + bb;                         // diffuse attenuation (mean cosine ~0.87)
     float H = block > 0.5 || depth < 200.0 ? max(depth + vWorld.y, 0.0) : 1e4;
+#ifdef ISLAND_ON
+    {
+      // Shallow water over the bank only. Outside the bank, H is the open
+      // sea, so the colour away from the island does not change.
+      float openH = max(depth + vWorld.y, 0.0);
+      float bedA = islandBed(vSea.xy);
+      float localH = max(vWorld.y - bedA, 0.15);
+      float toe = 1.0 - smoothstep(uIRbank - 6.0, uIRbank + 3.0, length(vSea.xy - uIslandC));
+      H = mix(openH, min(openH, localH), toe);
+    }
+#endif
     vec3 Rinf = 0.33 * bb / (1.15 * aW + bb);         // deep-water irradiance reflectance
     vec3 Rw;
     // v30.5 see-through: the view ray refracted at the wave normal (Snell, n = 1.33) is traced to the
@@ -455,14 +690,25 @@ const PHYS_SEA = String.raw`
     vec2 suv = cp.xy / cp.w * 0.5 + 0.5;
     if (sceneOn > 0.5 && H < 200.0 && cp.w > 0.0 && all(greaterThan(suv, vec2(0.0))) && all(lessThan(suv, vec2(1.0)))) {
       vec4 sc = texture(sceneTex, suv);
-      vec3 alb = pow(sc.rgb, vec3(2.2)) * SAND_K;
-      float hr = sc.a * 4.0;
-      float down = max(H - hr, 0.0), path = tb * (down / max(H, 1e-3));
-      vec3 T = exp(-Kd * (down + path));
-      Rw = Rinf * (1.0 - T) + alb * T;
+      // The scene is cleared black. A ray that misses the floor used to read
+      // the old pale clear colour and wear it as sand. On the open sea the
+      // floor sits 40 m down and a wide view misses it often, so the pale
+      // colour sat on the water. The island lifts the floor into that view,
+      // which is why the film was gone with the island on.
+      bool hit = sc.a > 0.001 || dot(sc.rgb, vec3(1.0)) > 0.04;
+      if (hit) {
+        vec3 alb = pow(sc.rgb, vec3(2.2)) * SAND_K;
+        float hr = sc.a * 4.0;
+        float down = max(H - hr, 0.0), path = tb * (down / max(H, 1e-3));
+        vec3 T = exp(-Kd * (down + path));
+        Rw = Rinf * (1.0 - T) + alb * T * floorMul(vWorld + dr * tb, n.xz);
+      } else {
+        vec3 T = exp(-2.0 * Kd * H);
+        Rw = Rinf * (1.0 - T) + SAND_ALBEDO * T * floorMul(vWorld + dr * tb, n.xz);
+      }
     } else {
       vec3 T = exp(-2.0 * Kd * H);
-      Rw = Rinf * (1.0 - T) + SAND_ALBEDO * T;
+      Rw = Rinf * (1.0 - T) + SAND_ALBEDO * T * floorMul(vWorld + dr * tb, n.xz);
     }
     // v30.6 aeration: bubbles are bright, non-absorbing scatterers; in a shallow layer (za ~ 2 m) they
     // raise the backscatter, so light comes back up after a short path: red still absorbed, green-blue
@@ -557,7 +803,7 @@ const PHYS_SEA = String.raw`
     float flowW = 1.0;
     // FOAM_FLOW_END
     // stretched along the flow as the foam ages (accumulated strain, capped)
-    float stx = clamp(mix(1.0, 0.7, age) * sqrt(jv), 0.5, 1.0); // v30.8.2: stretch by age and the local surface strain (converging J<1 squeezes, diverging opens), max 2:1, world space along the wind // v30.8b: residual stretched downwind into streaks as it ages
+    float stx = mix(1.0, clamp(0.84 * sqrt(max(jv, 0.36)), 0.78, 0.92), smoothstep(0.4, 0.85, age));
     vec2 qs = vec2(dot(qf, dd) * stx, dot(qf, vec2(-dd.y, dd.x)));
     vec2 qs2 = vec2(dot(qf2, dd) * stx, dot(qf2, vec2(-dd.y, dd.x)));
     const mat2 R2 = mat2(0.809, 0.588, -0.588, 0.809), R3 = mat2(0.276, -0.961, 0.961, 0.276);
@@ -581,7 +827,7 @@ const PHYS_SEA = String.raw`
       float ysh = clamp(0.5 * Sb.g / max(Sd.r + 0.5 * Sb.g, 1e-4), 0.0, 1.0); // v30.22f: young (dense-phase) share: its lace mask is lower (holed patch, not specks)
       sl = (Sd.r + 0.5 * Sb.g) / jv;
       float dns_ = smoothstep(0.1, 0.5, Sb.r / jv), dth_ = FOAM_NEW ? (1.5 + 0.25 * (1.0 - smoothstep(1.5, 3.0, length(foamDrift)))) * 0.25 * dns_ : 0.0; // v30.22g/h: denser strand foam lowers the lace threshold (connected lace, not twig fragments); a little more at low wind (~1% at 10 m/s)
-      sM = s; if (FOAM_NEW) { vec2 qk = vec2(qs.x * 0.3, qs.y); sM = clamp(0.55 * texture(foamLace, qk / 10.0 + 0.43).g + 0.6 * texture(foamLace, R2 * qk / 4.0 + 0.11).g * (1.0 - 0.5 * smoothstep(0.08, 0.3, fpM)), 0.0, 1.0);
+      sM = s; if (FOAM_NEW) { vec2 qk = vec2(qs.x * mix(1.0, 0.86, smoothstep(0.4, 0.9, age)), qs.y); sM = clamp(0.55 * texture(foamLace, qk / 10.0 + 0.43).g + 0.6 * texture(foamLace, R2 * qk / 4.0 + 0.11).g * (1.0 - 0.5 * smoothstep(0.08, 0.3, fpM)), 0.0, 1.0);
         // v30.24 item 12 (Michael 0bd581d5: big crack / line patterns across the foam patches): the lace (G) is a net of
         // thin walls (90% of texels 0), so the mask drew a crazed white net over every patch. The soft mask is the
         // blurred bubble-pit field (A, mip 3: median 0.39, 5-95% 0.05-0.72): blotches and holes, no lines;
@@ -598,7 +844,7 @@ const PHYS_SEA = String.raw`
       aR = (1.0 - exp(-2.5 * sl)) * /* v30.18.2: non-saturating, opacity follows strand age */ mix(0.8, 1.0, t2.b) * mix(smoothstep(max(mix(0.35, LACE_YLO, ysh) - dth_, 0.0), max(mix(0.6, LACE_YLO + 0.25, ysh) - dth_, FOAM_NEW ? mix(0.12, 0.22, smoothstep(1.5, 2.5, length(foamDrift))) : -1.0), sM), gapKeep, smoothstep(LACE_FAR, LACE_FAR > 0.1 ? LACE_FAR + 0.6 : 0.25, fpM));
       if (FOAM_NEW) aR *= smoothstep(0.05, 0.15, Sb.r / jv); // v30.22g: an isolated strand line (low blurred lace) is not drawn (white twig specks) (was 0.04: flat pale fill at medium range) // close up the splatted strand (0.4 m cells) breaks into the fine lace walls
     }
-    float denseR = strandsOn > 0.5 ? dW : dense;
+    float denseR = strandsOn > 0.5 ? max(dW, 0.85 * dense) : dense;
     // Dense whitewater: the same strands at a low threshold, so the texture shows inside the white
     float dn = denseR * (0.9 + 0.45 * (s - 0.15) + 0.3 * (t3.a - 0.4) * o3 + 0.25 * (t1.g - 0.1));
     float fr = clamp(freshK * 2.0, 0.0, 1.0);
@@ -610,12 +856,16 @@ const PHYS_SEA = String.raw`
     float wcM = 0.0;
     if (strandsOn > 0.5 && WC_STRANDS) {
       vec2 qc = vec2(dot(qf, dd), dot(qf, vec2(-dd.y, dd.x)));         // across-crest, along-crest (m)
-      float m0 = texture(foamLace, vec2(qc.x / 5.0, qc.y / 20.0) + 0.71).g;
-      float m1 = texture(foamLace, vec2(qc.x / 1.4, qc.y / 6.0) + 0.13).g;
+      // Fresh foam is nearly round. Aged foam keeps the long along-crest streaks.
+      float along = mix(4.0, 1.2, clamp(fr, 0.0, 1.0));
+      float m0 = texture(foamLace, vec2(qc.x / 5.0, qc.y / (5.0 * along)) + 0.71).g;
+      float m1 = texture(foamLace, vec2(qc.x / 1.5, qc.y / (1.5 * along)) + 0.13).g;
       float oF = 1.0 - smoothstep(0.02, 0.06, fpM);
-      float m2 = texture(foamLace, vec2(qc.x / 0.35, qc.y / 1.4) + 0.52).g;
+      // The finest lace is round on fresh foam. A 4:1 sample there drew lines that popped on.
+      float m2 = texture(foamLace, vec2(qc.x / 0.5, qc.y / mix(1.6, 0.55, clamp(fr, 0.0, 1.0))) + 0.52).g;
       float slc = clamp(2.0 * sl, 0.0, 1.0);
-      float st = 0.35 * m0 + 0.55 * m1 + mix(0.12, 0.25 * m2, oF) + 0.12 * slc;   // v30.19.1: fewer hard strand lines inside the band   // ~0..1.4
+      float lineK = 1.0 - 0.7 * clamp(fr, 0.0, 1.0);
+      float st = 0.35 * m0 + 0.55 * m1 + mix(0.12, 0.25 * m2, oF) * lineK + 0.12 * slc;   // v30.19.1: fewer hard strand lines inside the band   // ~0..1.4
       float D = clamp(WC_D * denseR * (0.8 + 0.6 * fr), 0.0, 1.0);   // v30.16.1: WC_D < 1 keeps the dense front holed (no sheets)
       float thr = mix(WC_T0, WC_T1, D);                                   // dense front: low threshold
       float w = 0.25 + fwidth(st); // v30.18.4: soft, pillowy whitecap edge (was 0.10)
@@ -640,9 +890,15 @@ const PHYS_SEA = String.raw`
       float rim = smoothstep(0.04, 0.4, aR) * (1.0 - smoothstep(0.45, 0.9, aR));
       float rimN = valueNoise(qd / 4.5 + 12.0);
       aR *= mix(1.0, smoothstep(0.3, 0.62, rimN), rim * (1.0 - crisp));
-      float fleckN = valueNoise(qd / 1.5 + 33.0);
-      float fleck = (1.0 - smoothstep(0.02, 0.22, max(aR, aD))) * smoothstep(0.84, 0.94, fleckN) * smoothstep(0.03, 0.14, sl) * (1.0 - crisp);
-      aR = clamp(aR + fleck, 0.0, 1.0); }
+      float fleckN = valueNoise(qd / 2.4 + 33.0);
+      float fleck = (1.0 - smoothstep(0.06, 0.4, max(aR, aD))) * smoothstep(0.7, 0.98, fleckN) * smoothstep(0.1, 0.32, sl) * (1.0 - crisp);
+      aR = clamp(aR + fleck * 0.28, 0.0, 1.0);
+      float windU = length(foamDrift);
+      if (windU > 14.0) {
+        float across = dot(qd, vec2(-dd.y, dd.x));
+        float row = 0.5 + 0.5 * sin(across * 0.42);
+        aR *= mix(1.0, 0.62 + 0.38 * row, smoothstep(14.0, 20.0, windU) * smoothstep(0.35, 0.8, age));
+      } }
     float fa = clamp(max(aD, aR) + edgeZone * s, 0.0, 1.0);
     // Lighting: wrap-Lambert on the wave normal plus the foam height bump (B channel), sun and sky;
     // contact darkening at the thin strand edges, thin foam shows the water colour under it.
@@ -904,6 +1160,21 @@ vec3 skyFacet(vec3 nn, vec3 V, out float w) {
   return skyR * w;
 }
 ${LOBE_GLSL}
+uniform vec4 uBoat;
+uniform vec3 uShadeSun;
+float boatShade(vec2 xz, vec3 L) {
+  if (uBoat.w < 0.5 || L.y < 0.03) return 1.0;
+  float horiz = max(length(L.xz), 1e-4);
+  vec2 s = L.xz / horiz;
+  float elev = max(L.y, 0.04);
+  vec2 ctr = uBoat.xy - s * (max(uBoat.z, 0.05) * horiz / elev);
+  vec2 q = xz - ctr;
+  float along = dot(q, s);
+  float cross = q.x * s.y - q.y * s.x;
+  float len = 5.2 * horiz / elev;
+  float e = along * along / (len * len) + cross * cross / (2.3 * 2.3);
+  return mix(0.62, 1.0, smoothstep(0.35, 1.15, sqrt(e)));
+}
 void main() {
   vec3 nBig = normalize(vNormal);
   { vec3 rp = ripple(vWorld.xz); nBig = normalize(nBig + vec3(-rp.y, 0.0, -rp.z) * nBig.y * 1.35); } // v30.27 ripples: a little more slope so the ring reads in wind sea
@@ -1021,6 +1292,17 @@ void main() {
                 * (1.0 - smoothstep(SUNW_VY0, SUNW_VY1, V.y));
   awayK *= mix(1.0, mix(SUN_TROUGH_K, SUN_REFL_K, facing), sunward);
   float reflShare = 0.25 * (w0 + w1 + w2 + w3) * awayK;
+  vec3 shadeSun = uShadeSun.y > 0.02 ? normalize(uShadeSun) : lightDir;
+  float bodySh = boatShade(vWorld.xz, shadeSun);
+#ifdef ISLAND_ON
+  {
+    // Shadow only where the bed has actually risen. Open water, including
+    // the border of the heightmap, stays at 1 (no dark square).
+    float risen = smoothstep(0.4, 5.0, depth - max(0.0, -vCoast.r));
+    bodySh *= mix(1.0, mix(0.9, 1.0, clamp(vCoast.b, 0.0, 1.0)), risen);
+  }
+#endif
+  color *= bodySh;
   color = color * (1.0 - reflShare) + 0.25 * sky * awayK;
 
   // Sun glitter (Cox and Munk 1954): radiance = E * rho * p(facet) / (4 cos(view) cos^4(beta)),
@@ -1424,30 +1706,165 @@ function compile(gl, type, source) {
   return shader;
 }
 
+export function seaFragmentSources(derivatives, island) {
+  const location = { search: island ? "?island=1" : "" };
+  const fragBody = (derivatives ? "#extension GL_OES_standard_derivatives : enable\n#define HAS_DERIV 1\n" : "") + REFLECT_DEFS + FINE_DEFS + LIGHT_DEFS + TRANSL_DEFS + LACE_DEFS + FRAG;
+  const cpu = toEs3(fragBody, "fragment");
+  // GPU physics: the patches' slope variance per mip level comes from their stats textures
+  // (level L's variance at texel L; kept = level L / level 0, as keptPerLevel computes),
+  // so nothing is read back. The rest of the shader is the same text.
+  const gpu = toEs3(fragBody
+    .replace("uniform float chopKept[8];\nuniform float fineKept[8];", "float chopKept[8];\nfloat fineKept[8];\nuniform highp sampler2D bandStats;")
+    .replace("void main() {", `void main() {
+  {
+    float c0 = texelFetch(bandStats, ivec2(0, 0), 0).x;
+    float f0 = texelFetch(bandStats, ivec2(0, 1), 0).x;
+    for (int i = 0; i < 8; i += 1) {
+      chopKept[i] = texelFetch(bandStats, ivec2(i, 0), 0).x / (c0 > 0.0 ? c0 : 1.0);
+      fineKept[i] = texelFetch(bandStats, ivec2(i, 1), 0).x / (f0 > 0.0 ? f0 : 1.0);
+    }
+  }`), "fragment");
+  const fft = toEs3((typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? "#define ISLAND_ON 1\n" : "") + fragBody
+    .replace("uniform float chopKept[8];\nuniform float fineKept[8];", "float chopKept[8];\nfloat fineKept[8];\nuniform highp sampler2D bandStats;")
+    .replace("uniform float subMss;", "uniform float subMssU;\nvarying float vLodLost;\nfloat subMss;")
+    // v31.8: do not gate vThin through smoothstep(0.14, 0.18) * 4.2. That isosurface was a
+    // second hard lip. The live colour is PHYS_SEA; this path stays the continuous transmission.
+    .replace("vec3 nBig = normalize(vNormal);", "vec3 nBig = normalize(mix(normalize(vNormal), seaNormalPix(vSea.xy, vSea.z), clamp(vSea.w, 0.0, 1.0)));")
+    // GAD per-pixel foam (see foamPix in fftView.js): the foam varyings become globals set per pixel.
+    .replace("varying float vFoam;", "varying float vFoam;\nfloat fFoam; float rawFoam() { return vFoam; }\n#define vFoam fFoam\n")
+    .replace("varying float vFlag;", "varying float vFlag;\nfloat fFlag; float rawFlag() { return vFlag; }\n#define vFlag fFlag\n")
+    .replace("varying float vRecent;", "varying float vRecent;\nfloat fRecent; float rawRecent() { return vRecent; }\n#define vRecent fRecent\n")
+    .replace("varying float vFade;", "varying float vFade;\nfloat fFade; float rawFade() { return vFade; }\n#define vFade fFade\n")
+    .replace("varying float vAge;", "varying float vAge;\nfloat fAge; float rawAge() { return vAge; }\n#define vAge fAge\n")
+    .replace("varying float vAhead;", "varying float vAhead;\nfloat fAhead; float rawAhead() { return vAhead; }\n#define vAhead fAhead\n")
+    .replace("varying float vRun;", "varying float vRun;\nfloat fRun; float rawRun() { return vRun; }\n#define vRun fRun\n")
+    .replace("  // Break flags. Red: samples flagged now", PHYS_SEA + "  // Break flags. Red: samples flagged now")
+    .replace("gl_FragColor = vec4(color, 1.0);", `${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `if (uIsland > 0.5) {
+    // The beach is the bed, already in the mesh. This only paints that sand
+    // and the sheet that is actually on it. It does not tint the sea, so
+    // there is no teal disc and no bright ring at a radius.
+    vec2 rest = vSea.xy;
+    float bedS = islandBed(rest);
+    float cap = max(uR2, 0.15);
+    float inland = smoothstep(cap - 0.04, cap + 0.06, bedS);
+    float film = max(vCoast.a, 0.0);
+    // Only the beach face. Thin water on the shelf is the sea, not a white strand.
+    float onBeach = smoothstep(-0.4, -0.08, bedS) * (1.0 - inland);
+    // The bore is the thin leading edge. Thicker film behind it is a wet sheen.
+    float bore = smoothstep(0.003, 0.012, film) * (1.0 - smoothstep(0.016, 0.04, film));
+    bore *= onBeach;
+    float sheen = smoothstep(0.02, 0.07, film) * onBeach;
+    float dry = smoothstep(-0.05, 0.12, bedS) * inland;
+    if (dry > 0.001 || bore > 0.002 || sheen > 0.002) {
+      vec3 sand = sfSandDetail(rest);
+      float eN = 1.6;
+      float bx = islandBed(rest + vec2(eN, 0.0)) - islandBed(rest - vec2(eN, 0.0));
+      float bz = islandBed(rest + vec2(0.0, eN)) - islandBed(rest - vec2(0.0, eN));
+      vec3 nBed = normalize(vec3(-bx, 2.0 * eN, -bz));
+      float ndl = clamp(dot(nBed, normalize(lightDir)), 0.0, 1.0);
+      float shade = 0.82 + 0.28 * ndl;
+      shade *= mix(0.96, 1.0, clamp(vCoast.b, 0.0, 1.0));
+      sand *= shade;
+      vec3 shore = mix(sand, sand * vec3(0.72, 0.8, 0.82), clamp(sheen, 0.0, 0.7));
+      shore = mix(shore, vec3(0.94, 0.97, 0.98), clamp(bore, 0.0, 0.85));
+      float cover = max(dry, max(sheen, bore));
+      color = mix(color, shore, clamp(cover, 0.0, 1.0));
+    }
+  }` : ""}
+  color *= dayTint;
+  gl_FragColor = vec4(color, 1.0);`)
+    .replace("void main() {", PHYS_DECL + SEAFLOOR_FS + "#define HAS_FOAMNEAR 1\n#define FOAM_PIX " + ((typeof location !== "undefined" && new URLSearchParams(location.search).get("foampix") === "0") ? "false" : "true") + "\n" + FRAG_FFT_NORMAL.replace("in vec4 vSea;\n", "").replace("uniform highp sampler2D physG;\n", "").replace(/\bphysG\b/g, "physK") + `in vec3 vCurl;
+uniform vec3 dayTint;
+${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `in vec4 vCoast;
+in vec2 vBedG;
+in float vFloorGrid;
+in float vEta;
+in float vWet;
+uniform float uSteep;
+` : ""}
+void main() {
+  if (vKind > 0.5) {
+    gl_FragColor = seafloorShade();
+    // Walls return the colour unchanged (underLight). The scene copy stays
+    // plain sand: the water shader samples the caustic map once, at the
+    // refracted hit, so the filaments are not applied twice. The floor drawn
+    // on screen still carries them.
+    if (sfRaw < 0.5) gl_FragColor.rgb = underLight(gl_FragColor.rgb, vWorld);
+    ${typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1" ? `if (uIsland > 0.5 && vFloorGrid > 0.5 && sfRaw < 0.5) {
+      // Scene pass (sfRaw) keeps seafloorShade, ripples and all, on the
+      // whole floor. Only the direct mound uses the local water depth, and
+      // only where the bed has actually risen. The open floor is untouched.
+      float bedS = islandBed(vWorld.xz);
+      float D = max(0.0, -bedS);
+      float risen = smoothstep(0.45, 6.0, depth - D);
+      if (risen > 0.002) {
+        vec3 al = sfSandDetail(vWorld.xz);
+        vec3 lit = sfCap(sfEncode(SF_UPWELL * sfFloor(max(D, 0.25), al)));
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, lit, risen);
+      }
+    }` : ""}
+    gl_FragColor.rgb *= dayTint;
+    return;
+  }
+  if (FOAM_PIX) {
+    vec4 pf, pg; foamPix(vSea.xy, pf, pg);
+    float kp = clamp(vFoamKeep, 0.0, 1.0);
+    vFoam = pf.x * kp; vFade = pf.y * kp; vAge = pf.z; vAhead = pg.x; vRun = pg.y; vRecent = pg.z * kp; vFlag = pg.w * kp;
+  } else { vFoam = rawFoam(); vFlag = rawFlag(); vRecent = rawRecent(); vFade = rawFade(); vAge = rawAge(); vAhead = rawAhead(); vRun = rawRun(); }
+  subMss = subMssU + vLodLost;
+  {
+    float c0 = texelFetch(bandStats, ivec2(0, 0), 0).x;
+    float f0 = texelFetch(bandStats, ivec2(0, 1), 0).x;
+    for (int i = 0; i < 8; i += 1) {
+      chopKept[i] = texelFetch(bandStats, ivec2(i, 0), 0).x / (c0 > 0.0 ? c0 : 1.0);
+      fineKept[i] = texelFetch(bandStats, ivec2(i, 1), 0).x / (f0 > 0.0 ? f0 : 1.0);
+    }
+  }`), "fragment");
+  return { fragBody, cpu, gpu, fft };
+}
+
 export function createView(canvas) {
   // WebGL2 when available (GPU physics needs it); WebGL1 still draws the CPU physics.
   const gl = canvas.getContext("webgl2", { antialias: true }) || canvas.getContext("webgl", { antialias: true });
   if (!gl) throw new Error("WebGL is not available");
   const webgl2 = typeof WebGL2RenderingContext !== "undefined" && gl instanceof WebGL2RenderingContext;
+  const bandStatsTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, bandStatsTex);
+  if (webgl2) {
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 8, 2);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 8, 2, gl.RGBA, gl.FLOAT, new Float32Array(64));
+  } else {
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 8, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(64));
+  }
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const statRead = gl.createFramebuffer();
+  function copyBandStats(chop, fine) {
+    const prev = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, statRead);
+    const row = (src, y) => {
+      if (!src) return;
+      gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, src, 0);
+      gl.readBuffer(gl.COLOR_ATTACHMENT0);
+      gl.bindTexture(gl.TEXTURE_2D, bandStatsTex);
+      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, y, 0, 0, 8, 1);
+    };
+    row(chop, 0);
+    row(fine, 1);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prev);
+  }
   // Derivatives give a one-pixel-ish flag outline at any distance. Without them the
   // outline is a fixed band in attribute space.
   const derivatives = webgl2 || gl.getExtension("OES_standard_derivatives");
-  const fragBody = (derivatives ? "#extension GL_OES_standard_derivatives : enable\n#define HAS_DERIV 1\n" : "") + REFLECT_DEFS + FINE_DEFS + LIGHT_DEFS + TRANSL_DEFS + LACE_DEFS + FRAG;
-  const fragShader = compile(gl, gl.FRAGMENT_SHADER, webgl2 ? toEs3(fragBody, "fragment") : fragBody);
-  // GPU physics: the patches' slope variance per mip level comes from their stats textures
-  // (level L's variance at texel L; kept = level L / level 0, as keptPerLevel computes),
-  // so nothing is read back. The rest of the shader is the same text.
-  const gpuFragShader = webgl2 ? compile(gl, gl.FRAGMENT_SHADER, toEs3(fragBody
-    .replace("uniform float chopKept[8];\nuniform float fineKept[8];", "float chopKept[8];\nfloat fineKept[8];\nuniform highp sampler2D chopStats;\nuniform highp sampler2D fineStats;")
-    .replace("void main() {", `void main() {
-  {
-    float c0 = texelFetch(chopStats, ivec2(0, 0), 0).x;
-    float f0 = texelFetch(fineStats, ivec2(0, 0), 0).x;
-    for (int i = 0; i < 8; i += 1) {
-      chopKept[i] = texelFetch(chopStats, ivec2(i, 0), 0).x / (c0 > 0.0 ? c0 : 1.0);
-      fineKept[i] = texelFetch(fineStats, ivec2(i, 0), 0).x / (f0 > 0.0 ? f0 : 1.0);
-    }
-  }`), "fragment")) : null;
+  const islandDraw = typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1";
+  const seaSrc = seaFragmentSources(!!derivatives, islandDraw);
+  const fragBody = seaSrc.fragBody;
+  const cpuText = webgl2 ? seaSrc.cpu : seaSrc.fragBody;
+  const fragShader = compile(gl, gl.FRAGMENT_SHADER, cpuText);
+  const gpuText = seaSrc.gpu;
+  const gpuFragShader = webgl2 ? compile(gl, gl.FRAGMENT_SHADER, gpuText) : null;
   function link(vertSource, frag = fragShader) {
     const program = gl.createProgram();
     gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, vertSource));
@@ -1464,54 +1881,19 @@ export function createView(canvas) {
   const gpuProgram = webgl2 ? link(VERT_GPU, gpuFragShader) : null;
   // v28 FFT sea: its own vertex shader and mesh; the fragment shader is the GPU one with the
   // lod-lost slope variance added to the sub-grid roughness (so it goes into every lobe).
-  const fftFragShader = webgl2 ? compile(gl, gl.FRAGMENT_SHADER, toEs3(fragBody
-    .replace("uniform float chopKept[8];\nuniform float fineKept[8];", "float chopKept[8];\nfloat fineKept[8];\nuniform highp sampler2D chopStats;\nuniform highp sampler2D fineStats;")
-    .replace("uniform float subMss;", "uniform float subMssU;\nvarying float vLodLost;\nfloat subMss;")
-    // v31.8: do not gate vThin through smoothstep(0.14, 0.18) * 4.2. That isosurface was a
-    // second hard lip. The live colour is PHYS_SEA; this path stays the continuous transmission.
-    .replace("vec3 nBig = normalize(vNormal);", "vec3 nBig = normalize(mix(normalize(vNormal), seaNormalPix(vSea.xy, vSea.z), clamp(vSea.w, 0.0, 1.0)));")
-    // GAD per-pixel foam (see foamPix in fftView.js): the foam varyings become globals set per pixel.
-    .replace("varying float vFoam;", "varying float vFoam;\nfloat fFoam; float rawFoam() { return vFoam; }\n#define vFoam fFoam\n")
-    .replace("varying float vFlag;", "varying float vFlag;\nfloat fFlag; float rawFlag() { return vFlag; }\n#define vFlag fFlag\n")
-    .replace("varying float vRecent;", "varying float vRecent;\nfloat fRecent; float rawRecent() { return vRecent; }\n#define vRecent fRecent\n")
-    .replace("varying float vFade;", "varying float vFade;\nfloat fFade; float rawFade() { return vFade; }\n#define vFade fFade\n")
-    .replace("varying float vAge;", "varying float vAge;\nfloat fAge; float rawAge() { return vAge; }\n#define vAge fAge\n")
-    .replace("varying float vAhead;", "varying float vAhead;\nfloat fAhead; float rawAhead() { return vAhead; }\n#define vAhead fAhead\n")
-    .replace("varying float vRun;", "varying float vRun;\nfloat fRun; float rawRun() { return vRun; }\n#define vRun fRun\n")
-    .replace("  // Break flags. Red: samples flagged now", PHYS_SEA + "  // Break flags. Red: samples flagged now")
-    .replace("gl_FragColor = vec4(color, 1.0);", `if (vCurl.z > 0.005) {
-    // v30.22c: the face under an overhanging lip is in its shadow: a smooth dark-turquoise gradient
-    // (from the curl field, interpolated per vertex: no facets).
-    float cv = clamp(vCurl.z, 0.0, 1.0);
-    color = mix(color, vec3(0.025, 0.14, 0.16), 0.7 * cv);
-  }
-  color *= dayTint;
-  gl_FragColor = vec4(color, 1.0);`)
-    .replace("void main() {", PHYS_DECL + SEAFLOOR_FS + "#define HAS_FOAMNEAR 1\n#define FOAM_PIX " + ((typeof location !== "undefined" && new URLSearchParams(location.search).get("foampix") === "0") ? "false" : "true") + "\n" + FRAG_FFT_NORMAL.replace("in vec4 vSea;\n", "") + `in vec3 vCurl;
-uniform vec3 dayTint;
-void main() {
-  if (vKind > 0.5) { gl_FragColor = seafloorShade(); gl_FragColor.rgb *= dayTint; return; }
-  if (FOAM_PIX) {
-    vec4 pf, pg; foamPix(vSea.xy, pf, pg);
-    float kp = clamp(vFoamKeep, 0.0, 1.0);
-    vFoam = pf.x * kp; vFade = pf.y * kp; vAge = pf.z; vAhead = pg.x; vRun = pg.y; vRecent = pg.z * kp; vFlag = pg.w * kp;
-  } else { vFoam = rawFoam(); vFlag = rawFlag(); vRecent = rawRecent(); vFade = rawFade(); vAge = rawAge(); vAhead = rawAhead(); vRun = rawRun(); }
-  subMss = subMssU + vLodLost;
-  {
-    float c0 = texelFetch(chopStats, ivec2(0, 0), 0).x;
-    float f0 = texelFetch(fineStats, ivec2(0, 0), 0).x;
-    for (int i = 0; i < 8; i += 1) {
-      chopKept[i] = texelFetch(chopStats, ivec2(i, 0), 0).x / (c0 > 0.0 ? c0 : 1.0);
-      fineKept[i] = texelFetch(fineStats, ivec2(i, 0), 0).x / (f0 > 0.0 ? f0 : 1.0);
-    }
-  }`), "fragment")) : null;
+  const fftText = seaSrc.fft;
+  const fftFragShader = webgl2 ? compile(gl, gl.FRAGMENT_SHADER, fftText) : null;
   const fftProgram = webgl2 ? link(VERT_FFT, fftFragShader) : null;
+  const samplerReports = {};
+  samplerReports.cpu = assertFragmentSamplers(gl, cpuProgram, cpuText, "cpu");
+  if (gpuProgram) samplerReports.gpu = assertFragmentSamplers(gl, gpuProgram, gpuText, "gpu");
+  if (fftProgram) samplerReports.fft = assertFragmentSamplers(gl, fftProgram, fftText, islandDraw ? "fft+island" : "fft");
+  globalThis.__samplerBudget = samplerReports;
   const spray = webgl2 && SEA_PARAMS.get("spray") !== "0" ? createSpray(gl) : null;
-  const curlSheet = webgl2 && SEA_PARAMS.get("curl") !== "0" && SEA_PARAMS.get("curl") !== "lip" ? createCurl(gl) : null; // v30.22c
-  // v31.9: the coarse lip ribbon is a straight-edged turquoise quad a few cells wide.
-  // The curl sheet replaced that look. Draw the ribbon only when the sheet is off
-  // (?curl=0 or ?curl=lip). Foam still comes from the physics, not from this draw.
-  const lip = webgl2 && SEA_PARAMS.get("lip") !== "0" && !curlSheet ? createLip(gl) : null;
+  // The plunging curl sheet and the coarse lip ribbon are gone. Breaking stays
+  // in the foam field, on the spectral surface.
+  const curlSheet = null;
+  const lip = null;
   // v29.1 fix5 review check (?edgecheck=1, off by default): runs the SAME vertex shader with the
   // same uniforms and textures over the surface tile vertices and the wall-top vertices through
   // transform feedback and reports the largest surface-edge to wall-top distance and how far any
@@ -1598,7 +1980,7 @@ void main() {
   const gpuLocs = gpuProgram ? locate(gpuProgram) : null;
   const fftLocs = fftProgram ? locate(fftProgram) : null;
   if (fftLocs) {
-    for (const name of ["physA", "physB", "physL", "physF", "physG", "physK", "foamLace", "foamT", "physS", "strandsOn", "crestLift", "physSF", "fineWin", "fineCam", "foamOff", "waterTurb", "waterSc", "sceneTex", "sceneOn", "sfRaw", "physN", "foamDrift", "curlU", "physC", "dayTint", "chopStats", "fineStats", "fftR0", "fftR1", "fftR2", "fftR3", "fftStats", "fftLevels", "fftL", "choppiness", "pixAngle", "lodBias", "minLod", "farHalve", "oneCopyFar", "tileThin", "ringLodAdd", "antiTile", "block", "xCount", "x0", "x1"]) {
+    for (const name of ["physA", "physB", "physL", "physF", "physG", "physK", "foamLace", "foamT", "physS", "strandsOn", "crestLift", "physSF", "fineWin", "fineCam", "foamOff", "waterTurb", "waterSc", "sceneTex", "sceneOn", "sfRaw", "physN", "foamDrift", "curlU", "physC", "dayTint", "bandStats", "fftR0", "fftR1", "fftR2", "fftR3", "fftStats", "fftLevels", "fftL", "choppiness", "pixAngle", "lodBias", "minLod", "farHalve", "oneCopyFar", "tileThin", "ringLodAdd", "antiTile", "block", "xCount", "x0", "x1"]) {
       fftLocs[name] = gl.getUniformLocation(fftProgram, name);
     }
     fftLocs.subMss = gl.getUniformLocation(fftProgram, "subMssU");
@@ -1642,9 +2024,25 @@ void main() {
     // bottom at the same perimeter point). fix2 reused the wall-bottom vertices (kind 1), so vKind was
     // interpolated 2 -> 1 across every fan triangle and the centre square / corner diagonals switched
     // between the floor and the wall shader.
-    xz.push(0, 0); meta.push(0, 0, 0, 4);
-    for (let k = 0; k < P; k += 1) { xz.push(xz[2 * (2 * k + 1)], xz[2 * (2 * k + 1) + 1]); meta.push(0, 0, 0, 5); }
-    for (let k = 0; k < P; k += 1) idx.push(f, f + 1 + k, f + 1 + ((k + 1) % P));
+    if (fftParams.get("island") !== "1") {
+      xz.push(0, 0); meta.push(0, 0, 0, 4);
+      for (let k = 0; k < P; k += 1) { xz.push(xz[2 * (2 * k + 1)], xz[2 * (2 * k + 1) + 1]); meta.push(0, 0, 0, 5); }
+      for (let k = 0; k < P; k += 1) idx.push(f, f + 1 + k, f + 1 + ((k + 1) % P));
+    } else {
+      // A fan from the tile centre draws a straight edge across the island.
+      // The floor is a grid instead, so that edge is not there.
+      const cols = N + 1;
+      const base = xz.length / 2;
+      for (let j = 0; j <= N; j += 1) for (let i = 0; i <= N; i += 1) {
+        xz.push(-h + i * s, -h + j * s);
+        meta.push(0, 0, 0, 6);
+      }
+      for (let j = 0; j < N; j += 1) for (let i = 0; i < N; i += 1) {
+        const a = base + j * cols + i;
+        const b = a + 1, c = a + cols, d = c + 1;
+        idx.push(a, b, c, b, d, c);
+      }
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, blockMesh.xz); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(xz), gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, blockMesh.meta); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(meta), gl.STATIC_DRAW);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, blockMesh.index); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(idx), gl.STATIC_DRAW);
@@ -1657,46 +2055,101 @@ void main() {
   const clusters = { key: "", count: 0, grid: [0, CLUSTER_CELL, 0], tex: gl.createTexture(), program: null, vao: null, inst: null, indexCount: 0 };
   if (webgl2 && blockOn) {
     const vs = `#version 300 es
-in vec3 pos; in vec4 inst0; in vec4 inst1;
+layout(location=0) in vec3 pos; layout(location=1) in vec4 inst0; layout(location=2) in vec4 inst1; layout(location=3) in vec4 inst2;
 uniform mat4 viewProj; uniform float depth;
-out vec3 vW; out vec3 vN; out vec2 vTS; out float vY;
-${BED_GLSL}
+out vec3 vW; out vec3 vN; out vec3 vCol; out float vY; out float vKind;
 void main() {
-  float r = inst0.z, h = min(1.8 * inst0.w, 0.8 * depth)  /* fix4: 1.8x taller, reads as 3D */, a = r * inst1.z;
+  float r = inst0.z, h = min(1.8 * inst0.w, 0.8 * depth), a = r * inst1.z;
   float c = cos(inst1.w), s = sin(inst1.w);
   vec2 l = vec2(pos.x * a, pos.z * r); l = vec2(c * l.x - s * l.y, s * l.x + c * l.y);
   vec3 nl = vec3(pos.x / a, pos.y / h, pos.z / r); nl.xz = vec2(c * nl.x - s * nl.z, s * nl.x + c * nl.z);
-  vW = vec3(inst0.x + l.x, -depth + bedRelief(inst0.xy, depth) + pos.y * h - 0.03, inst0.y + l.y);
-  vN = normalize(nl); vTS = inst1.xy; vY = pos.y;
+  // inst2.x is the seat. Spawn sets it so this mesh's lowest vertex
+  // (pos.y * h + 0.02) meets the rendered sand and sinks a few centimetres.
+  float fy = inst2.x;
+  // (x, height, z). A vertex above still water is pulled back under it: a tip
+  // at y > 0 is drawn at full colour on top of the sea (the floating reef).
+  float y = min(fy + pos.y * h + 0.02, -0.04);
+  vW = vec3(inst0.x + l.x, y, inst0.y + l.y);
+  vN = normalize(nl); vCol = inst2.yzw * inst1.y; vY = pos.y; vKind = inst1.x;
   gl_Position = viewProj * vec4(vW, 1.0);
 }`;
     const fs = `#version 300 es
 precision highp float;
-in vec3 vW; in vec3 vN; in vec2 vTS; in float vY;
+in vec3 vW; in vec3 vN; in vec3 vCol; in float vY; in float vKind;
 out vec4 fragColor;
 uniform sampler2D seabedLut;
+${lightSampleGlsl()}
+uniform mat4 uShVP;
+uniform vec3 uSun;
+uniform float uCausDay;
+uniform float uCausDeep;
+uniform float uSeaL;
+uniform vec2 uCaustO;
+uniform float uCaustTile;
 uniform float raw; uniform float depth; uniform float uClarK;
 const vec3 SF_KD = ${v3(SEAFLOOR.kd)};
 const float SF_GAIN = ${Number(SEAFLOOR.gain).toFixed(6)};
 const vec3 SF_RINF = ${v3(SEAFLOOR.rInf)};
 vec3 sfEncode(vec3 c) { c = clamp(c, 0.0, 1.0); return mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main() {
-  vec3 rho = mix(${v3(SEAFLOOR.coral)}, ${v3(SEAFLOOR.rock)}, vTS.x) * vTS.y;
-  // sun overhead through the surface: tops as lit as the sand, flanks darker; contact shadow at the base
-  float lit = mix(0.3, 1.1, clamp(0.75 * vN.y + 0.35 * dot(vN.xz, vec2(0.83, 0.55)), 0.0, 1.0))  /* fix4: stronger, slightly sideways light: shape reads */ * (0.8 + 0.2 * smoothstep(0.0, 0.45, vY));
-  // soft edges: the lowest ~25% of each head fades into the shadowed sand around it
-  rho = mix(${v3(SEAFLOOR.sand)} * 0.82, rho * lit, smoothstep(0.0, 0.28, vY)); lit = 1.0;
+  if (vW.y > -0.02) discard; // above still water: not a surface decal
+  vec3 rho = vCol;
+  // Face normal of this triangle, so a rock reads as a solid instead of a flat card.
+  vec3 nFace = normalize(cross(dFdx(vW), dFdy(vW)));
+  vec3 Ls = uSun.y > 0.02 ? normalize(uSun) : vec3(0.2, 0.9, 0.15);
+  float nd = clamp(dot(nFace, Ls), 0.0, 1.0);
+  // Rocks read as stone: dark, a little algae low down, and the base sits in a contact shadow.
+  float rock = step(0.5, vKind) * (1.0 - step(1.5, vKind));
+  rho = mix(rho, rho * vec3(0.42, 0.52, 0.38), rock * smoothstep(0.65, 0.12, vY));
+  float lit = mix(0.16, 1.35, nd);
+  lit *= mix(0.45, 1.0, mix(smoothstep(0.0, 0.18, vY), 1.0, 1.0 - rock));
+  // Grass keeps its colour. Coral fades only at the contact; rock only at the very foot.
+  float edge = vKind > 1.5 && vKind < 2.5 ? 0.95 : mix(smoothstep(0.0, 0.2, vY), smoothstep(0.0, 0.07, vY), rock);
+  rho = mix(${v3(SEAFLOOR.sand)} * 0.7, rho * lit, edge);
   float z = max(-vW.y, 0.0) * uClarK; // v30.24: the clarity's equivalent depth
   vec2 uA = vec2((clamp(z / ${SEABED_LUT.dz}, 0.0, ${SEABED_LUT.n - 1}.0) + 0.5) / ${SEABED_LUT.n}.0, 0.5 / 3.0);
+  {
+    vec4 lp = uShVP * vec4(vW, 1.0);
+    vec3 sp = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
+    float sh = 1.0;
+    if (sp.x > 0.0 && sp.x < 1.0 && sp.y > 0.0 && sp.y < 1.0) {
+      float caster = lightSh(sp.xy);
+      float blocked = sp.z > caster + 0.012 ? 1.0 : 0.0;
+      float fill = 1.0 - exp(-max(0.0, -vW.y) * 0.11);
+      sh = mix(1.0 - blocked, 1.0, clamp(fill, 0.0, 0.75));
+    }
+    float col = max(0.05, -vW.y);
+    vec3 Rf = refract(-normalize(uSun), vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
+    if (Rf.y > -0.02) Rf = vec3(0.0, -1.0, 0.0);
+    vec2 xz = vW.xz - vW.y * Rf.xz / Rf.y;
+    float ratio = causNet(xz, col, vec2(0.0));
+    float clar = max(uClarK, 0.35);
+    float near = exp(-col * clar / 2.6);
+    float deep = uCausDeep * 0.08 * exp(-col * clar / 16.0);
+    float strength = clamp(near + deep, 0.0, 1.0) * uCausDay;
+    rho *= mix(0.5, 1.0, sh);
+    rho *= mix(1.0, ratio, strength);
+  }
   if (raw > 0.5) { fragColor = vec4(sfEncode(clamp(rho, 0.0, 1.0)), clamp((vW.y + depth) / 4.0, 0.0, 1.0)); return; } // v30.5 scene pass
-  fragColor = vec4(sfEncode(${UPWELL.toFixed(4)} * (texture(seabedLut, uA).rgb + SF_GAIN * rho * texture(seabedLut, uA + vec2(0.0, 1.0 / 3.0)).rgb)), 1.0);
+  float gain = SF_GAIN * mix(1.65, 1.35, rock);
+  fragColor = vec4(sfEncode(${UPWELL.toFixed(4)} * (texture(seabedLut, uA).rgb + gain * rho * texture(seabedLut, uA + vec2(0.0, 1.0 / 3.0)).rgb)), 1.0);
 }`;
     const prog = gl.createProgram();
     gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, vs)); gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, fs));
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "cluster link failed");
+    samplerReports.reef = assertFragmentSamplers(gl, prog, fs, "reef");
     clusters.program = prog;
     clusters.viewProj = gl.getUniformLocation(prog, "viewProj"); clusters.lutLoc = gl.getUniformLocation(prog, "seabedLut"); clusters.depth = gl.getUniformLocation(prog, "depth"); clusters.raw = gl.getUniformLocation(prog, "raw");
+    clusters.sun = gl.getUniformLocation(prog, "uSun");
+    clusters.light = gl.getUniformLocation(prog, "uLight");
+    clusters.shVP = gl.getUniformLocation(prog, "uShVP");
+    clusters.causDay = gl.getUniformLocation(prog, "uCausDay");
+    clusters.causDeep = gl.getUniformLocation(prog, "uCausDeep");
+    clusters.seaL = gl.getUniformLocation(prog, "uSeaL");
+    clusters.caustO = gl.getUniformLocation(prog, "uCaustO");
+    clusters.caustTile = gl.getUniformLocation(prog, "uCaustTile");
+    clusters.causT = gl.getUniformLocation(prog, "uCausT");
     // unit dome: 10 segments x 3 rings + apex, base ring slightly flared, flattened top
     const SEG = 10, RINGS = 3, P = [], I = [];
     for (let k = 0; k < RINGS; k += 1) {
@@ -1715,10 +2168,116 @@ void main() {
     const lp = gl.getAttribLocation(prog, "pos"); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp, 3, gl.FLOAT, false, 0, 0);
     const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(I), gl.STATIC_DRAW);
     clusters.inst = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, clusters.inst);
-    for (const [name, off] of [["inst0", 0], ["inst1", 16]]) {
+    for (const [name, off] of [["inst0", 0], ["inst1", 16], ["inst2", 32]]) {
       const l = gl.getAttribLocation(prog, name); gl.enableVertexAttribArray(l);
-      gl.vertexAttribPointer(l, 4, gl.FLOAT, false, 32, off); gl.vertexAttribDivisor(l, 1);
+      gl.vertexAttribPointer(l, 4, gl.FLOAT, false, 48, off); gl.vertexAttribDivisor(l, 1);
     }
+    const bindInst = (vao, buf) => {
+      gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      for (const [name, off] of [["inst0", 0], ["inst1", 16], ["inst2", 32]]) {
+        const l = gl.getAttribLocation(prog, name); gl.enableVertexAttribArray(l);
+        gl.vertexAttribPointer(l, 4, gl.FLOAT, false, 48, off); gl.vertexAttribDivisor(l, 1);
+      }
+    };
+    bindInst(clusters.vao, clusters.inst);
+    function partMesh(positions, indices) {
+      const vaoP = gl.createVertexArray(); gl.bindVertexArray(vaoP);
+      const pb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, pb);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+      const lp = gl.getAttribLocation(prog, "pos"); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp, 3, gl.FLOAT, false, 0, 0);
+      const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+      const inst = gl.createBuffer();
+      bindInst(vaoP, inst);
+      return { vao: vaoP, inst, indexCount: indices.length, count: 0 };
+    }
+    // A tapered cone with a closed top, so a head reads from above.
+    const cone = (pos, idx, x0, z0, x1, z1, y0, y1, rad, seg = 6) => {
+      const base = pos.length / 3;
+      for (let i = 0; i < seg; i += 1) {
+        const a = (i / seg) * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+        pos.push(x0 + c * rad, y0, z0 + s * rad, x1 + c * rad * 0.45, y1, z1 + s * rad * 0.45);
+      }
+      const tip = pos.length / 3;
+      pos.push(x1, y1 + rad * 0.15, z1);
+      for (let i = 0; i < seg; i += 1) {
+        const a = base + i * 2, b = base + ((i + 1) % seg) * 2;
+        idx.push(a, b, a + 1, b, b + 1, a + 1);
+        idx.push(a + 1, b + 1, tip);
+      }
+    };
+    const tubeP = [], tubeI = [];
+    [[0, 0, 0, 0, 0.2, 1], [0.34, 0.06, 0.34, 0.06, 0.12, 0.7], [-0.28, 0.18, -0.28, 0.18, 0.11, 0.55], [0.08, -0.32, 0.08, -0.32, 0.13, 0.82], [-0.1, -0.16, -0.1, -0.16, 0.09, 0.42]].forEach(([x, z, x1, z1, rad, h]) => cone(tubeP, tubeI, x, z, x1, z1, 0, h, rad, 6));
+    const branchP = [], branchI = [];
+    [[0.85, 0.2, 1.15, 0.16], [-0.75, 0.55, 0.95, 0.12], [0.35, -0.9, 1.05, 0.13], [-0.25, -0.7, 0.8, 0.1], [0.15, 0.85, 0.7, 0.09]].forEach(([x, z, h, rad]) => cone(branchP, branchI, 0, 0, x, z, 0.02, h, rad, 5));
+    const tableP = [], tableI = [];
+    cone(tableP, tableI, 0, 0, 0, 0, 0, 0.35, 0.14, 6);
+    {
+      const base = tableP.length / 3;
+      const seg = 12;
+      tableP.push(0, 0.4, 0);
+      for (let i = 0; i < seg; i += 1) {
+        const a = (i / seg) * Math.PI * 2;
+        tableP.push(Math.cos(a) * 1.55, 0.34, Math.sin(a) * 1.55);
+      }
+      const hub = base;
+      for (let i = 0; i < seg; i += 1) tableI.push(hub, hub + 1 + i, hub + 1 + (i + 1) % seg);
+    }
+    const fanP = [], fanI = [];
+    {
+      const seg = 8;
+      const hubL = fanP.length / 3; fanP.push(-0.06, 0.08, 0);
+      const hubR = fanP.length / 3; fanP.push(0.06, 0.08, 0);
+      for (let i = 0; i <= seg; i += 1) {
+        const a = -Math.PI * 0.15 + (i / seg) * Math.PI * 1.15;
+        fanP.push(0, 0.08 + Math.sin(a) * 1.05, Math.cos(a) * 0.85);
+      }
+      for (let i = 0; i < seg; i += 1) {
+        fanI.push(hubL, 2 + i, 3 + i);
+        fanI.push(hubR, 3 + i, 2 + i);
+      }
+    }
+    const rockP = [], rockI = [];
+    {
+      const seg = 8, rings = 4;
+      for (let k = 0; k <= rings; k += 1) {
+        const t = k / rings, el = (t - 0.5) * Math.PI, rr = Math.cos(el);
+        const y = Math.sin(el) * 0.42 + 0.48;
+        for (let i = 0; i < seg; i += 1) {
+          const a = (i / seg) * Math.PI * 2;
+          const wob = 0.82 + 0.18 * Math.sin(2 * a + k);
+          rockP.push(Math.cos(a) * rr * wob, y, Math.sin(a) * rr * wob * 0.9);
+        }
+      }
+      for (let k = 0; k < rings; k += 1) for (let i = 0; i < seg; i += 1) {
+        const a = k * seg + i, b = k * seg + (i + 1) % seg;
+        rockI.push(a, a + seg, b, b, a + seg, b + seg);
+      }
+    }
+    const grassP = [], grassI = [];
+    for (let b = 0; b < 5; b += 1) {
+      const a = (b / 5) * Math.PI, c = Math.cos(a), s = Math.sin(a);
+      const o = grassP.length / 3;
+      grassP.push((c - s) * 0.08, 0, (s + c) * 0.08, (c + s) * 0.08, 0, (s - c) * 0.08, c * 0.35, 1, s * 0.35);
+      grassI.push(o, o + 1, o + 2);
+    }
+    const shellP = [], shellI = [];
+    for (let i = 0; i < 8; i += 1) {
+      const a = (i / 8) * Math.PI * 2;
+      shellP.push(Math.cos(a) * 0.7, 0.08 + 0.12 * Math.sin(a * 2), Math.sin(a) * 0.45);
+    }
+    shellP.push(0, 0.22, 0);
+    for (let i = 0; i < 8; i += 1) shellI.push(i, (i + 1) % 8, 8);
+    clusters.parts = {
+      brain: { vao: clusters.vao, inst: clusters.inst, indexCount: clusters.indexCount, count: 0 },
+      branch: partMesh(branchP, branchI),
+      table: partMesh(tableP, tableI),
+      fan: partMesh(fanP, fanI),
+      tube: partMesh(tubeP, tubeI),
+      rock: partMesh(rockP, rockI),
+      grass: partMesh(grassP, grassI),
+      shell: partMesh(shellP, shellI),
+    };
     gl.bindVertexArray(vao);
   }
   const REEF_DENSITY = fftParams.has("reefdensity") ? Number(fftParams.get("reefdensity")) : 0.5;
@@ -1738,11 +2297,148 @@ void main() {
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
     gl.activeTexture(gl.TEXTURE0);
   }
-  function buildClusters(L) {
+  function buildClusters(L, N) {
     const C = CLUSTER_CELL, n = Math.ceil(L / C), x0 = -n * C / 2, half = L / 2, GAP = 10;
     const cells = new Uint8Array(n * n * 4), heads = [];
     let st = 0x5eaf1009 >>> 0;
     const rng = () => { st = (st + 0x6d2b79f5) >>> 0; let t = st; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const depth = Number(document.querySelector("#depth") && document.querySelector("#depth").value) || 40;
+    const islandOn = fftParams.get("island") === "1";
+    const shore = islandOn ? useIslandSize(L) : null;
+    const sc = shore ? Math.min(1.7, Math.max(0.6, shore.scale)) : 1;
+    // Lowest local y of each mesh. The shader puts that vertex at
+    // seat + baseY * h + 0.02, so the seat has to cancel baseY and the 0.02.
+    const MESH_BASE = {
+      brain: 0,
+      branch: 0.02,
+      table: 0,
+      fan: 0.08 + Math.sin(-Math.PI * 0.15) * 1.05,
+      tube: 0,
+      rock: Math.sin(-Math.PI / 2) * 0.42 + 0.48,
+      grass: 0,
+      shell: 0.08 - 0.12,
+    };
+    const SINK = 0.04; // metres the lowest vertex is set into the sand
+    const SLOPE_MAX = 0.5; // rise/run; steeper than this and a head cannot rest
+    const smooth = (e0, e1, x) => { let t = (x - e0) / (e1 - e0); t = t < 0 ? 0 : t > 1 ? 1 : t; return t * t * (3 - 2 * t); };
+    // One floor vertex, the same y the block mesh writes.
+    // Island on: open relief, then the bank lift in fftView (yBed - 0.08,
+    // held at -0.14 where the analytic bed is still under 0.2 m).
+    // Island off: that vertex is only the centre and the rim; the span is the fan.
+    const vertBed = (x, z) => {
+      const yOpen = -depth + bedRelief(x, z, L, depth);
+      if (!shore) return yOpen;
+      const yBed = sandbarBed(x, z, depth, shore);
+      const lift = smooth(-depth + 0.2, -depth + 2.2, yBed);
+      let yF = Math.max(yOpen, yBed - 0.08);
+      if (yBed < 0.2) yF = Math.min(yF, -0.14);
+      return yOpen * (1 - lift) + yF * lift;
+    };
+    const rimXZ = (k) => {
+      const hh = L / 2, s = L / N, P = 4 * N;
+      k = ((k % P) + P) % P;
+      const side = Math.floor(k / N), i = k % N;
+      return [[-hh + i * s, -hh], [hh, -hh + i * s], [hh - i * s, hh], [-hh, hh - i * s]][side];
+    };
+    // Height of the triangle that is actually drawn under (x, z).
+    const renderedBed = (x, z) => {
+      const hh = L / 2;
+      if (!shore) {
+        const yC = vertBed(0, 0);
+        const ax = Math.abs(x), az = Math.abs(z);
+        if (ax < 1e-8 && az < 1e-8) return yC;
+        const tHit = hh / Math.max(ax, az);
+        const hx = x * tHit, hz = z * tHit, s = L / N;
+        let u;
+        if (hz <= -hh + 1e-3) u = (hx + hh) / s;
+        else if (hx >= hh - 1e-3) u = N + (hz + hh) / s;
+        else if (hz >= hh - 1e-3) u = 2 * N + (hh - hx) / s;
+        else u = 3 * N + (hh - hz) / s;
+        const u0 = Math.floor(u), f = Math.min(1, Math.max(0, u - u0));
+        const P = 4 * N, k0 = ((u0 % P) + P) % P, k1 = (k0 + 1) % P;
+        const r0 = rimXZ(k0), r1 = rimXZ(k1);
+        const yRim = vertBed(r0[0], r0[1]) * (1 - f) + vertBed(r1[0], r1[1]) * f;
+        const a = Math.max(ax, az) / hh;
+        return yC * (1 - a) + yRim * a;
+      }
+      const s = L / N;
+      let u = (x + hh) / s, v = (z + hh) / s;
+      u = Math.min(N - 1e-6, Math.max(0, u));
+      v = Math.min(N - 1e-6, Math.max(0, v));
+      const i = Math.floor(u), j = Math.floor(v), fu = u - i, fv = v - j;
+      const yAt = (ii, jj) => vertBed(-hh + ii * s, -hh + jj * s);
+      const y00 = yAt(i, j), y10 = yAt(i + 1, j), y01 = yAt(i, j + 1), y11 = yAt(i + 1, j + 1);
+      // Same split as the floor grid: (i,j) (i+1,j) (i,j+1) and the other half.
+      if (fu + fv <= 1) return y00 * (1 - fu - fv) + y10 * fu + y01 * fv;
+      return y10 * (1 - fv) + y11 * (fu + fv - 1) + y01 * (1 - fu);
+    };
+    // Disc of the instance, in the same ellipse the shader scales and rotates.
+    const footprint = (x, z, rad, aspect, rot) => {
+      const pts = [[x, z]];
+      const a = rad * aspect * 1.08, b = rad * 1.08, c = Math.cos(rot), sn = Math.sin(rot);
+      for (let i = 0; i < 8; i += 1) {
+        const t = (i / 8) * Math.PI * 2, lx = Math.cos(t) * a, lz = Math.sin(t) * b;
+        pts.push([x + c * lx - sn * lz, z + sn * lx + c * lz]);
+      }
+      return pts;
+    };
+    // Seat on the lowest rendered sample in the footprint, a few centimetres
+    // into that sand. Reject dry ground, anything above still water, and a
+    // slope a head cannot rest on. hShader is min(1.8 * stored, 0.8 * depth).
+    const fitHead = (x, z, radWorld, aspect, rot, hWant, baseY) => {
+      const pts = footprint(x, z, radWorld, aspect, rot);
+      let lowest = Infinity, steep = 0;
+      const bedC = renderedBed(x, z);
+      if (!(bedC < 0)) return null;
+      if (shore && sandbarBed(x, z, depth, shore) >= 0) return null;
+      for (let i = 0; i < pts.length; i += 1) {
+        const b = renderedBed(pts[i][0], pts[i][1]);
+        if (!(b < 0)) return null;
+        if (shore && sandbarBed(pts[i][0], pts[i][1], depth, shore) >= 0) return null;
+        if (b < lowest) lowest = b;
+        if (i > 0) {
+          const dist = Math.hypot(pts[i][0] - x, pts[i][1] - z);
+          if (dist > 1e-3) steep = Math.max(steep, Math.abs(b - bedC) / dist);
+        }
+      }
+      if (steep > SLOPE_MAX) return null;
+      const rise = Math.max(1.25 - baseY, 0.2);
+      const hCap = (-0.06 - lowest + SINK) / rise;
+      let hShader = Math.min(1.8 * hWant * sc, 0.8 * depth, hCap);
+      if (!(hShader >= 0.22)) return null;
+      const stored = hShader / 1.8;
+      const seat = lowest - SINK - baseY * hShader - 0.02;
+      return { bed: lowest, bedC, seat, stored, hShader, steep };
+    };
+    const stillAt = (x, z) => {
+      if (shore && sandbarBed(x, z, depth, shore) >= 0) return 0;
+      return Math.max(0, -renderedBed(x, z));
+    };
+    const CORAL = {
+      brain: [[0.55, 0.28, 0.42], [0.62, 0.34, 0.26], [0.48, 0.30, 0.22], [0.72, 0.48, 0.36], [0.70, 0.32, 0.38], [0.80, 0.76, 0.68]],
+      branch: [[0.50, 0.24, 0.40], [0.66, 0.38, 0.24], [0.34, 0.46, 0.28], [0.58, 0.30, 0.22], [0.46, 0.28, 0.48], [0.84, 0.80, 0.72]],
+      table: [[0.58, 0.32, 0.36], [0.42, 0.48, 0.30], [0.64, 0.42, 0.26], [0.52, 0.26, 0.44], [0.76, 0.55, 0.38], [0.82, 0.78, 0.70]],
+      fan: [[0.56, 0.26, 0.42], [0.60, 0.32, 0.24], [0.36, 0.44, 0.30], [0.68, 0.40, 0.32], [0.48, 0.28, 0.36], [0.86, 0.82, 0.74]],
+      tube: [[0.46, 0.26, 0.44], [0.58, 0.36, 0.26], [0.38, 0.46, 0.30], [0.64, 0.38, 0.30], [0.52, 0.30, 0.28], [0.80, 0.76, 0.68]],
+    };
+    const ROCKC = [[0.28, 0.26, 0.23], [0.22, 0.24, 0.2], [0.34, 0.28, 0.22], [0.18, 0.17, 0.16], [0.30, 0.27, 0.22]];
+    const GRASSC = [[0.24, 0.40, 0.18], [0.30, 0.42, 0.16], [0.20, 0.34, 0.16]];
+    const SHELLC = [[0.70, 0.62, 0.50], [0.62, 0.48, 0.40], [0.78, 0.72, 0.64], [0.58, 0.42, 0.38]];
+    const bags = {};
+    for (const name of Object.keys(clusters.parts || {})) bags[name] = [];
+    const audit = [];
+    const put = (name, x, z, rad, h, kind, aspect, rot, rgb) => {
+      const bag = bags[name]; if (!bag) return;
+      const baseY = MESH_BASE[name] ?? 0;
+      const fit = fitHead(x, z, rad * sc, aspect, rot, h, baseY);
+      if (!fit) return;
+      bag.push(x, z, rad * sc, fit.stored, kind, 0.85 + 0.3 * rng(), aspect, rot, fit.seat, rgb[0], rgb[1], rgb[2]);
+      // Drawn base: the shader's lowest vertex, including the 2 cm lift and the under-water cap.
+      const base = Math.min(fit.seat + baseY * fit.hShader + 0.02, -0.04);
+      const top = Math.min(fit.seat + 1.25 * fit.hShader + 0.02, -0.04);
+      audit.push({ x, z, kind, name, bed: fit.bed, base, gap: base - fit.bed, top });
+    };
+    const pick = (list) => list[Math.floor(rng() * list.length)];
     const want = L * L * 0.03 * REEF_DENSITY, patches = [];
     let nClusters = 0;
     for (let tries = 0; tries < 120000 && nClusters < want; tries += 1) {
@@ -1751,6 +2447,7 @@ void main() {
       // reef zones: patches gather where an ~80 m seeded noise is high (Clark-Evans R ~1), leaving wide bare sand between
       if (rng() > Math.min(1, Math.max(0, (lowNoise(px / 80 + 31.7, pz / 80 + 11.3) - 0.7) / 0.05))) continue;
       if (Math.abs(px) + rp + 1.5 + 0.015 * L > half || Math.abs(pz) + rp + 1.5 + 0.015 * L > half) continue; // fix4: clear of the edge shift
+      if (stillAt(px, pz) < 0.05) continue; // dry sand: no coral, no rock
       const ci = Math.floor((px - x0) / C), cj = Math.floor((pz - x0) / C);
       if (cells[4 * (cj * n + ci) + 3]) continue;
       let ok = true;
@@ -1767,21 +2464,52 @@ void main() {
         const cx = px + d * Math.cos(t), cz = pz + d * Math.sin(t);
         if (placed.some((q) => Math.hypot(q[0] - cx, q[1] - cz) < 0.7 * (q[2] + rad))) continue;
         placed.push([cx, cz, rad]); c += 1; nClusters += 1;
-        const type = rng() < 0.5 ? 0 : 1, H = 0.3 + 0.7 * rng(), count = 3 + Math.floor(rng() * 6);
-        for (let h = 0; h < count; h += 1) {
-          const th = rng() * 2 * Math.PI, dd = Math.sqrt(rng()) * rad * 0.6, hr = rad * (0.3 + 0.25 * rng());
-          heads.push(cx + dd * Math.cos(th), cz + dd * Math.sin(th), hr, h === 0 ? H : H * (0.55 + 0.45 * rng()),
-            type, 0.85 + 0.3 * rng(), 0.75 + 0.5 * rng(), rng() * Math.PI);
+        const stillC = stillAt(cx, cz);
+        const H = (0.35 + 0.75 * rng()) * (0.7 + 0.5 * rng());
+        if (stillC >= 1) {
+          const shape = pick(["brain", "branch", "table", "fan", "tube"]);
+          const nHeads = 1 + Math.floor(rng() * 3);
+          for (let h = 0; h < nHeads; h += 1) {
+            const th = rng() * 2 * Math.PI, dd = Math.sqrt(rng()) * rad * 0.55;
+            put(shape, cx + dd * Math.cos(th), cz + dd * Math.sin(th), rad * (0.45 + 0.4 * rng()), h === 0 ? H : H * (0.55 + 0.4 * rng()), 0, 0.7 + 0.6 * rng(), rng() * Math.PI * 2, pick(CORAL[shape]));
+          }
+          if (stillC < 10 && rng() < 0.4) put("grass", cx, cz, 0.7 + rng() * 0.6, 0.35 + 0.45 * rng(), 2, 1, rng() * Math.PI, pick(GRASSC));
         }
+        if (stillC > 0.05 && rng() < 0.7) {
+          const nR = 1 + Math.floor(rng() * 2);
+          for (let h = 0; h < nR; h += 1) {
+            const th = rng() * 2 * Math.PI, dd = Math.sqrt(rng()) * Math.max(rp * 0.8, 0.4);
+            const rr = (0.45 + rng() * 0.85) * (rng() < 0.22 ? 1.6 : 1);
+            put("rock", cx + dd * Math.cos(th), cz + dd * Math.sin(th), rr, rr * (0.55 + 0.35 * rng()), 1, 0.75 + 0.5 * rng(), rng() * Math.PI * 2, pick(ROCKC));
+          }
+        }
+        if (stillC > 0.3 && rng() < 0.25) put("shell", cx + (rng() - 0.5) * rp, cz + (rng() - 0.5) * rp, 0.18 + 0.2 * rng(), 0.08, 3, 1, rng() * Math.PI * 2, pick(SHELLC));
       }
     }
     gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, clusters.tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, cells);
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, clusters.inst); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(heads), gl.STATIC_DRAW);
-    clusters.count = heads.length / 8; clusters.grid = [x0, C, n]; clusters.key = String(L);
-    if (typeof window !== "undefined") window.__reefPatches = patches; window.__clusters = { patches: patches.length, clusters: nClusters, heads: clusters.count, perHundredM2: nClusters / (L * L) * 100, minGapM: GAP };
+    let headN = 0;
+    for (const [name, part] of Object.entries(clusters.parts)) {
+      const data = bags[name] || [];
+      gl.bindBuffer(gl.ARRAY_BUFFER, part.inst);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+      part.count = data.length / 12;
+      headN += part.count;
+    }
+    clusters.count = headN; clusters.grid = [x0, C, n]; clusters.key = `${L}/${N}/${depth}/${islandOn ? 1 : 0}`;
+    let maxGap = -Infinity, above = 0, nan = 0;
+    for (const a of audit) {
+      if (!Number.isFinite(a.gap) || !Number.isFinite(a.base) || !Number.isFinite(a.bed)) nan += 1;
+      else if (a.gap > maxGap) maxGap = a.gap;
+      if (!(a.base < 0) || !(a.top < 0) || !(a.bed < 0)) above += 1;
+    }
+    if (typeof window !== "undefined") {
+      window.__reefAudit = audit;
+      window.__reefSeat = { n: audit.length, maxGap: audit.length ? maxGap : 0, above, nan, sink: SINK };
+    }
+    if (typeof window !== "undefined") window.__reefPatches = patches; window.__clusters = { patches: patches.length, clusters: nClusters, heads: clusters.count, perHundredM2: nClusters / (L * L) * 100, minGapM: GAP, parts: Object.fromEntries(Object.entries(clusters.parts).map(([k, p]) => [k, p.count])) };
   }
   // ?top=1: straight down from high up, for the tiling map (review only).
   const topView = fftParams.get("top") === "1";
@@ -1793,8 +2521,7 @@ void main() {
     gpuLocs.physF = gl.getUniformLocation(gpuProgram, "physF");
     gpuLocs.physG = gl.getUniformLocation(gpuProgram, "physG");
     gpuLocs.physN = gl.getUniformLocation(gpuProgram, "physN");
-    gpuLocs.chopStats = gl.getUniformLocation(gpuProgram, "chopStats");
-    gpuLocs.fineStats = gl.getUniformLocation(gpuProgram, "fineStats");
+    gpuLocs.bandStats = gl.getUniformLocation(gpuProgram, "bandStats");
   }
   let program = cpuProgram;
   let locs = cpuLocs;
@@ -2061,6 +2788,7 @@ void main() {
 
   const noCull = typeof location !== "undefined" && /[?&]nocull=1/.test(location.search);
   let buoyView = null; let boatView = null;
+  let lightMaps = null;
   // Menu ink probe: up to 16 exact screen pixels, every 10th frame. A downscale blit of the
   // default framebuffer came back black on this GL, so these are direct reads (a few hundred bytes).
   const lumProbe = { buf: new Uint8Array(4), n: 0 };
@@ -2094,6 +2822,68 @@ void main() {
     const err = gl.getError(); if (err) globalThis.__oceanLumErr = err;
   }
   const scene = { fb: null, tex: null, rb: null, w: 0, h: 0 };
+  let islandDummyTex = null;
+  let coastTex = null;
+  function islandDummy() {
+    if (islandDummyTex) return islandDummyTex;
+    islandDummyTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, islandDummyTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return islandDummyTex;
+  }
+  const ripDbg = fftParams.get("ripdebug") === "1";
+  const ripEase = { dir: [0, 1], wind: [0, 1], hs: 0.8, tp: 6, t: 0, ready: false };
+  const seaAgeNow = () => {
+    const el = document.querySelector("#age");
+    const v = el ? Number(el.value) : 0.28;
+    return Number.isFinite(v) ? v : 0.28;
+  };
+  function bindClusterLight() {
+    if (!lightMaps || !clusters.sun) return;
+    const I = lightMaps.info;
+    gl.uniform3f(clusters.sun, I.sun[0], I.sun[1], I.sun[2]);
+    gl.uniformMatrix4fv(clusters.shVP, false, I.vp);
+    gl.uniform1f(clusters.causDay, I.day);
+    if (clusters.causT) gl.uniform1f(clusters.causT, I.t || 0);
+    gl.uniform1f(clusters.causDeep, I.deep);
+    gl.uniform1f(clusters.seaL, I.seaL);
+    if (clusters.caustO) gl.uniform2f(clusters.caustO, I.origin[0], I.origin[1]);
+    if (clusters.caustTile) gl.uniform1f(clusters.caustTile, I.tile);
+    gl.activeTexture(gl.TEXTURE20); gl.bindTexture(gl.TEXTURE_2D, lightMaps.tex);
+    if (clusters.light) gl.uniform1i(clusters.light, 20);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+  function seaFoot(eye, target, aspect) {
+    const fy = Math.tan(Math.PI / 8);
+    const fx = fy * Math.max(0.2, aspect);
+    const zx = eye[0] - target[0], zy = eye[1] - target[1], zz = eye[2] - target[2];
+    const zl = Math.hypot(zx, zy, zz) || 1;
+    const z = [zx / zl, zy / zl, zz / zl];
+    const xl = Math.hypot(z[2], z[0]) || 1;
+    const x = [z[2] / xl, 0, -z[0] / xl];
+    const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, n = 0;
+    for (const su of [-1, 0, 1]) for (const sv of [-1, 0, 1]) {
+      const dx = -z[0] + x[0] * su * fx + y[0] * sv * fy;
+      const dy = -z[1] + x[1] * su * fx + y[1] * sv * fy;
+      const dz = -z[2] + x[2] * su * fx + y[2] * sv * fy;
+      const dl = Math.hypot(dx, dy, dz) || 1;
+      const diry = dy / dl;
+      if (diry > -0.04) continue;
+      const t = -eye[1] / diry;
+      if (!(t > 0 && t < 900)) continue;
+      const hx = eye[0] + dx / dl * t, hz = eye[2] + dz / dl * t;
+      if (hx < x0) x0 = hx;
+      if (hx > x1) x1 = hx;
+      if (hz < z0) z0 = hz;
+      if (hz > z1) z1 = hz;
+      n += 1;
+    }
+    if (!n) return null;
+    return { cx: (x0 + x1) / 2, cz: (z0 + z1) / 2, half: Math.max(36, Math.max(x1 - x0, z1 - z0) * 0.5 * 1.7) };
+  }
   function draw(state, showFlags) {
     // The GPU physics shares this context: take back the program, vertex state, target
     // and depth test every frame.
@@ -2102,6 +2892,46 @@ void main() {
     program = fft ? fftProgram : fromTextures ? gpuProgram : cpuProgram;
     locs = fft ? fftLocs : fromTextures ? gpuLocs : cpuLocs;
     gl.useProgram(program);
+    {
+      const iu = gl.getUniformLocation(program, "uIsland");
+      if (iu) {
+        const on = state.island && state.island.on ? 1 : 0;
+        gl.uniform1f(iu, on);
+        const C = state.island || {};
+        const shore = useIslandSize(state.size || 250);
+        gl.uniform2f(gl.getUniformLocation(program, "uIslandC"), Number.isFinite(C.cx) ? C.cx : shore.cx, Number.isFinite(C.cz) ? C.cz : shore.cz);
+        const uf = (name, v) => { const loc = gl.getUniformLocation(program, name); if (loc) gl.uniform1f(loc, v); };
+        uf("uIRb", shore.Rberm); uf("uIRf", shore.Rface); uf("uIRs", shore.Rshelf); uf("uIRbank", shore.Rbank);
+        uf("uIEase", shore.ease); uf("uIPeak", shore.peak); uf("uIYb", shore.yBerm); uf("uIYf", shore.yFace);
+        uf("uIYs", shore.yShelf); uf("uIFace", shore.faceSlope); uf("uIShelf", shore.shelfSlope);
+        gl.uniform2f(gl.getUniformLocation(program, "uMapOrigin"), Number.isFinite(C.ox) ? C.ox : -200, Number.isFinite(C.oz) ? C.oz : -200);
+        gl.uniform1f(gl.getUniformLocation(program, "uMapSpan"), C.mapSpan || 400);
+        gl.uniform1f(gl.getUniformLocation(program, "uHm"), C.mapN || 512);
+        gl.uniform1f(gl.getUniformLocation(program, "uAtlasH"), C.atlasH || 576);
+        gl.uniform1f(gl.getUniformLocation(program, "uAtlasW"), C.atlasW || C.mapN || 512);
+        gl.uniform1f(gl.getUniformLocation(program, "uR2"), C.r2 > 0 ? C.r2 : 0.6);
+        gl.uniform1f(gl.getUniformLocation(program, "uDLo"), C.dLo || 2);
+        gl.uniform1f(gl.getUniformLocation(program, "uDHi"), C.dHi || 6);
+        gl.uniform1f(gl.getUniformLocation(program, "uSweN"), C.sweN || 256);
+        gl.uniform2f(gl.getUniformLocation(program, "uSweOrigin"), C.sweOx || -90, C.sweOz || -90);
+        gl.uniform1f(gl.getUniformLocation(program, "uSweSpan"), C.sweSpan || 180);
+        gl.uniform1f(gl.getUniformLocation(program, "uHs"), C.hs > 0 ? C.hs : 0.2);
+        const steep = window.__steep;
+        gl.uniform1f(gl.getUniformLocation(program, "uSteep"), steep && Number.isFinite(steep.S) ? steep.S : 0.56);
+        const cs = gl.getUniformLocation(program, "coastState");
+        if (cs) {
+          // Unit 15, not 21. The vertex stage on a Mac only has 16 units
+          // (0..15). Sampling 21 from the vertex shader returned a huge or
+          // NaN height and the sea sheet tore. The seabed lookup is fragment
+          // only, so it moves to 21 for this program. Reef draws rebind 15.
+          coastTex = (on && C.tex) || islandDummy();
+          gl.activeTexture(gl.TEXTURE15);
+          gl.bindTexture(gl.TEXTURE_2D, coastTex);
+          gl.uniform1i(cs, 15);
+          gl.activeTexture(gl.TEXTURE0);
+        } else coastTex = null;
+      }
+    }
     if (vao) gl.bindVertexArray(vao);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.enable(gl.DEPTH_TEST);
@@ -2156,6 +2986,14 @@ void main() {
     gl.uniformMatrix4fv(locs.viewProj, false, vpMat);
     const sunU = globalThis.__oceanSun || sun; // v30.21: time-of-day slider (identity at 11:00)
     gl.uniform3f(locs.lightDir, sunU[0], sunU[1], sunU[2]);
+    {
+      const bu = gl.getUniformLocation(program, "uBoat");
+      const b = state && state.boat;
+      if (bu) gl.uniform4f(bu, b ? b.x : 0, b ? b.z : 0, b ? Math.max(0.2, b.y + 1.2) : 0, b ? 1 : 0);
+      const su = gl.getUniformLocation(program, "uShadeSun");
+      const sd = globalThis.__oceanShadeSun;
+      if (su) gl.uniform3f(su, sd ? sd[0] : sunU[0], sd ? sd[1] : sunU[1], sd ? sd[2] : sunU[2]);
+    }
     globalThis.__oceanView = { vp: vpMat, eye, w: canvas.width, h: canvas.height, cw: canvas.clientWidth, ch: canvas.clientHeight, size: state.size, sun };
     gl.uniform3f(locs.eye, eye[0], eye[1], eye[2]);
     gl.uniform1f(locs.depth, state.depth);
@@ -2163,6 +3001,65 @@ void main() {
     gl.uniform1f(locs.showFlags, showFlags ? 1 : 0);
     { const af = gl.getUniformLocation(program, "uAirOn"); if (af) gl.uniform1f(af, globalThis.__airVis === 0 ? 0 : 1); }
     gl.uniform2f(locs.travel, state.travelX || 0, state.travelZ || 1);
+    {
+      // Wind-sea band eases over 8 s. The bed follows that, not the slider.
+      const now = performance.now() / 1000;
+      const forced = Number(globalThis.__rippleDt);
+      const dt = Number.isFinite(forced) ? forced : (ripEase.t ? Math.min(0.25, now - ripEase.t) : 0);
+      if (Number.isFinite(forced)) globalThis.__rippleDt = undefined;
+      ripEase.t = now;
+      const follow = ripEase.ready ? 1 - Math.exp(-dt / 8) : 1;
+      const tx = state.travelX || 0, tz = state.travelZ || 1;
+      const tl = Math.hypot(tx, tz) || 1;
+      const target = [tx / tl, tz / tl];
+      ripEase.dir[0] += (target[0] - ripEase.dir[0]) * follow;
+      ripEase.dir[1] += (target[1] - ripEase.dir[1]) * follow;
+      const dl = Math.hypot(ripEase.dir[0], ripEase.dir[1]) || 1;
+      ripEase.dir[0] /= dl; ripEase.dir[1] /= dl;
+      let hs = 0.4, tp = 6;
+      if (state.bands) {
+        for (const b of state.bands) hs += (b.significantHeight || 0) ** 2;
+        hs = Math.sqrt(hs) || 0.4;
+        const w = state.bands.find((b) => b.id === "wind-sea");
+        const om = w && Number.isFinite(w.omegaMin) ? (w.omegaMin + w.omegaMax) * 0.5 : 1.3;
+        tp = (6.2831853 / om) * (0.75 + seaAgeNow());
+      }
+      ripEase.hs += (hs - ripEase.hs) * follow;
+      ripEase.tp += (tp - ripEase.tp) * follow;
+      ripEase.ready = true;
+      const windA = state.fx && Number.isFinite(state.fx.dir) ? state.fx.dir : Math.atan2(target[1], target[0]);
+      const windT = [Math.cos(windA), Math.sin(windA)];
+      ripEase.wind[0] += (windT[0] - ripEase.wind[0]) * follow;
+      ripEase.wind[1] += (windT[1] - ripEase.wind[1]) * follow;
+      const wl = Math.hypot(ripEase.wind[0], ripEase.wind[1]) || 1;
+      ripEase.wind[0] /= wl; ripEase.wind[1] /= wl;
+      const curEl = document.querySelector("#cur");
+      const curSpd = curEl ? Number(curEl.value) : 0;
+      const curDir = windA + (curSpd < 0 ? Math.PI : 0);
+      const wsp0 = state.fx && Number.isFinite(state.fx.speed) ? state.fx.speed : 0;
+      const calm0 = wsp0 <= 0.4 ? 0 : Math.min(1, (wsp0 - 0.4) / 2.6);
+      setBedRippleDir(ripEase.dir[0], ripEase.dir[1], calm0);
+      const uf = (name, v) => { const loc = gl.getUniformLocation(program, name); if (loc) gl.uniform1f(loc, v); };
+      const u2 = (name, x, y) => { const loc = gl.getUniformLocation(program, name); if (loc) gl.uniform2f(loc, x, y); };
+      u2("uRipDir", ripEase.dir[0], ripEase.dir[1]);
+      uf("uBedRip", calm0);
+      u2("uWindDir", ripEase.wind[0], ripEase.wind[1]);
+      u2("uCurDir", Math.cos(curDir), Math.sin(curDir));
+      uf("uCurSpd", Math.abs(curSpd) || 0);
+      uf("uTp", Math.max(ripEase.tp, 1));
+      uf("uHsRip", Math.max(ripEase.hs, 0.0) * calm0);
+      uf("uRipDbg", ripDbg ? 1 : 0);
+      const shore = useIslandSize(state.size || 250);
+      const islandOn = state.island && state.island.on ? 1 : 0;
+      uf("uHasIsland", islandOn);
+      u2("uRipC", shore.cx, shore.cz);
+      uf("uRipBank", shore.Rbank);
+      uf("uRipFace", shore.Rface);
+      const ang = Math.atan2(ripEase.dir[1], ripEase.dir[0]);
+      const tang = Math.atan2(target[1], target[0]);
+      globalThis.__rippleNow = { dir: ang, target: tang, hs: ripEase.hs, tp: ripEase.tp, follow };
+      globalThis.__drawMs = (globalThis.__drawMs || []).concat(0);
+    }
     // GPU physics: the card already wrote the patch textures (gpuPatch.js); otherwise
     // quantise and upload the CPU patches as before.
     const gpuChop = fromTextures && state.chopPatch && state.chopPatch.gpu;
@@ -2175,13 +3072,11 @@ void main() {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, gpuFine ? gpuFine.slopeTex : fineTex.tex);
     gl.uniform1i(locs.fineTex, 1);
-    if (fromTextures) {
+    if (fromTextures && locs.bandStats) {
+      copyBandStats(gpuChop && gpuChop.statsTex, gpuFine && gpuFine.statsTex);
       gl.activeTexture(gl.TEXTURE7);
-      gl.bindTexture(gl.TEXTURE_2D, gpuChop ? gpuChop.statsTex : null);
-      gl.uniform1i(locs.chopStats, 7);
-      gl.activeTexture(gl.TEXTURE8);
-      gl.bindTexture(gl.TEXTURE_2D, gpuFine ? gpuFine.statsTex : null);
-      gl.uniform1i(locs.fineStats, 8);
+      gl.bindTexture(gl.TEXTURE_2D, bandStatsTex);
+      gl.uniform1i(locs.bandStats, 7);
     }
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform1f(locs.chopSize, state.chopPatch ? state.chopPatch.size : 1);
@@ -2277,21 +3172,66 @@ void main() {
         gl.bindBuffer(gl.ARRAY_BUFFER, blockMesh.meta);
         gl.vertexAttribPointer(locs.meta, 4, gl.FLOAT, false, 0, 0);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, blockMesh.index);
-        if (clusters.program && clusters.key !== String(fft.L)) buildClusters(fft.L);
+        const reefKey = `${fft.L}/${fft.N}/${state.depth}/${state.island && state.island.on ? 1 : 0}`;
+        if (clusters.program && clusters.key !== reefKey) buildClusters(fft.L, fft.N);
         gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, clusters.tex); gl.activeTexture(gl.TEXTURE0);
         gl.uniform1i(locs.clusterTex, 14);
-        gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, seabedTex); gl.activeTexture(gl.TEXTURE0); gl.uniform1i(locs.seabedLut, 15);
+        gl.activeTexture(gl.TEXTURE21); gl.bindTexture(gl.TEXTURE_2D, seabedTex); gl.activeTexture(gl.TEXTURE0); gl.uniform1i(locs.seabedLut, 21);
         gl.uniform3f(locs.clusterGrid, clusters.grid[0], clusters.grid[1], clusters.program ? clusters.grid[2] : 0);
+        if (webgl2 && !lightMaps) lightMaps = createLightMaps(gl);
+        if (lightMaps && state.gpu) {
+          if (!boatView) boatView = createBoatView(gl);
+          if (globalThis.__oceanBuoy && !buoyView) buoyView = createBuoyView(gl);
+          const tLight = performance.now();
+          lightMaps.update({
+            physA: state.gpu.A, physB: state.gpu.B, physN: fft.N, L: fft.L, depth: state.depth,
+            sun: sunU, boatView, buoyView, boat: state.boat, buoy: globalThis.__oceanBuoy,
+            clusters: clusters.program ? clusters : null,
+            island: state.island && state.island.on ? useIslandSize(state.size || fft.L) : null,
+            bedS: state.size || fft.L,
+            rip: ripEase.dir,
+            bedRip: state.fx && state.fx.speed > 0.4 ? Math.min(1, (state.fx.speed - 0.4) / 2.6) : 0,
+            camXZ: [camTarget[0] || 0, camTarget[2] || 0],
+            camDist: camera.distance,
+            foot: seaFoot(eye, camTarget, canvas.width / Math.max(1, canvas.height)),
+            bisect: fftParams.get("bisect") === "off" ? 1 : fftParams.get("bisect") === "read1" ? 2 : fftParams.get("bisect") === "noshadow" ? 3 : 0,
+            t: state.fx ? state.fx.t : 0,
+          });
+          lightMaps.clar = (state.clarity ?? 22.3) > 1 ? 22.3 / (state.clarity ?? 22.3) : 4;
+          globalThis.__lightMaps = lightMaps;
+          lightMaps.bindSea(program);
+          globalThis.__lightCost.frameAt = performance.now() - tLight;
+        }
+        // The caustic pass binds the height field on units 0 and 1. The chop
+        // patches live there. Put them back before the floor, the walls and
+        // the surface. This is the same call for island on and island off.
+        // On a flat sea the height field is (0, 0, 0, 1); read as a patch it
+        // is a constant slope, and the patch's phase turn paints that into
+        // the pale islands.
+        const bindChop = () => {
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, gpuChop ? gpuChop.slopeTex : chopTex.tex);
+          gl.uniform1i(locs.chopTex, 0);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, gpuFine ? gpuFine.slopeTex : fineTex.tex);
+          gl.uniform1i(locs.fineTex, 1);
+          gl.activeTexture(gl.TEXTURE0);
+        };
+        bindChop();
         // v30.5 scene pass: floor + rocks/corals as bare albedo (+ rock height in alpha) into sceneTex,
         // read by the surface at its refracted ray's hit point.
         timed("render:scene", () => {
           const w = canvas.width, h = canvas.height;
           if (!scene.fb || scene.w !== w || scene.h !== h) {
             if (scene.fb) { gl.deleteFramebuffer(scene.fb); gl.deleteTexture(scene.tex); gl.deleteRenderbuffer(scene.rb); }
+            // Unit 16, not 0. Creating the target on the active unit replaced
+            // the chop patch, and the next draws sampled the scene colour as a slope.
+            gl.activeTexture(gl.TEXTURE16);
             scene.tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, scene.tex);
             gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.activeTexture(gl.TEXTURE0);
             scene.rb = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, scene.rb); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
             scene.fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, scene.fb);
             gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, scene.tex, 0);
@@ -2299,34 +3239,56 @@ void main() {
             scene.w = w; scene.h = h;
           }
           gl.bindFramebuffer(gl.FRAMEBUFFER, scene.fb);
-          gl.clearColor(0.7, 0.66, 0.55, 0.0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+          gl.viewport(0, 0, w, h);
+          // Black, not pale sand. A miss must not read as a sand albedo.
+          gl.clearColor(0.0, 0.0, 0.0, 0.0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
           const blendWas = gl.isEnabled(gl.BLEND); gl.disable(gl.BLEND); // v30.6 fix: raw albedo has alpha 0 (rock height); blending dropped the floor
           gl.uniform1f(locs.sfRaw, 1);
-          // v30.6 fix: unit 16 still held last frame's sceneTex while rendering into it (feedback loop ->
-          // INVALID_OPERATION, so the floor never reached the scene pass in v30.5; only rocks did)
-          gl.activeTexture(gl.TEXTURE16); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
+          // The sea shader samples sceneTex. Binding that unit to null makes
+          // the floor draw illegal, so the pass stayed black and the water
+          // never saw the caustic-lit sand. A 1x1 stand-in keeps the draw
+          // legal without sampling the texture we are writing.
+          gl.activeTexture(gl.TEXTURE16); gl.bindTexture(gl.TEXTURE_2D, islandDummy()); gl.activeTexture(gl.TEXTURE0);
+          gl.enable(gl.POLYGON_OFFSET_FILL);
+          gl.polygonOffset(1.5, 2.0);
+          if (vao) gl.bindVertexArray(vao);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, blockMesh.index);
           gl.drawElements(gl.TRIANGLES, blockMesh.count - blockMesh.wallCount, gl.UNSIGNED_INT, blockMesh.wallCount * 4);
+          globalThis.__sceneErr = gl.getError();
+          gl.disable(gl.POLYGON_OFFSET_FILL);
           if (clusters.program && clusters.count > 0) {
-            gl.useProgram(clusters.program); gl.bindVertexArray(clusters.vao);
-            gl.uniformMatrix4fv(clusters.viewProj, false, vpMat); gl.uniform1f(clusters.depth, state.depth); setBedOnly(gl, clusters.program, state.size); gl.uniform1i(clusters.lutLoc, 15); gl.uniform1f(clusters.raw, 1);
-            gl.drawElementsInstanced(gl.TRIANGLES, clusters.indexCount, gl.UNSIGNED_SHORT, 0, clusters.count);
+            gl.useProgram(clusters.program);
+            gl.uniformMatrix4fv(clusters.viewProj, false, vpMat); gl.uniform1f(clusters.depth, state.depth); setBedOnly(gl, clusters.program, state.size); bindClusterLight(); gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, seabedTex);
+            gl.uniform1i(clusters.lutLoc, 15); gl.uniform1f(clusters.raw, 1);
+            for (const part of Object.values(clusters.parts)) if (part.count) { gl.bindVertexArray(part.vao); gl.drawElementsInstanced(gl.TRIANGLES, part.indexCount, gl.UNSIGNED_SHORT, 0, part.count); }
             gl.uniform1f(clusters.raw, 0);
             gl.bindVertexArray(vao); gl.useProgram(program);
+            if (coastTex) { gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, coastTex); gl.activeTexture(gl.TEXTURE0); }
           }
           gl.uniform1f(locs.sfRaw, 0); if (blendWas) gl.enable(gl.BLEND);
           gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, w, h);
           gl.clearColor(1, 1, 1, 1);
           gl.activeTexture(gl.TEXTURE16); gl.bindTexture(gl.TEXTURE_2D, scene.tex); gl.activeTexture(gl.TEXTURE0);
           gl.uniform1i(locs.sceneTex, 16); gl.uniform1f(locs.sceneOn, 1);
+          bindChop();
         });
         // v29.1 fix4: opaque floor first (the wall quads are the first 6P indices, the floor fan after)
-        timed("render:block", () => gl.drawElements(gl.TRIANGLES, blockMesh.count - blockMesh.wallCount, gl.UNSIGNED_INT, blockMesh.wallCount * 4));
+        timed("render:block", () => {
+          gl.enable(gl.POLYGON_OFFSET_FILL);
+          gl.polygonOffset(1.5, 2.0);
+          if (vao) gl.bindVertexArray(vao);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, blockMesh.index);
+          gl.drawElements(gl.TRIANGLES, blockMesh.count - blockMesh.wallCount, gl.UNSIGNED_INT, blockMesh.wallCount * 4);
+          gl.disable(gl.POLYGON_OFFSET_FILL);
+        });
         if (clusters.program && clusters.count > 0) {
           timed("render:clusters", () => {
-            gl.useProgram(clusters.program); gl.bindVertexArray(clusters.vao);
-            gl.uniformMatrix4fv(clusters.viewProj, false, vpMat); gl.uniform1f(clusters.depth, state.depth); setBedOnly(gl, clusters.program, state.size); gl.uniform1i(clusters.lutLoc, 15);
-            gl.drawElementsInstanced(gl.TRIANGLES, clusters.indexCount, gl.UNSIGNED_SHORT, 0, clusters.count);
+            gl.useProgram(clusters.program);
+            gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, seabedTex);
+            gl.uniformMatrix4fv(clusters.viewProj, false, vpMat); gl.uniform1f(clusters.depth, state.depth); setBedOnly(gl, clusters.program, state.size); bindClusterLight(); gl.uniform1i(clusters.lutLoc, 15);
+            for (const part of Object.values(clusters.parts)) if (part.count) { gl.bindVertexArray(part.vao); gl.drawElementsInstanced(gl.TRIANGLES, part.indexCount, gl.UNSIGNED_SHORT, 0, part.count); }
             gl.bindVertexArray(vao); gl.useProgram(program);
+            if (coastTex) { gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, coastTex); gl.activeTexture(gl.TEXTURE0); }
           });
         }
         // v29.1 fix4: walls after the floor and coral. Inner faces (front-facing, seen through the top)
@@ -2345,6 +3307,10 @@ void main() {
         gl.vertexAttribPointer(locs.meta, 4, gl.FLOAT, false, 0, 0);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, fftMesh.index);
         if (floorDebug) return;
+        // Clusters and the scene target touch texture units. The surface
+        // samples the chop patches, island on or off, so bind them again
+        // immediately before that draw.
+        bindChop();
         gl.enable(gl.BLEND);
         gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       }
@@ -2356,6 +3322,9 @@ void main() {
       if (globalThis.__oceanBuoy && webgl2) { if (!buoyView) buoyView = createBuoyView(gl); buoyView.draw(globalThis.__oceanBuoy, vpMat, sunU); gl.bindVertexArray(vao); gl.useProgram(program); } // v30.21
       if (edgeCheck && blockOn) { gl.disable(gl.BLEND); edgeCheckRun(fft.L); }
       gl.disable(gl.BLEND);
+      // The shallow-water step renders into this atlas. Leave it unbound so
+      // that pass is not a feedback loop on unit 15.
+      if (coastTex) { gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0); }
       sampleBackdrop();
       return;
     }

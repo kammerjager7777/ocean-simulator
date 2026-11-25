@@ -5,6 +5,7 @@
 // speed, so the hull heaves, pitches and rolls. Wind windage and a weak current drift it, and a
 // soft mooring spring keeps it near the centre of the sea.
 import { GRAVITY } from "./gravity.js";
+import { clampToWater } from "./island.js?v=32.85";
 const BOAT_DRIFT = typeof location !== "undefined" && new URLSearchParams(location.search).get("boatdrift") === "1";
 const RHO = 1025, MASS = 6500, LEN = 8.0, BEAM = 2.8, HULL_D = 1.1;
 const IX = MASS * (BEAM * BEAM + HULL_D * HULL_D) / 12 * 1.4; // roll
@@ -17,8 +18,38 @@ for (const fx of [-0.42, -0.14, 0.14, 0.40]) for (const fz of [-0.42, 0, 0.42]) 
   PTS.push([fx * LEN, -0.8, fz * BEAM * narrow]);
 }
 const AREA = (LEN * BEAM * 0.78) / PTS.length;
+// Just off the beach, on a 250 m slice (the wall is at 125 m). The old pin
+// (158, 25) sat in the void. place() pulls this inside the current sea.
+const HOME_X = 86, HOME_Z = 18;
 export function createBoat() {
-  const b = { x: 0, y: -0.2, z: 0, vx: 0, vy: 0, vz: 0, yaw: 0.6, pitch: 0, roll: 0, wy: 0, wp: 0, wr: 0, length: LEN };
+  const b = { x: HOME_X, y: -0.2, z: HOME_Z, vx: 0, vy: 0, vz: 0, yaw: 0.6, pitch: 0, roll: 0, wy: 0, wp: 0, wr: 0, length: LEN, homeX: HOME_X, homeZ: HOME_Z };
+  // Stay on the slice: half the sea, minus 15 m so an 8 m hull does not hang
+  // off the wall. Then off the sandbar, unless that water is already outside
+  // the slice (a very small sea is mostly island).
+  b.place = (size, depth, island) => {
+    const half = Math.max(Number(size) || 250, 40) / 2;
+    const maxR = Math.max(24, half - 15);
+    // (86, 18) on a 250 m sea, just off the shelf. Other sizes keep that
+    // relationship instead of pinning a 250 m home against the wall.
+    const s = (Number(size) || 250) / 250;
+    let x = HOME_X * s, z = HOME_Z * s;
+    const pr = Math.hypot(x, z) || 1;
+    if (pr > maxR) { x *= maxR / pr; z *= maxR / pr; }
+    if (island) {
+      const w = clampToWater(x, z, depth > 0 ? depth : 40, 1.2);
+      if (Math.hypot(w[0], w[1]) <= maxR + 0.5) { x = w[0]; z = w[1]; }
+    }
+    b.homeX = x; b.homeZ = z;
+    if (!BOAT_DRIFT) { b.x = x; b.z = z; b.vx = 0; b.vz = 0; }
+    else {
+      const r = Math.hypot(b.x, b.z);
+      if (r > maxR && r > 1e-3) { b.x *= maxR / r; b.z *= maxR / r; }
+      if (island) {
+        const hull = clampToWater(b.x, b.z, depth > 0 ? depth : 40, 2.0);
+        if (Math.hypot(hull[0], hull[1]) <= maxR + 0.5) { b.x = hull[0]; b.z = hull[1]; }
+      }
+    }
+  };
   function world(p) {
     const [px, py, pz] = p;
     const cp = Math.cos(b.pitch), sp = Math.sin(b.pitch), cr = Math.cos(b.roll), sr = Math.sin(b.roll), cy = Math.cos(b.yaw), sy = Math.sin(b.yaw);
@@ -47,11 +78,11 @@ export function createBoat() {
     b.pitch = Math.max(-0.6, Math.min(0.6, b.pitch)); b.roll = Math.max(-0.8, Math.min(0.8, b.roll));
     // drift: windage ~2.5% of the wind + 0.1 m/s current, soft mooring to the centre, water drag
     const wdx = Math.cos(wind.direction), wdz = Math.sin(wind.direction);
-    const ax = 0.012 * wind.speed * wdx + 0.05 - 0.004 * b.x - 0.6 * b.vx;
-    const az = 0.012 * wind.speed * wdz - 0.004 * b.z - 0.6 * b.vz;
+    const ax = 0.012 * wind.speed * wdx + 0.05 - 0.004 * (b.x - b.homeX) - 0.6 * b.vx;
+    const az = 0.012 * wind.speed * wdz - 0.004 * (b.z - b.homeZ) - 0.6 * b.vz;
     b.vx += ax * dt; b.vz += az * dt; b.x += b.vx * dt; b.z += b.vz * dt;
-    // v30.20: pinned to the block centre unless ?boatdrift=1 (heave, pitch, roll, yaw still free)
-    if (!BOAT_DRIFT) { b.x = 0; b.z = 0; b.vx = 0; b.vz = 0; }
+    // Pinned just off the beach unless ?boatdrift=1 (heave, pitch, roll, yaw still free).
+    // place() owns the pin, including the slice clamp, so a size change moves it.
     // weathervanes slowly bow-to-wind-ish
     const tgt = Math.atan2(-wdz, wdx) + Math.PI; let dy = tgt - b.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
     b.wy += (0.02 * dy - 0.5 * b.wy) * dt; b.yaw += b.wy * dt;

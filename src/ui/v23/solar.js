@@ -1,14 +1,15 @@
 // v30.27 Apple-Watch-style Solar control. The full 24 h sine is centered in the card:
 // midnight at both padded ends, noon on the card center, 06:00 and 18:00 symmetric.
 // A short coast continues a flick, wraps at midnight, and stops at the next pointer.
-import { ui } from "./core.js?v=32.10";
+import { ui } from "./core.js?v=32.61";
 import { elevAt, isSunUp } from "./sky.js?v=30.29";
 import { sample, release, cancel, velocity } from "./coast.js?v=30.29";
 const D2R = Math.PI / 180, URL_T = ui.P.get("tod");
 const X0 = 28, X1 = 372, HY = 101, AMP = 64;
 ui.todMin = (() => { if (URL_T && /^\d{1,2}:\d{2}$/.test(URL_T)) { const [h, m] = URL_T.split(":").map(Number); return h * 60 + m; } const v = Number(ui.store.get("ocean.ui.tod", "660")); return Number.isFinite(v) && v >= 0 && v < 1440 ? v : 660; })();
+globalThis.__oceanTodMin = ui.todMin;
 const fmt = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(Math.round(m % 60) % 60).padStart(2, "0")}`;
-function setT(m) { m = ((Math.round(m) % 1440) + 1440) % 1440; ui.todMin = m; if (!URL_T) ui.store.set("ocean.ui.tod", String(m)); drawDial(); kb.upd(); }
+function setT(m) { m = ((Math.round(m) % 1440) + 1440) % 1440; ui.todMin = m; globalThis.__oceanTodMin = m; if (!URL_T) ui.store.set("ocean.ui.tod", String(m)); drawDial(); kb.upd(); }
 let m0 = 660, x0 = 0, drag = null, settle = 0;
 const el = document.createElement("div"); el.id = "solar-dial"; el.setAttribute("role", "slider"); el.tabIndex = 0; el.setAttribute("aria-label", "Solar time: drag left or right through a full day");
 el.setAttribute("aria-valuemin", "0"); el.setAttribute("aria-valuemax", "1440");
@@ -175,13 +176,14 @@ addEventListener("keydown", (ev) => { if ((ev.key === "9" || ev.key === "0") && 
 const solar = ui.register({
   layer: "tod",
   draw(a) {
-    const on = a > 0.5 && !ui.clean;
-    if (!on && drag) { drag = null; cancel("tod"); }
-    el.classList.toggle("on", on);
+    const live = a > 0.5 && !ui.clean;
+    if (!live && drag) { drag = null; cancel("tod"); }
+    el.classList.toggle("on", !ui.clean);
+    if (!live) return;
     drawDial();
     kb.upd();
   },
-  hide() { el.classList.remove("on"); drag = null; cancel("tod"); },
+  hide() { drag = null; cancel("tod"); },
 });
 window.__setTod = (m) => { cancel("tod"); setT(m); };
 void solar;

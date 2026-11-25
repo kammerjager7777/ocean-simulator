@@ -149,8 +149,190 @@ vec3 seaNormalPix(vec2 p, float lod) {
 }
 `;
 
-import { BED_GLSL } from "./seabed.js?v=30.29";
+import { BED_GLSL } from "./seabed.js?v=30.31";
+import { currentIsland } from "../physics/island.js?v=32.85";
 import { RIPPLE_GLSL } from "../physics/ripples.js?v=30.29";
+// The sea fragment shader is already at the 16 texture-unit minimum. The island
+// state is sampled here, in the vertex shader, and only when ?island=1, then
+// passed down as vCoast. The default ocean declares no extra sampler.
+const FFT_ISLAND = typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1";
+const ISLAND_VERT_DECL = FFT_ISLAND ? `
+uniform float uIsland;
+uniform vec2 uMapOrigin;
+uniform float uMapSpan;
+uniform float uHm;
+uniform float uAtlasH;
+uniform float uAtlasW;
+uniform float uR2;
+uniform float uDLo;
+uniform float uDHi;
+uniform float uSweN;
+uniform vec2 uSweOrigin;
+uniform float uSweSpan;
+uniform float uHs;
+uniform vec2 uIslandC;
+uniform float uIRb, uIRf, uIRs, uIRbank, uIEase;
+uniform float uIPeak, uIYb, uIYf, uIYs, uIFace, uIShelf;
+uniform sampler2D coastState;
+out vec4 vCoast;
+out vec2 vBedG;
+out float vFloorGrid;
+out float vEta;
+out float vWet;
+float iHermite(float s, float y0, float y1, float m0, float m1) {
+  float s2 = s * s, s3 = s2 * s;
+  return (2.0 * s3 - 3.0 * s2 + 1.0) * y0 + (s3 - 2.0 * s2 + s) * m0
+       + (-2.0 * s3 + 3.0 * s2) * y1 + (s3 - s2) * m1;
+}
+// Same curve as the fragment islandBed. The heightmap is only the shadow;
+// a texel step there was a stair in the waterline and a flat decal wherever
+// the sample missed the mound.
+float islandBed(vec2 xz) {
+  vec2 rel = xz - uIslandC;
+  float th = atan(rel.y, rel.x);
+  float lump = 0.055 * sin(3.0 * th) + 0.032 * sin(5.0 * th + 1.7) + 0.018 * sin(8.0 * th + 0.4);
+  float r = length(rel) / max(1.0 + lump, 0.75);
+  float yFloor = -max(depth, 0.5);
+  if (r >= uIRbank) return yFloor;
+  float Rb = uIRb;
+  float Rf = uIRf;
+  float Rs = uIRs;
+  // Same fallback as sandbarBed. A zero ease makes the join span 0, and a
+  // vertex stage that still evaluates the divide produces Inf.
+  float ease = uIEase > 0.0 ? uIEase : 8.0;
+  float join0 = Rf - ease;
+  float join1 = Rf + ease;
+  float y;
+  if (r <= Rb) y = iHermite(r / max(Rb, 1.0), uIPeak, uIYb, 0.0, -uIFace * Rb);
+  else if (r <= join0) y = uIYb - uIFace * (r - Rb);
+  else if (r < join1) {
+    float y0 = uIYb - uIFace * (join0 - Rb);
+    float y1 = uIYf - uIShelf * (join1 - Rf);
+    float span = max(join1 - join0, 1.0);
+    y = iHermite((r - join0) / span, y0, y1, -uIFace * span, -uIShelf * span);
+  } else if (r <= Rs) y = uIYf - uIShelf * (r - Rf);
+  else {
+    float span = max(uIRbank - Rs, 1.0);
+    y = iHermite((r - Rs) / span, uIYs, yFloor, -uIShelf * span, 0.0);
+  }
+  y += 0.16 * uIPeak * exp(-((r - Rb) / 4.0) * ((r - Rb) / 4.0));
+  if (r < Rb) y += 0.10 * uIPeak * sin(0.42 * r + 2.0 * th) * sin(0.28 * r - 3.0 * th);
+  float spanB = max(uIRbank - Rs, 1.0);
+  float uB = clamp((r - Rs) / spanB, 0.0, 1.0);
+  y += 0.55 * uIPeak * sin(7.0 * th + 0.8) * sin(3.14159265 * uB);
+  return y < yFloor ? yFloor : y;
+}
+// Shallow-water state sits under the heightmap in the same atlas.
+// h, wetness, and 1 when this point is inside the solver grid.
+// textureLod: a vertex-shader texture() has no derivatives. On a Mac that
+// fetch is undefined and came back huge, which is what shot the sheet up.
+vec3 sweAt(vec2 world) {
+  vec2 g = (world - uSweOrigin) / uSweSpan * uSweN;
+  if (g.x < 0.5 || g.y < 0.5 || g.x > uSweN - 0.5 || g.y > uSweN - 0.5) return vec3(0.0);
+  vec2 uv = vec2((g.x + 0.5) / max(uAtlasW, 1.0), (uHm + g.y + 0.5) / max(uAtlasH, 1.0));
+  vec4 s = textureLod(coastState, uv, 0.0);
+  return vec3(max(s.r, 0.0), clamp(s.a, 0.0, 1.0), 1.0);
+}
+// A short box, half a cell, on a linearly filtered atlas. One cell was a stair.
+vec3 sweBlur(vec2 world) {
+  float c = 0.55 * uSweSpan / max(uSweN, 1.0);
+  vec3 s = sweAt(world);
+  s += sweAt(world + vec2(c, 0.0));
+  s += sweAt(world - vec2(c, 0.0));
+  s += sweAt(world + vec2(0.0, c));
+  s += sweAt(world - vec2(0.0, c));
+  return s * 0.2;
+}
+// Shadow lives in the heightmap (.g), the top rows of the atlas. The rows
+// under that are the shallow-water state. A tap one texel past the heightmap
+// reads a water column (tens of metres, or a NaN once a wet cell blew up)
+// and that value was written out as a varying. On the Mac a NaN varying
+// tears the triangle off the surface.
+float coastShadow(vec2 p) {
+  vec2 uv = (p - uMapOrigin) / uMapSpan;
+  if (uv.x <= 0.0 || uv.y <= 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return 1.0;
+  float inset = 0.5 / max(uAtlasW, 1.0);
+  float yMax = (uHm - 0.5) / max(uAtlasH, 1.0);
+  float xMax = (uHm - 0.5) / max(uAtlasW, 1.0);
+  vec2 a = vec2(clamp((uv.x * (uHm - 1.0) + 0.5) / uAtlasW, inset, xMax), clamp((uv.y * (uHm - 1.0) + 0.5) / uAtlasH, inset, yMax));
+  return clamp(textureLod(coastState, a, 0.0).g, 0.0, 1.0);
+}` : "";
+const ISLAND_VERT_MAIN = FFT_ISLAND ? `
+  vCoast = vec4(-depth, 0.0, 1.0, 0.0);
+  vBedG = vec2(0.0);
+  vFloorGrid = meta.w > 5.5 ? 1.0 : 0.0;
+  vEta = 0.0;
+  vWet = 0.0;
+  // Wave height first, before any coast fetch. The fetch is what was
+  // corrupting this value on the Mac.
+  float yWave0 = vWorld.y;
+  vec2 xzWave = vWorld.xz;
+  float shad = 1.0;
+  // Analytic bed, not the heightmap. The map sample was a flat 0 wherever
+  // the float texture missed, so the fragment painted a disc on the live
+  // waves and the outer contour stepped with the mesh.
+  float yBed = islandBed(p);
+  float D = max(0.0, -yBed);
+  float tw = clamp((D - uDLo) / 10.0, 0.0, 1.0);
+  float sw = tw * tw * (3.0 - 2.0 * tw);
+  vec2 uvH = (p - uMapOrigin) / uMapSpan;
+  float edge = smoothstep(0.0, 0.08, min(min(uvH.x, 1.0 - uvH.x), min(uvH.y, 1.0 - uvH.y)));
+  float wI = (uvH.x > 0.0 && uvH.x < 1.0 && uvH.y > 0.0 && uvH.y < 1.0) ? (1.0 - sw) * edge : 0.0;
+  // meta.w 2 is the wall top. It stays the wave at the cut, the same height
+  // the surface edge already has. Sampling the atlas there is what pulled
+  // the side faces up into wedges.
+  if (meta.w < 1.5) {
+    // Ease the chop to zero across the waterline. A hard hold tore a gap
+    // between the FFT surface and the sheet.
+    float join = smoothstep(0.02, 0.7, D);
+    vec2 xz = mix(p, xzWave, join);
+    yBed = islandBed(xz);
+    D = max(0.0, -yBed);
+    join = smoothstep(0.02, 0.7, D);
+    xz = mix(p, xzWave, join);
+    yBed = islandBed(xz);
+    float yWave = yWave0 * join;
+    float cap = max(uR2, 0.15);
+    float film = 0.0;
+    if (yBed > -0.7 && yBed < cap + 0.08) {
+      vec3 sws = sweBlur(xz);
+      film = (sws.z > 0.5) ? max(sws.x, 0.0) : 0.0;
+      if (yBed > cap) film = 0.0;
+      vWet = yBed > cap ? 0.0 : sws.y;
+      shad = coastShadow(xz);
+    }
+    float ySea = max(yWave, yBed + 0.02);
+    float ySheet = yBed + min(film, max(0.0, cap - yBed));
+    // Through the waterline the sheet becomes the FFT surface. No step.
+    float y = mix(ySheet, ySea, smoothstep(-0.06, 0.4, D));
+    // (x, height, z). vec3(xz, y) is (x, z, height) and stood the sheet on end.
+    vWorld = vec3(xz.x, y, xz.y);
+    vEta = y;
+    vCoast = vec4(yBed, wI, shad, film);
+    float nK = yBed >= -0.05 ? 1.0 - join : 0.0;
+    if (nK > 0.001) {
+      float eN = 1.6;
+      float bx = islandBed(xz + vec2(eN, 0.0)) - islandBed(xz - vec2(eN, 0.0));
+      float bz = islandBed(xz + vec2(0.0, eN)) - islandBed(xz - vec2(0.0, eN));
+      vec3 nBed = normalize(vec3(-bx, 2.0 * eN, -bz));
+      vNormal = normalize(mix(vNormal, nBed, clamp(nK, 0.0, 1.0)));
+      vSea.w *= 1.0 - clamp(nK, 0.0, 1.0);
+    }
+  } else if (meta.w > 5.5) {
+    // Floor grid only. Wall bottoms stay on the open-sea relief, so the
+    // cut face matches the island-off block: one flat bottom, one colour.
+    float yOpen = vWorld.y;
+    float lift = smoothstep(-depth + 0.2, -depth + 2.2, yBed);
+    float yF = max(yOpen, yBed - 0.08);
+    // Stay under the free surface at the waterline. A floor that met the
+    // wave there z-fought a bright ring around the shore.
+    if (yBed < 0.2) yF = min(yF, -0.14);
+    vWorld.y = mix(yOpen, yF, lift);
+    vCoast = vec4(yBed, wI, shad, 0.0);
+  } else {
+    vCoast = vec4(-depth, wI, 1.0, 0.0);
+  }
+` : "";
 export const VERT_FFT = `#version 300 es
 #define FOAM_LIFT ${Number(new URLSearchParams(globalThis.location?.search ?? "").get("foamlift") ?? 0).toFixed(3)}
 #define MAXX 64
@@ -173,11 +355,7 @@ uniform highp float fftL;
 uniform highp sampler2DArray physS;
 uniform float crestLift;
 uniform vec2 foamDrift; // v30.19 lean direction (downwind)
-uniform float curlU;     // v30.22b: wind speed (m/s) for the mesh curl gate
-uniform highp sampler2D physC; // v30.22c curl field (physics grid)
-#define CURL_ON ${(() => { const q = typeof location !== "undefined" ? new URLSearchParams(location.search) : null; return q && (q.get("curl") === "0" || q.get("curl") === "lip") ? "false" : "true"; })()}
-out vec3 vCurl;          // v30.22b: (curl weight, lip-tip weight, cavity weight under the lip)
-#define LEAN_ON ${typeof location !== "undefined" && new URLSearchParams(location.search).get("lean") === "0" ? "false" : "true"}
+out vec3 vCurl;          // kept at 0: the plunging lip sheet and mesh hollow are gone
 uniform highp float choppiness;
 uniform vec3 eye;
 uniform float pixAngle;  // radians per pixel
@@ -191,6 +369,7 @@ uniform float minLod;    // shading detail never finer than this level (near-Nyq
 uniform float antiTile;  // 1: mixed copies away from the tile; 0: plain repeat (review only)
 uniform float block;     // v29: 1 = the cut-away block (tile only, physics fields to the very edge, walls and floor)
 uniform float depth;     // v29: floor depth (the depth slider; the same value the physics uses)
+${ISLAND_VERT_DECL}
 ${BED_GLSL}${RIPPLE_GLSL}
 uniform highp int xCount;
 uniform vec4 x0[MAXX];   // amplitude, k, cos dir, sin dir
@@ -413,6 +592,9 @@ void main() {
   bool thinDone = false;
   vec4 tL = vec4(0.0), tF = vec4(0.0), tG = vec4(0.0);
   float mt = tileThin * smoothstep(TILE_THIN_D0, TILE_THIN_D1, length(eye.xz - p));
+  // The far reef was halved into flat facets. Those read as stair-stepped
+  // streaks once the view grazes the shallows. Keep the full mesh there.
+  ${FFT_ISLAND ? `{ float ySh = islandBed(p); if (ySh > -6.0) mt *= smoothstep(-2.0, -6.0, ySh); }` : ""}
   vec2 oddT = mod(floor((p + half_) / spacing + 0.5), 2.0);
   if (tile && mYZ.x == 0.0 && mYZ.y == 0.0 && mt > 0.0 && oddT.x + oddT.y > 0.5) {
     // both odd: the half-density quad's diagonal is b-c, (+1,-1) (a,b,c / b,d,c split)
@@ -538,38 +720,9 @@ void main() {
   // v30b foam volume: foam stands a little above the water (up to FOAM_LIFT m on fresh, dense foam).
   h += FOAM_LIFT * clamp(vFoam, 0.0, 1.0) * (1.0 - 0.6 * clamp(vAge, 0.0, 1.0));
   vWorld = vec3(p.x + choppiness * sh.x, h, p.y + choppiness * sh.y);
-  // v30.19 leaning crest: where the crest is about to break / breaking (physL break + lip detector), the
-  // top of the wave is pushed forward (downwind) in proportion to its height, so the front face steepens
-  // and leans before the lip throws. Smooth in h and capped at 1.2 cells, so the mesh never folds.
-  if (LEAN_ON && meta.w > 0.5 && meta.w < 2.5) {
-    float lipS = clamp(max(4.0 * vBroken, vLip), 0.0, 1.0);
-    float lean = smoothstep(0.1, 0.6, lipS);
-    vec2 wd = length(foamDrift) > 1e-4 ? normalize(foamDrift) : vec2(1.0, 0.0);
-    vWorld.xz += wd * lean * min(0.35 * max(h, 0.0), 1.2 * fftL / float(physN));
-    vWorld.y += 0.08 * lean * max(h, 0.0);
-  }
-  // v30.22c curl: the lip itself is its own finely tessellated sheet (view.js createCurl), driven by the
-  // physics curl field (physC). The sea only darkens and hollows a little under an overhanging lip:
-  // physC.x = -1 - cavity on front-face cells (a smooth field, so no facets or wedges).
+  // Spectral heightfield only. The leaning crest, the lip hollow, and the crest bump
+  // were scripted crash geometry. Foam still marks real breaking.
   vCurl = vec3(0.0);
-  if (CURL_ON && meta.w > 0.5 && meta.w < 2.5 && curlU > 11.5) {
-    float sp = fftL / float(physN);
-    vec2 u = (p + 0.5 * fftL) / sp - 0.5; vec2 i0 = floor(u), f = u - i0; ivec2 c0 = ivec2(i0);
-    #define CAV(o) max(-1.0 - texelFetch(physC, ((c0 + o) % physN + physN) % physN, 0).x, 0.0)
-    float cav = mix(mix(CAV(ivec2(0, 0)), CAV(ivec2(1, 0)), f.x), mix(CAV(ivec2(0, 1)), CAV(ivec2(1, 1)), f.x), f.y);
-    if (block > 0.5) cav *= smoothstep(4.0, 14.0, 0.5 * fftL - max(abs(p.x), abs(p.y))); // it19: same wall fade as the lip sheet (no shadow without a lip)
-    if (cav > 0.0) {
-      vec2 wd = length(foamDrift) > 1e-4 ? normalize(foamDrift) : vec2(1.0, 0.0);
-      if (${typeof location !== "undefined" && new URLSearchParams(location.search).get("curlhol") === "0" ? "false" : "true"}) vWorld.xz -= wd * 0.35 * sp * cav; // the face under the lip steepens / hollows slightly (< 0.35 cell); ?curlhol=0 off (debug)
-      vCurl = vec3(0.0, 0.0, cav);
-    }
-  }
-  // v30.19.2: the flat crest lift (crestLift, up to 0.8 m) is gone: foam sits on the water. Only the
-  // actively breaking front of a crest gets a small smooth bump (<= 0.12 m, follows the lip detector, no plateau).
-  if (crestLift > 0.0 && meta.w < 2.5) {
-    float lipB = smoothstep(0.15, 0.8, clamp(max(4.0 * vBroken, vLip), 0.0, 1.0));
-    vWorld.y += 0.12 * lipB * lipB * smoothstep(0.0, 1.5, max(h, 0.0));
-  }
   // v29: wall-top vertices (meta.w 2) are computed exactly like the surface vertex at the same
   // x, z (same code path), so the wall top IS the surface edge; wall-bottom (3) and floor (4)
   // vertices sit at the floor depth. Nothing here is written back to the physics.
@@ -582,7 +735,7 @@ void main() {
   // v29.1 fix2: the wall bottom (3) keeps the same horizontal shift as its wall-top vertex, so the
   // walls stay vertical under the stretched outline and the floor (a fan to those bottom vertices,
   // see buildBlockMesh) follows it: no gap, no sky under the water. The floor centre (4) stays put.
-  if (meta.w > 2.5) vWorld = (meta.w > 3.5 && meta.w < 4.5) ? vec3(p.x, -depth + bedRelief(p, depth), p.y) : vec3(vWorld.x, -depth + bedRelief(vWorld.xz, depth), vWorld.z); // v30.23 relief
+  if (meta.w > 2.5) vWorld = (meta.w > 5.5 || (meta.w > 3.5 && meta.w < 4.5)) ? vec3(p.x, -depth + bedRelief(p, depth), p.y) : vec3(vWorld.x, -depth + bedRelief(vWorld.xz, depth), vWorld.z); // v30.23 relief; meta.w 6 is the island floor grid
   if (meta.w < -0.5 && block < 0.5) {
     // skirt (see buildFftMesh): reaches outward under the coarser ring and a little down, so
     // the T-junction slivers are covered seen from above too (a vertical skirt has no area
@@ -592,6 +745,7 @@ void main() {
     vWorld.xz += out_ * 2.0 * spacing * exp2(rr + 1.0);
     vWorld.y -= 0.3 + 0.0005 * d;
   }
+  ${ISLAND_VERT_MAIN}
   gl_Position = viewProj * vec4(vWorld, 1.0);
 }
 `;
@@ -642,11 +796,60 @@ export function buildFftMesh(N, L, reach = FFT_RINGS_TO, farHalve = false) {
       meta.push(l, mx, mz, tile ? 1 : 0);
       return id[k];
     };
+    const islandMesh = tile && typeof location !== "undefined" && new URLSearchParams(location.search).get("island") === "1";
+    const shoreI = currentIsland();
+    const shoreR = shoreI.shoreRefine;
+    const shore = (x, z) => { const dx = x - shoreI.cx, dz = z - shoreI.cz; return dx * dx + dz * dz < shoreR * shoreR; };
+    const mids = new Map();
+    const edgeKey = (i0, j0, i1, j1) => (i0 < i1 || (i0 === i1 && j0 <= j1) ? `${i0},${j0},${i1},${j1}` : `${i1},${j1},${i0},${j0}`);
+    const at = (i, j) => [-h + i * s, -h + j * s];
+    const extra = (i, j) => {
+      const [x, z] = at(i, j);
+      const idv = pos.length / 2;
+      pos.push(x, z);
+      meta.push(Math.log2(s / s0), 0, 0, tile ? 1 : 0);
+      return idv;
+    };
+    const mid = (i0, j0, i1, j1) => {
+      const key = edgeKey(i0, j0, i1, j1);
+      if (mids.has(key)) return mids.get(key);
+      const idv = extra((i0 + i1) / 2, (j0 + j1) / 2);
+      mids.set(key, idv);
+      return idv;
+    };
+    const refined = islandMesh ? new Uint8Array(cells * cells) : null;
+    if (refined) for (let j = 0; j < cells; j += 1) for (let i = 0; i < cells; i += 1) {
+      if (inner > 0 && inside(i, j)) continue;
+      const [x, z] = at(i + 0.5, j + 0.5);
+      if (shore(x, z)) refined[j * cells + i] = 1;
+    }
+    if (refined) for (let j = 0; j < cells; j += 1) for (let i = 0; i < cells; i += 1) {
+      if (!refined[j * cells + i]) continue;
+      mid(i, j, i + 1, j); mid(i, j + 1, i + 1, j + 1); mid(i, j, i, j + 1); mid(i + 1, j, i + 1, j + 1);
+    }
     for (let j = 0; j < cells; j += 1) for (let i = 0; i < cells; i += 1) {
       if (inner > 0 && inside(i, j)) continue;
       const a = vert(i, j), b = vert(i + 1, j), c = vert(i, j + 1), d = vert(i + 1, j + 1);
       const key = lod + ":" + Math.floor(i * CHUNKS / cells) + ":" + Math.floor(j * CHUNKS / cells);
-      put(key, lod, 0, [a, b, c, b, d, c]);
+      const putTri = (tri) => put(key, lod, 0, tri);
+      if (!refined || !refined[j * cells + i]) {
+        const mb = mids.get(edgeKey(i, j, i + 1, j));
+        const mt = mids.get(edgeKey(i, j + 1, i + 1, j + 1));
+        const ml = mids.get(edgeKey(i, j, i, j + 1));
+        const mr = mids.get(edgeKey(i + 1, j, i + 1, j + 1));
+        if (!mb && !mt && !ml && !mr) { putTri([a, b, c, b, d, c]); continue; }
+        const cen = extra(i + 0.5, j + 0.5);
+        const edge = (p, q, m) => { if (m === undefined) putTri([cen, p, q]); else { putTri([cen, p, m]); putTri([cen, m, q]); } };
+        edge(a, b, mb); edge(b, d, mr); edge(d, c, mt); edge(c, a, ml);
+        continue;
+      }
+      const mb = mid(i, j, i + 1, j), mt = mid(i, j + 1, i + 1, j + 1);
+      const ml = mid(i, j, i, j + 1), mr = mid(i + 1, j, i + 1, j + 1);
+      const cen = extra(i + 0.5, j + 0.5);
+      putTri([a, mb, ml, mb, cen, ml]);
+      putTri([mb, b, cen, b, mr, cen]);
+      putTri([ml, cen, c, cen, mt, c]);
+      putTri([cen, mr, mt, mr, d, mt]);
     }
     // v28-lod tile thinning: each tile chunk also gets a half-density triangle list over its
     // even vertices (same vertex ids), drawn when the chunk lies wholly past TILE_THIN_D1.

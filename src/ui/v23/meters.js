@@ -1,6 +1,6 @@
 // Two fixed screen instruments above the time dial. They are not on the ocean,
 // so a drag cannot orbit the camera, and they do not change size with the sea.
-import { ui } from "./core.js?v=32.10";
+import { ui } from "./core.js?v=32.61";
 import { skyAt } from "./sky.js?v=30.29";
 
 const W = 400, H = 176, CHOP_W = 400;
@@ -62,14 +62,25 @@ function caption(ctx, name, value, h = H, w = W) {
   ctx.fillText(value, w - 18, 34);
 }
 function chopK() { return clamp(Number(ui.inputs.chop.value) / 2.5, 0, 1); }
-// One crest. Steepness squeezes that crest toward a cusp and leaves the
-// trough broad. Crest and trough heights stay put, and there is no second crest.
-function chopWave(k) {
-  const s = 0.93 * k;
+const SEA_C = "#E8943A";
+const SWELL_C = "#3EC6D4";
+const MEAN_C = "#B0B4BC";
+function fitLine(ctx, text, maxW) {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let t = text;
+  while (t.length > 1 && ctx.measureText(`${t}…`).width > maxW) t = t.slice(0, -1);
+  return `${t}…`;
+}
+// Wind-sea on top of a longer swell. Age sets how many wind-sea crests fit
+// across the card (young is short, old is one large crest) and how much swell shows.
+function seaCurve(cycles, steep) {
+  // Keep dx/du positive so a short young sea does not fold into a loop.
+  const s = Math.min(0.12, 0.1 * steep) / Math.max(cycles, 1);
   const pts = [];
   for (let i = 0; i <= 140; i++) {
-    const theta = -Math.PI + (2 * Math.PI * i) / 140;
-    pts.push([theta - s * Math.sin(theta), Math.cos(theta)]);
+    const u = i / 140;
+    const theta = -Math.PI + 2 * Math.PI * cycles * u;
+    pts.push([u - s * Math.sin(theta), Math.cos(theta)]);
   }
   return pts;
 }
@@ -88,11 +99,35 @@ function present(active, store) {
 }
 function drawChop() {
   const ctx = chop.ctx, k = chopK(), v = Number(ui.inputs.chop.value);
+  const st = window.__steep || {};
+  const age = Number.isFinite(st.age) ? st.age : 0.28;
+  const swell = Number.isFinite(st.swell) ? st.swell : age;
   caption(ctx, "CHOP", v.toFixed(1), CHOP_H, CHOP_W);
-  const raw = chopWave(k);
+  ctx.font = "500 13px Barlow, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const legend = [[SEA_C, "wind-sea"], [SWELL_C, "swell"], [MEAN_C, "mean"]];
+  let lx = 132;
+  for (const [color, label] of legend) {
+    ctx.fillStyle = color;
+    if (label === "mean") {
+      ctx.fillRect(lx, 25, 12, 2);
+      lx += 16;
+    } else {
+      ctx.beginPath();
+      ctx.arc(lx + 4, 26, 3.4, 0, Math.PI * 2);
+      ctx.fill();
+      lx += 12;
+    }
+    ctx.fillStyle = "rgba(246,248,255,0.92)";
+    ctx.fillText(label, lx, 26);
+    lx += ctx.measureText(label).width + 12;
+  }
   const x0 = 28, x1 = CHOP_W - 28;
-  const pts = raw.map(([x, y]) => [x0 + ((x + Math.PI) / (2 * Math.PI)) * (x1 - x0), CHOP_MID - y * CHOP_AMP]);
-  const stroke = (list, style, width) => {
+  const place = (raw, amp) => raw.map(([x, y]) => [x0 + clamp(x, -0.02, 1.02) * (x1 - x0), CHOP_MID - y * amp]);
+  const swellRaw = seaCurve(1, 0.15);
+  const raw = seaCurve(1 + (1 - age), k);
+  const stroke = (list, style, width, dash) => {
     if (list.length < 2) return;
     ctx.beginPath();
     ctx.moveTo(list[0][0], list[0][1]);
@@ -102,11 +137,24 @@ function drawChop() {
     ctx.lineJoin = "miter";
     ctx.miterLimit = 12;
     ctx.lineCap = "butt";
+    ctx.setLineDash(dash || []);
     ctx.stroke();
+    ctx.setLineDash([]);
   };
   const hot = present(!!chopDrag, chopGlow);
-  stroke(pts, "rgba(214,218,224,0.9)", 2.2 + hot * 0.6);
-  stroke(pts.filter((_, i) => raw[i][1] > 0.86), accent(), 2.4 + hot * 1.1);
+  ctx.strokeStyle = MEAN_C;
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(x0, CHOP_MID);
+  ctx.lineTo(x1, CHOP_MID);
+  ctx.stroke();
+  const swellAmp = CHOP_AMP * (0.42 + 0.38 * swell);
+  const seaAmp = CHOP_AMP * (0.72 + 0.28 * k);
+  const swellPts = place(swellRaw, swellAmp);
+  stroke(swellPts, SWELL_C, 1.6);
+  const pts = place(raw, seaAmp);
+  stroke(pts, SEA_C, 2.6 + hot * 0.5);
+  stroke(pts.filter((_, i) => raw[i][1] > 0.86), "#FFD7A8", 2.2 + hot);
   let half = 0;
   const above = pts.filter((_, i) => raw[i][1] >= 0.5);
   if (above.length > 1) half = (above[above.length - 1][0] - above[0][0]) / 2;
@@ -121,11 +169,32 @@ function drawChop() {
   ctx.fillStyle = "#000";
   ctx.fillRect(0, WHY_Y, CHOP_W, CHOP_H - WHY_Y);
   const why = (window.__steep && window.__steep.why) || "";
-  ctx.font = "400 18px Geist Mono, ui-monospace, monospace";
+  const maxW = CHOP_W - 28;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   ctx.fillStyle = (ui.theme && ui.theme.hudFace) || "#F6F8FF";
-  ctx.fillText(why, 20, (WHY_Y + CHOP_H) / 2);
+  ctx.font = "400 16px Geist Mono, ui-monospace, monospace";
+  let lines = [why];
+  let size = 16;
+  if (ctx.measureText(why).width > maxW) {
+    size = 14;
+    ctx.font = "400 14px Geist Mono, ui-monospace, monospace";
+    const parts = why.split(", ");
+    let line1 = parts[0];
+    let i = 1;
+    while (i < parts.length && ctx.measureText(`${line1}, ${parts[i]}`).width <= maxW) {
+      line1 = `${line1}, ${parts[i]}`;
+      i += 1;
+    }
+    const line2 = parts.slice(i).join(", ");
+    lines = line2 ? [line1, fitLine(ctx, line2, maxW)] : [fitLine(ctx, line1, maxW)];
+  }
+  if (lines.length === 1) ctx.fillText(lines[0], 14, (WHY_Y + CHOP_H) / 2);
+  else {
+    ctx.fillText(lines[0], 14, WHY_Y + 16);
+    ctx.fillText(lines[1], 14, WHY_Y + 36);
+  }
+  ui.debug.chopWhy = { why, lines, size, maxW };
   drawAgeGlyph(present(!!ageDrag, ageGlow));
   drawCurGlyph(present(!!curDrag, curGlow));
 }
@@ -282,7 +351,22 @@ function drawClar() {
 let chopDrag = null, ageDrag = null, curDrag = null, holdChop = 0;
 const ageGlow = { v: 0 }, curGlow = { v: 0 };
 function followSea() { if (typeof ui.clearChopOverride === "function") ui.clearChopOverride(); }
+const chopInfoBtn = document.createElement("button");
+chopInfoBtn.type = "button";
+chopInfoBtn.id = "chop-card-info";
+chopInfoBtn.textContent = "i";
+chopInfoBtn.title = "What the curves mean";
+chopInfoBtn.setAttribute("aria-label", "What the chop curves mean");
+chopInfoBtn.setAttribute("aria-expanded", "false");
+chop.el.appendChild(chopInfoBtn);
+chopInfoBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+chopInfoBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  e.preventDefault();
+  if (typeof ui.openChopNote === "function") ui.openChopNote(chopInfoBtn);
+});
 chop.el.addEventListener("pointerdown", (e) => {
+  if (e.target === chopInfoBtn) return;
   e.stopPropagation();
   e.preventDefault();
   chop.el.focus({ preventScroll: true });
@@ -405,19 +489,18 @@ ui.slider("Choppiness", () => [Number(ui.inputs.chop.value), Number(ui.inputs.ch
   return true;
 });
 ui.register({
-  layer: "tod",
-  draw(a) {
-    const on = a > 0.5 && !ui.clean;
+  draw() {
+    const on = !ui.clean;
     if (!on) { chopDrag = null; ageDrag = null; curDrag = null; clarDrag = false; }
     chop.el.classList.toggle("on", on);
     ageInst.el.classList.toggle("on", on);
     curInst.el.classList.toggle("on", on);
     clar.el.classList.toggle("on", on);
+    if (!on) return;
     drawChop();
     drawClar();
   },
   hide() {
-    chop.el.classList.remove("on"); ageInst.el.classList.remove("on"); curInst.el.classList.remove("on"); clar.el.classList.remove("on");
     chopDrag = null; ageDrag = null; curDrag = null; clarDrag = false;
   },
 });

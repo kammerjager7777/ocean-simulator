@@ -3,8 +3,9 @@
 // filled, the wave profile (256 samples, async GPU readback, 1 frame late, no smoothing) runs along its
 // top at true scale, the still-water line is dashed, the bed follows the seabed relief, and breaking
 // spans (physics break flags only) are marked.
-import { ui } from "./core.js?v=32.10";
-import { bedY } from "../../render/seabed.js?v=30.29";
+import { ui } from "./core.js?v=32.61";
+import { bedY } from "../../render/seabed.js?v=30.30";
+import { sandbarBed, useIslandSize } from "../../physics/island.js?v=32.85";
 const T = ui.theme;
 const sec = (() => { try { const j = JSON.parse(ui.store.get("ocean.ui.section", "")); if (Array.isArray(j) && j.length === 4 && j.every(Number.isFinite)) { if (j.some((v) => Math.abs(v) > 0.5001)) { const q = j.map((v) => v / 250); const a = toPerimeter(q[0], q[1]), b = toPerimeter(q[2], q[3]); return [...a, ...b]; } return j; } } catch { /* default */ } return [-0.4, 0.5, 0.5, -0.3]; })(); // fractions of S (resize-proof)
 const save = () => ui.store.set("ocean.ui.section", JSON.stringify(sec.map((v) => Math.round(v * 1000) / 1000)));
@@ -34,10 +35,11 @@ const wall = ui.register({
   up() { save(); },
   draw(a) {
     const ctx = ui.ctx, S = ui.S(), D = ui.D();
+    const bedAt = (x, z) => ui.P.get("island") === "1" ? sandbarBed(x, z, D, useIslandSize(S)) : bedY(x, z, S, D);
     const x0 = sec[0] * S, z0 = sec[1] * S, x1 = sec[2] * S, z1 = sec[3] * S;
     const top = [], bed = [], still = [];
     for (let i = 0; i < 256; i += 2) { const t = i / 255, x = x0 + (x1 - x0) * t, z = z0 + (z1 - z0) * t;
-      const pt = ui.proj(x, have ? prof[i] : 0, z), pb = ui.proj(x, bedY(x, z, S, D), z), ps = ui.proj(x, 0, z); if (!pt || !pb || !ps) { g.a = null; return; } top.push(pt); bed.push(pb); still.push(ps); }
+      const pt = ui.proj(x, have ? prof[i] : 0, z), pb = ui.proj(x, bedAt(x, z), z), ps = ui.proj(x, 0, z); if (!pt || !pb || !ps) { g.a = null; return; } top.push(pt); bed.push(pb); still.push(ps); }
     const st = ui.state(wall); const act = st !== "idle", la = act ? 1 : 0.35;
     const poly = [...top, ...bed.slice().reverse()]; g.poly = poly;
     // idle coverage <= 4% of the frame (§5.7): if the wall is bigger, idle draws only the profile and bed lines
@@ -68,7 +70,7 @@ const wall = ui.register({
         const x = x0 + (x1 - x0) * u, z = z0 + (z1 - z0) * u;
         const s = u * 255, i0 = Math.min(254, Math.max(0, Math.floor(s))), f = s - i0;
         const hgt = prof[i0] * (1 - f) + prof[i0 + 1] * f;
-        const pt = ui.proj(x, hgt, z), pb = ui.proj(x, bedY(x, z, S, D), z);
+        const pt = ui.proj(x, hgt, z), pb = ui.proj(x, bedAt(x, z), z);
         if (pt && pb) {
           T.line(ctx, [pt, pb], { color: T.white, width: 1 });
           cur.set(`<span class="plate"><span class="n3 tx">${hgt >= 0 ? "+" : "−"}${Math.abs(hgt).toFixed(2)}</span><span class="l2 tx"> m</span></span>`).place(pt[0] + 8, pt[1] - 22);

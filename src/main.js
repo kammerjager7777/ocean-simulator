@@ -1,23 +1,40 @@
 import { GRAVITY_NOTE } from "./physics/gravity.js";
-import { scenario } from "./physics/scenario.js?v=32.10";
+import { scenario } from "./physics/scenario.js?v=33.11";
 import { createWind } from "./physics/wind.js";
-import { createSurface } from "./physics/surface.js?v=32.10";
-import { createView } from "./render/view.js?v=31.9";
-import { seaSteepness, whySteepness } from "./physics/steepness.js?v=32.10";
-import { ui } from "./ui/v23/core.js?v=32.10";
-import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=32.10";
-import { createBoat } from "./physics/boat.js?v=30.22";
+import { createSurface } from "./physics/surface.js?v=30.22";
+import { createView } from "./render/view.js?v=33.70";
+import { createIslandGpu } from "./physics/islandGpu.js?v=32.92";
+import { useIslandSize, stockdonR2 } from "./physics/island.js?v=32.85";
+import { parseShare, applyShareToInputs, islandRedirect } from "./ui/v23/share.js?v=32.32";
+import { sunVector } from "./ui/v23/sky.js?v=32.35";
+import { seaSteepness, whySteepness } from "./physics/steepness.js?v=32.40";
+import { ui } from "./ui/v23/core.js?v=32.61";
+import { createGpuSurface, gpuPhysicsProblem } from "./physics/gpuSurface.js?v=33.11";
+import { createBoat } from "./physics/boat.js?v=32.85";
 import { createPerf } from "./perf.js?v=30.22";
 import { rippleHeight, prune as pruneRipples } from "./physics/ripples.js?v=30.29";
 
 // ?chopSpectrum=pm (or =elfouhaily) picks the chop band's spectrum for A/B comparison.
 // It only changes that band's scenario setting; nothing else reads it.
+if (typeof location !== "undefined") {
+  const next = islandRedirect(location.href);
+  if (next && next !== location.href) location.replace(next);
+}
+const shareBoot = typeof location !== "undefined" ? parseShare(location.search) : null;
 const chopSpectrum = typeof location !== "undefined" ? new URLSearchParams(location.search).get("chopSpectrum") : null;
 if (chopSpectrum === "pm" || chopSpectrum === "elfouhaily") {
   for (const band of scenario.bands) if (band.id === "chop") band.spectrum = chopSpectrum;
 }
 const params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
 const wind = createWind({ direction: Math.PI / 2, speed: 12, gust: "continuous" });
+globalThis.__waves = shareBoot && shareBoot.waves === "hybrid" ? "hybrid" : "spectral";
+if (shareBoot) {
+  applyShareToInputs(shareBoot);
+  wind.speed = shareBoot.wind;
+  wind.direction = (shareBoot.dir * Math.PI) / 180;
+  scenario.size = shareBoot.size;
+  scenario.seaAge = shareBoot.age;
+}
 // ?fixtest=1: developer fixture only. The first step is already flat (no wind-12 startup).
 const FIXTEST = typeof location !== "undefined" && new URLSearchParams(location.search).get("fixtest") === "1";
 if (FIXTEST) { wind.speed = 0; scenario.choppiness = 0; }
@@ -98,7 +115,7 @@ depthInput.addEventListener("input", () => {
 });
 const ageInput = document.querySelector("#age");
 const curInput = document.querySelector("#cur");
-let chopOverride = params.has("chop");
+let chopOverride = params.has("chop") || !!(shareBoot && shareBoot.override);
 function setCurrentAlong(signed) {
   scenario.current = Math.abs(signed);
   scenario.currentDir = wind.direction + (signed < 0 ? Math.PI : 0);
@@ -159,6 +176,20 @@ const MAX_BACKLOG = Number(params.get("maxbacklog") || 6);
 const noDraw = params.get("nodraw") === "1";
 // ?fixdt=<s> (headless measurement): fixed physics step, so sim time hits exact sample times
 const fixDt = Number(params.get("fixdt") || 0);
+// ?island=1 only. The shallow-water island is not built otherwise, and the
+// sea shader keeps uIsland at 0 so the open ocean is the V31.9 surface.
+function islandGlProblem(gl) {
+  if (!gl) return "no WebGL2 context";
+  if (typeof WebGL2RenderingContext === "undefined" || !(gl instanceof WebGL2RenderingContext)) return "not WebGL2";
+  if (!gl.getExtension("EXT_color_buffer_float")) return "no float color buffer";
+  return "";
+}
+const islandOn = params.get("island") === "1";
+let islandGpu = null;
+if (islandOn && view.gl && !islandGlProblem(view.gl)) {
+  try { islandGpu = createIslandGpu(view.gl, scenario.depth, scenario.size); }
+  catch (err) { console.error(err); }
+}
 function frame(now) {
   // Next frame first: an exception in this one must not stop the loop (v27.1; a stopped
   // loop is why a ?perf=1 run could end without its __perf line).
@@ -200,10 +231,82 @@ function frame(now) {
     if (pdat && !rippled.has(pdat) && pts0) { rippled.add(pdat); for (let k = 0; k < 16; k++) pdat[k * 4] += rippleHeight(pts0[k * 2], pts0[k * 2 + 1], simTime); }
     if (!pause.checked) pruneRipples(simTime);
     if (on && !held && !pause.checked) boat.step(dt, state.probe && state.probe.data, wind);
+    if (islandOn) useIslandSize(scenario.size);
+    boat.place(scenario.size, depth, islandOn);
     pts0 = on ? boat.probePoints() : null;
     surface.setProbe(on ? boat.probePoints() : null);
     state.boat = on ? boat : null;
     state.clarity = clarityIn ? Number(clarityIn.value) : 22.3024; // Secchi depth, m
+  }
+  if (islandGpu && state) {
+    if (islandGpu.sync) islandGpu.sync(depth, scenario.size);
+    const todMin = globalThis.__oceanTodMin;
+    // Geometric sun by day. At night that vector is below the horizon and the
+    // bake would flatten the island, so the moon (opposite the sun) casts it.
+    let sun = Number.isFinite(todMin) ? sunVector(todMin) : globalThis.__oceanSun;
+    if (sun && sun[1] <= 0.03 && Number.isFinite(todMin)) sun = sunVector(todMin + 720);
+    if (sun) globalThis.__oceanShadeSun = sun;
+    if (sun) {
+      const prev = islandGpu._sun;
+      if (!prev || Math.hypot(sun[0] - prev[0], sun[1] - prev[1], sun[2] - prev[2]) > 0.05) {
+        islandGpu.updateShadow(sun);
+        islandGpu._sun = [sun[0], sun[1], sun[2]];
+      }
+    }
+    if (state.gpu && state.gpu.A && !held && !pause.checked) {
+      // Advance the same simulation step as the sea, in CFL-stable pieces.
+      // At h ≈ 8 m, c ≈ 12 m/s and dx ≈ 0.89 m, a 0.03 s step is the limit.
+      // A 60 fps frame needs one; a long capture frame (dt capped at 0.05 s) needs two.
+      const seaDt = fixDt > 0 ? fixDt : Math.min(0.05, dt);
+      const cMax = Math.sqrt(9.81 * 8) + 3;
+      const dtCfl = 0.4 * islandGpu.dx / cMax;
+      const nCfl = Math.max(1, Math.ceil(seaDt / Math.max(dtCfl, 1e-4)));
+      const asked = Number(params.get("swashsteps"));
+      const nSub = Number.isFinite(asked) && asked > 0 ? Math.max(nCfl, Math.round(asked)) : nCfl;
+      const sub = seaDt / nSub;
+      globalThis.__swashCfl = { seaDt, dtCfl, nSub, sub, dx: islandGpu.dx };
+      const dir = state.fx ? state.fx.dir : Math.PI / 2;
+      let hsNow = 0;
+      if (state.bands) for (const band of state.bands) hsNow += (band.significantHeight || 0) ** 2;
+      hsNow = Math.sqrt(hsNow) || 0.4;
+      let tp = 5;
+      const wb = scenario.bands.find((b) => b.id === "wind-sea");
+      if (wb) tp = 6.2831853 / ((wb.omegaMin + wb.omegaMax) * 0.5);
+      tp *= 0.75 + (Number(scenario.seaAge) || 0);
+      for (let s = 0; s < nSub; s += 1) islandGpu.step(sub, state.gpu.A, state.gpu.fft.L, Math.cos(dir), Math.sin(dir), state.fx ? state.fx.speed : 12, hsNow, tp);
+    }
+    let hs = 0;
+    if (state.bands) for (const band of state.bands) hs += (band.significantHeight || 0) ** 2;
+    hs = Math.sqrt(hs);
+    const shore = islandGpu.profile || useIslandSize(scenario.size);
+    let tpR = 5;
+    const wR = scenario.bands.find((b) => b.id === "wind-sea");
+    if (wR) tpR = 6.2831853 / ((wR.omegaMin + wR.omegaMax) * 0.5);
+    tpR *= 0.75 + (Number(scenario.seaAge) || 0);
+    const r2 = stockdonR2(hs || 0.4, tpR, shore.faceSlope);
+    globalThis.__swashCap = { r2, hs, tp: tpR, dx: islandGpu.dx, n: islandGpu.nx, slope: shore.faceSlope };
+    state.island = {
+      on: 1, tex: islandGpu.texture(),
+      cx: shore.cx, cz: shore.cz,
+      ox: shore.mapOriginX, oz: shore.mapOriginZ,
+      mapSpan: shore.mapSpan, mapN: shore.mapN, atlasH: islandGpu.atlasH || (shore.mapN + islandGpu.ny), atlasW: islandGpu.atlasW || shore.mapN, r2,
+      dLo: shore.dLo, dHi: shore.dHi,
+      sweN: islandGpu.nx, sweSpan: shore.span,
+      sweOx: shore.cx - shore.span / 2, sweOz: shore.cz - shore.span / 2,
+      hs,
+      Rbeach: shore.Rbeach, Rbank: shore.Rbank, peak: shore.peak,
+    };
+    globalThis.__islandGpu = islandGpu;
+    if (params.get("shore") === "1" && (!islandGpu._mt || performance.now() > islandGpu._mt)) {
+      islandGpu._mt = performance.now() + 2500;
+      const g = state.gpu;
+      if (g && g.A && g.fft) {
+        try {
+          const m = islandGpu.measures(g.A, g.fft.L, g.fft.N, Math.cos(state.fx ? state.fx.dir : 0), Math.sin(state.fx ? state.fx.dir : 0));
+          globalThis.__shore = { runup: m.runup, inland: m.inland, wetMax: m.wetMax, hs, t: simTime, dx: islandGpu.dx, n: islandGpu.nx, az: m.az, leeInlandM: m.leeInlandM, windwardInlandM: m.windwardInlandM };
+        } catch (err) { console.error(err); }
+      }
+    }
   }
   if (!noDraw || pause.checked || (capT && capT.length && simTime >= capT[0] - 1e-6)) view.draw(state, flags.checked);
   const fine = state.chopPatch && state.chopPatch.modes

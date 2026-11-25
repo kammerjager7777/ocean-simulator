@@ -2,12 +2,15 @@
 // The hull, cabin, mast and rigging are rigid. Only sail vertices (sail.x > 0) move, in
 // the vertex shader, from the apparent wind. The buoy mesh does not set that attribute.
 // Float, drift and yaw stay in physics/boat.js.
+import { lightSampleGlsl } from "./light.js?v=33.44";
+import { assertFragmentSamplers } from "./samplerBudget.js?v=33.17";
 const VS = `#version 300 es
-in vec3 pos; in vec3 nrm; in vec3 col; in vec3 sail;
+layout(location=0) in vec3 pos;
+in vec3 nrm; in vec3 col; in vec3 sail;
 uniform mat4 vp; uniform mat4 model;
 uniform vec4 uSail; // cross m/s (+starboard), apparent speed, fill 0..1, camber metres
 uniform float uSailT; uniform float uFlap;
-out vec3 vN; out vec3 vC;
+out vec3 vN; out vec3 vC; out vec3 vW;
 void main() {
   vec3 p = pos; vec3 n = nrm;
   if (sail.x > 0.5) {
@@ -26,14 +29,49 @@ void main() {
     n.z += lee * camber * 3.14159265 * cos(3.14159265 * u) * 0.35;
     n = normalize(n);
   }
-  vN = mat3(model) * n; vC = col; gl_Position = vp * model * vec4(p, 1.0);
+  vec4 w = model * vec4(p, 1.0);
+  vW = w.xyz; vN = mat3(model) * n; vC = col; gl_Position = vp * w;
 }`;
 const FS = `#version 300 es
 precision highp float;
-in vec3 vN; in vec3 vC; uniform vec3 lightDir; out vec4 o;
-void main() { vec3 n = normalize(vN); float d = max(dot(n, normalize(lightDir)), 0.0);
-  float sky = 0.5 + 0.5 * n.y; vec3 c = vC * (0.32 * sky + 0.78 * d);
-  o = vec4(pow(c, vec3(1.0 / 2.2)), 1.0); }`;
+in vec3 vN; in vec3 vC; in vec3 vW;
+uniform vec3 lightDir;
+${lightSampleGlsl()}
+uniform mat4 uShVP;
+uniform float uCausDay;
+uniform float uCausDeep;
+uniform float uSeaL;
+uniform vec2 uCaustO;
+uniform float uCaustTile;
+uniform float uClarK;
+out vec4 o;
+void main() {
+  vec3 n = normalize(vN);
+  float d = max(dot(n, normalize(lightDir)), 0.0);
+  float sky = 0.5 + 0.5 * n.y;
+  vec3 c = vC * (0.32 * sky + 0.78 * d);
+  float sh = 1.0;
+  vec4 lp = uShVP * vec4(vW, 1.0);
+  vec3 sp = lp.xyz / max(lp.w, 1e-4) * 0.5 + 0.5;
+  if (sp.x > 0.0 && sp.x < 1.0 && sp.y > 0.0 && sp.y < 1.0 && uCausDay > 0.01) {
+    float caster = lightSh(sp.xy);
+    float blocked = sp.z > caster + 0.015 ? 1.0 : 0.0;
+    float fill = 1.0 - exp(-max(0.0, -vW.y) * 0.11);
+    sh = mix(1.0 - blocked, 1.0, vW.y < 0.0 ? clamp(fill, 0.0, 0.7) : 0.0);
+  }
+  if (vW.y < -0.05 && uCausDay > 0.01) {
+    float col = max(0.05, -vW.y);
+    vec2 uv = (vW.xz - uCaustO) / max(uCaustTile, 1.0);
+    float cau = lightCau(uv) * cauEdge(uv);
+    float clar = max(uClarK, 0.35);
+    float k = exp(-col * clar / 5.0) * uCausDay * cau * sh;
+    c += c * vec3(1.02, 0.94, 0.78) * k * 0.8;
+    c *= mix(0.5, 1.0, sh);
+  } else if (vW.y < 0.4) {
+    c *= mix(0.72, 1.0, sh);
+  }
+  o = vec4(pow(max(c, 0.0), vec3(1.0 / 2.2)), 1.0);
+}`;
 const smooth01 = (x) => { const t = Math.min(1, Math.max(0, x)); return t * t * (3 - 2 * t); };
 // Apparent wind in the boat frame. fill is 0 head-to-wind and in a calm, and rises once
 // the wind is far enough off the bow to hold a sail. camber is the billow in metres.
@@ -164,6 +202,8 @@ export function createBuoyView(gl) { return createBoatView(gl, buildBuoyMesh); }
 export function createBoatView(gl, build = buildMesh) {
   const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error("boat shader: " + gl.getShaderInfoLog(o)); return o; };
   const prog = gl.createProgram(); gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "boat link failed");
+  assertFragmentSamplers(gl, prog, FS, "boat");
   const m = build(); const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
   [["pos", m.P], ["nrm", m.N], ["col", m.C]].forEach(([n, d]) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, d, gl.STATIC_DRAW);
     const l = gl.getAttribLocation(prog, n); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, 3, gl.FLOAT, false, 0, 0); });
@@ -172,7 +212,7 @@ export function createBoatView(gl, build = buildMesh) {
     const l = gl.getAttribLocation(prog, "sail"); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, 3, gl.FLOAT, false, 0, 0);
   }
   gl.bindVertexArray(null);
-  const U = { vp: gl.getUniformLocation(prog, "vp"), model: gl.getUniformLocation(prog, "model"), lightDir: gl.getUniformLocation(prog, "lightDir"), sail: gl.getUniformLocation(prog, "uSail"), sailT: gl.getUniformLocation(prog, "uSailT"), flap: gl.getUniformLocation(prog, "uFlap") };
+  const U = { vp: gl.getUniformLocation(prog, "vp"), model: gl.getUniformLocation(prog, "model"), lightDir: gl.getUniformLocation(prog, "lightDir"), sail: gl.getUniformLocation(prog, "uSail"), sailT: gl.getUniformLocation(prog, "uSailT"), flap: gl.getUniformLocation(prog, "uFlap"), light: gl.getUniformLocation(prog, "uLight"), shVP: gl.getUniformLocation(prog, "uShVP"), day: gl.getUniformLocation(prog, "uCausDay"), seaL: gl.getUniformLocation(prog, "uSeaL"), caustO: gl.getUniformLocation(prog, "uCaustO"), caustTile: gl.getUniformLocation(prog, "uCaustTile"), clar: gl.getUniformLocation(prog, "uClarK") };
   const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   return { draw(boat, vp, sun, fx) {
     const pose = sailPose(boat, fx);
@@ -181,7 +221,27 @@ export function createBoatView(gl, build = buildMesh) {
     if (U.sail) gl.uniform4f(U.sail, pose.cross, pose.aw, pose.fill, pose.camber);
     if (U.sailT) gl.uniform1f(U.sailT, pose.t);
     if (U.flap) gl.uniform1f(U.flap, reduce ? 0 : 1);
+    const light = globalThis.__lightMaps;
+    if (light && U.light) {
+      gl.activeTexture(gl.TEXTURE20); gl.bindTexture(gl.TEXTURE_2D, light.tex);
+      gl.uniform1i(U.light, 20);
+      gl.uniformMatrix4fv(U.shVP, false, light.info.vp);
+      gl.uniform1f(U.day, light.info.day);
+      gl.uniform1f(U.seaL, light.info.seaL);
+      if (U.caustO) gl.uniform2f(U.caustO, light.info.origin[0], light.info.origin[1]);
+      if (U.caustTile) gl.uniform1f(U.caustTile, light.info.tile);
+      gl.uniform1f(U.clar, light.clar || 1);
+      gl.activeTexture(gl.TEXTURE0);
+    }
     gl.drawArrays(gl.TRIANGLES, 0, m.count); gl.bindVertexArray(null);
     if (m.S && boat && Number.isFinite(boat.yaw)) globalThis.__oceanSail = { ...pose, yaw: boat.yaw, flap: reduce ? 0 : 1 };
+  },
+  castShadow(prog, mvpLoc, mvp) {
+    gl.useProgram(prog);
+    gl.bindVertexArray(vao);
+    gl.uniformMatrix4fv(mvpLoc, false, mvp);
+    gl.drawArrays(gl.TRIANGLES, 0, m.count);
+    gl.bindVertexArray(null);
   } };
 }
+export { FS as BOAT_FS };

@@ -1,7 +1,7 @@
 // Wind. A compass ring circles the ocean in world bearings: 0 is +X and is
 // labeled N, 90 is +Z and is labeled E, matching the sea's (cos θ, sin θ) wind.
 // Dragging the ring sets direction only. The fixed card sets speed only.
-import { ui } from "./core.js?v=32.10";
+import { ui } from "./core.js?v=32.61";
 import { skyAt } from "./sky.js?v=30.29";
 import { sample, release, cancel, velocity } from "./coast.js?v=30.29";
 const LO = [0, .3, 1.6, 3.4, 5.5, 8, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7, 36.9];
@@ -396,15 +396,14 @@ const ring = ui.register({
   },
   cursor: () => "grab",
   draw(a) {
-    const on = a > 0.5 && !ui.clean;
-    if (!on) { spdDrag = null; ringDrag = false; cancel("dir"); cancel("spd"); }
-    el.classList.toggle("on", on);
-    if (!on) return;
+    const live = a > 0.5 && !ui.clean;
+    el.classList.toggle("on", !ui.clean);
+    if (!live) { spdDrag = null; ringDrag = false; cancel("dir"); cancel("spd"); return; }
     drawCard();
     const pose = ringDrag ? "drag" : (ui.hover && ui.hover.obj === ring) ? "hover" : "idle";
     drawRing(pose);
   },
-  hide() { el.classList.remove("on"); spdDrag = null; ringDrag = false; cancel("dir"); cancel("spd"); },
+  hide() { spdDrag = null; ringDrag = false; cancel("dir"); cancel("spd"); },
 });
 ui.debug.windHit = (x, y) => ring.hit(x, y);
 void ring;

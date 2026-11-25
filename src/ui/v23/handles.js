@@ -1,10 +1,11 @@
 // Measurement handles. Chop is only the wave glyph: dragging that stroke changes choppiness live.
 // Clarity and depth stay on the two different corners arrange() assigned.
-import { ui } from "./core.js?v=32.10";
-import { arrange } from "./controls.js?v=30.29";
-import { textRow, inside, seaHides, showM } from "./geometry.js?v=30.29";
+import { ui } from "./core.js?v=32.61";
+import { arrange } from "./controls.js?v=32.61";
+import { textRow, inside, seaHides, showM } from "./geometry.js?v=32.61";
 import { cancel } from "./coast.js?v=30.29";
-import { bedY } from "../../render/seabed.js?v=30.29";
+import { bedY } from "../../render/seabed.js?v=30.30";
+import { sandbarBed, useIslandSize } from "../../physics/island.js?v=32.85";
 import { rippleHeight } from "../../physics/ripples.js?v=30.29";
 const num = (k) => Number(ui.inputs[k].value), clamp = (v) => Math.min(1, Math.max(0, v)), T = ui.theme;
 export const zsdBand = (z) => z < 6 ? "Murky" : z < 15 ? "Coastal" : z < 30 ? "Open ocean" : "Clear tropical";
@@ -158,6 +159,7 @@ function domainEdges() {
   if (edgeCache && edgeFrame === ui.now) return edgeCache;
   edgeFrame = ui.now;
   const S = ui.S(), D = ui.D(), h = S / 2;
+  const bedAt = (x, z) => ui.P.get("island") === "1" ? sandbarBed(x, z, D, useIslandSize(S)) : bedY(x, z, S, D);
   const st = globalThis.__oceanState;
   const pd = st && st.probe && st.probe.data;
   const have = pd && pd.length >= PROBE_EDGE * 4 + 4 * EDGE_N;
@@ -166,7 +168,7 @@ function domainEdges() {
     let y = 0;
     if (have) y = pd[PROBE_EDGE * 4 + edge * EDGE_N + i];
     y += rippleHeight(x, z, t);
-    return Math.max(y, bedY(x, z, S, D) + 0.05);
+    return Math.max(y, bedAt(x, z) + 0.05);
   };
   const place = (edge, i) => {
     const u = i / (EDGE_N - 1);
@@ -184,7 +186,7 @@ function domainEdges() {
   const corners = [[0, 0, -1, 1], [0, EDGE_N - 1, 1, 1], [1, 0, 1, -1], [1, EDGE_N - 1, -1, -1]]
     .map(([edge, i, sx, sz]) => ({ ...pick(edge, i), sx, sz }));
   const verts = corners.map((c) => {
-    const bed = bedY(c.x, c.z, S, D);
+    const bed = bedAt(c.x, c.z);
     const w = [c.x, bed, c.z];
     // The bed point sits inside the water column, so the hull test hides every
     // wall. If the surface corner is on screen, the wall under it is the one to drag.

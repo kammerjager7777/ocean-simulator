@@ -33,7 +33,7 @@
 // to a transform (Hermitian spectra), one-sided fields one to a transform.
 import { shoal } from "./band.js?v=30.22";
 import { timed } from "./passTimer.js?v=30.22";
-import { elfouhailyParams, spectrumFor, wavenumber } from "./spectrum.js?v=30.22";
+import { elfouhailyParams, spectrumFor, wavenumber } from "./spectrum.js?v=32.11";
 
 const TAU = Math.PI * 2;
 export const BAND_EDGE = 0.03; // soft band edges, +-3% of omega
@@ -151,7 +151,7 @@ void waveAt(ivec2 p, out float a, out float ac, out float ab, out vec2 khat, out
     off = atan(sin(off), cos(off));
     float dir = b1.w * (1.0 - smoothstep(b1.y - b1.z, b1.y + b1.z, abs(off)));
     if (dir <= 0.0) continue;
-    float s = b2.x > 0.5 ? elf(w, b) : pm(w, b0.x);
+    float s = b2.x > 0.5 ? elf(w, b) : pm(w, b0.x) * b2.z;
     float shared = win * wFft * cg * dir / k * uDk * uDk;
     e += s * shared;
     if (b == uChop) ec += s * shared;
@@ -384,7 +384,7 @@ export function bandSetup(bands, winds, depth, gravity, L, N) {
   return bands.map((band, i) => {
     const spec = band.spec;
     const w = winds[i];
-    const spectrum = band.spectrum || spectrumFor(spec, w.speed, gravity);
+    const spectrum = band.spectrum || spectrumFor(spec, w.speed, gravity, w.seaAge);
     const wp = spectrum.omegaPeak;
     const lo = spec.omegaMin * wp;
     let hi = spec.omegaMax * wp;
@@ -397,7 +397,7 @@ export function bandSetup(bands, winds, depth, gravity, L, N) {
       soft: Math.min(0.05, spec.spread / 4), invSpread: 1 / spec.spread,
       model: spectrum.model === "elfouhaily" ? 1 : 0,
       breakRule: spec.breakTest === false ? 0 : spec.breakTest === "pm" && spectrum.model !== "pm" ? 2 : 1,
-      longScale: spectrum.longScale || 1, on: w.speed >= 0.05 ? 1 : 0, p, spectrum, dk, kCut, omegaCut,
+      longScale: Number.isFinite(spectrum.longScale) ? spectrum.longScale : 1, on: w.speed >= 0.05 ? 1 : 0, p, spectrum, dk, kCut, omegaCut,
     };
   });
 }
